@@ -36,7 +36,7 @@ QLabel#headerSubtitle {
 /* Logo Container */
 QFrame#logoContainer {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                stop:0 #2563eb, stop:1 #1d4ed8);
+                                stop:0 #34d399, stop:1 #10b981);
     border-radius: 12px;
     min-width: 48px;
     max-width: 48px;

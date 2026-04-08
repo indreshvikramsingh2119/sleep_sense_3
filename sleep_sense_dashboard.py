@@ -67,7 +67,7 @@ class PatientInfoWidget(QWidget):
         details_layout.setSpacing(10) # Adjusted spacing between info cards
         
         # Age/Gender Card
-        age_card = self.create_info_card("", "Age / Gender", "-- / ---", "infoCardBlue")
+        age_card = self.create_info_card("", "Age / Gender", "-- / ---", "light green")
         details_layout.addWidget(age_card)
         
         # Action Buttons (Save and Upload)
@@ -114,14 +114,14 @@ class PatientInfoWidget(QWidget):
         frame_layout.setSpacing(8)
 
         # Save Button
-        save_btn = QPushButton("💾 Save Data")
+        save_btn = QPushButton(" Save Data")
         save_btn.setObjectName("actionButton")
         save_btn.setMinimumHeight(36)
         save_btn.clicked.connect(self.save_data)
         frame_layout.addWidget(save_btn)
 
-        # Upload Button
-        upload_btn = QPushButton("📤 Upload Data")
+        # Upload Button 
+        upload_btn = QPushButton(" Upload Data")
         upload_btn.setObjectName("actionButton")
         upload_btn.setMinimumHeight(36)
         upload_btn.clicked.connect(self.upload_data)
@@ -232,7 +232,7 @@ class PatientInfoWidget(QWidget):
         avatar_label.setStyleSheet("""
             QLabel {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                            stop:0 #2563eb, stop:1 #1d4ed8);
+                                            stop:0 #34d399, stop:1 #10b981);
                 color: white;
                 font-size: 28px;
                 font-weight: bold;
@@ -536,7 +536,7 @@ class SleepMonitorChart(QWidget):#
         time_layout = QHBoxLayout(time_overlay)
         time_layout.setContentsMargins(16, 8, 16, 8)
         
-        self.start_time_label = QLabel("Start: 22:04:00")
+        self.start_time_label = QLabel("Start: ----")
         self.start_time_label.setObjectName("timeLabelStart")
         time_layout.addWidget(self.start_time_label)
         time_layout.addStretch()
@@ -878,7 +878,7 @@ class SleepMonitorChart(QWidget):#
         current_range = plot_widget.getViewBox().viewRange()
         y_min, y_max = current_range[1]
         
-        # Calculate center point
+        # Calculate center poi
         center = (y_min + y_max) / 2
         current_range_size = y_max - y_min
         
@@ -1048,7 +1048,7 @@ class SleepSenseDashboard(QMainWindow):
         live_label.setAlignment(Qt.AlignCenter)
         live_layout.addWidget(live_label)
         
-        live_time = QLabel("23:45:12")
+        live_time = QLabel("----")
         live_time.setObjectName("badgeValue")
         live_time.setAlignment(Qt.AlignCenter)
         live_layout.addWidget(live_time)
