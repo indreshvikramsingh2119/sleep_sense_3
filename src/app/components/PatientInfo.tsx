@@ -1,61 +1,56 @@
-import { User, Calendar, Heart, Moon, Upload, Download, FileText, Activity, TrendingUp, Zap } from "lucide-react";
+import { User, Calendar, Heart, Moon, FileText, Activity, TrendingUp, Zap, Download } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { Button } from "./ui/button";
-import { useState } from "react";
+
+export type Patient = {
+  name: string;
+  age: number;
+  gender: string;
+  patientId: string;
+  lastVisit: string;
+  avgSleepHours: number;
+  sleepQuality: string;
+};
+
+export type RawDataEntry = {
+  id: string;
+  timestamp: string; // ISO string
+  fileName: string;
+  content: string; // raw file content (json string)
+};
 
 interface PatientInfoProps {
-  patient: {
-    name: string;
-    age: number;
-    gender: string;
-    patientId: string;
-    lastVisit: string;
-    avgSleepHours: number;
-    sleepQuality: string;
-  };
+  patient: Patient;
+  rawDataFiles: RawDataEntry[];
 }
 
-export function PatientInfo({ patient }: PatientInfoProps) {
-  const [uploadedFiles, setUploadedFiles] = useState<string[]>([
-    "sleep_data_2026-04-01.csv",
-    "sleep_data_2026-04-02.csv",
-    "sleep_data_2026-04-03.csv",
-  ]);
+export function PatientInfo({ patient, rawDataFiles }: PatientInfoProps) {
+  const handleDownloadRawData = (entry: RawDataEntry) => {
+    const blob = new Blob([entry.content], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
 
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (files) {
-      const newFiles = Array.from(files).map(file => file.name);
-      setUploadedFiles([...uploadedFiles, ...newFiles]);
-    }
-  };
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = entry.fileName;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 
-  const handleDownload = (filename: string) => {
-    const element = document.createElement('a');
-    element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent('Mock sleep data for ' + filename));
-    element.setAttribute('download', filename);
-    element.style.display = 'none';
-    document.body.appendChild(element);
-    element.click();
-    document.body.removeChild(element);
+    // Revoke after the click to free memory.
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   };
 
   return (
     <div className="h-full flex flex-col">
       <Tabs defaultValue="info" className="h-full flex flex-col">
-        <TabsList className="grid w-full grid-cols-2 mb-4 bg-gray-100 p-1 rounded-xl border border-gray-200">
+        <TabsList className="grid w-full grid-cols-1 mb-4 bg-gray-100 p-1 rounded-xl border border-gray-200">
           <TabsTrigger 
             value="info" 
             className="rounded-lg data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:shadow-sm text-gray-600 font-medium"
           >
             Patient Info
-          </TabsTrigger>
-          <TabsTrigger 
-            value="data"
-            className="rounded-lg data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:shadow-sm text-gray-600 font-medium"
-          >
-            Raw Data
           </TabsTrigger>
         </TabsList>
 
@@ -131,6 +126,54 @@ export function PatientInfo({ patient }: PatientInfoProps) {
               </div>
             </div>
 
+            {/* Inline Raw Data Files */}
+            <div className="pt-4 border-t border-gray-200 space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
+                  <FileText className="w-4 h-4 text-blue-600" />
+                  Raw data file
+                </h3>
+                <span className="text-xs text-blue-600 font-medium">
+                  {rawDataFiles.length}
+                </span>
+              </div>
+
+              {rawDataFiles.length === 0 ? (
+                <p className="text-xs text-gray-500">
+                  Press <span className="font-semibold">Save</span> to generate raw data with a timestamp.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {rawDataFiles.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className="flex items-start justify-between gap-3 p-3 bg-gray-50 rounded-xl border border-gray-200 hover:bg-blue-50 transition-all"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-[11px] text-gray-600 font-medium">Saved raw data</p>
+                        <p className="text-xs text-gray-900 font-semibold truncate" title={entry.fileName}>
+                          {entry.fileName}
+                        </p>
+                        <p className="text-[11px] text-gray-500 mt-1">
+                          {new Date(entry.timestamp).toLocaleString()}
+                        </p>
+                      </div>
+
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleDownloadRawData(entry)}
+                        className="text-blue-600 hover:bg-blue-50 shrink-0"
+                      >
+                        <Download className="w-3 h-3 mr-1" />
+                        Download
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Stats Cards */}
             <div className="pt-4 border-t border-gray-200">
               <div className="flex items-center justify-between mb-3">
@@ -158,96 +201,6 @@ export function PatientInfo({ patient }: PatientInfoProps) {
                   <p className="text-xl font-bold text-emerald-900">87<span className="text-xs text-emerald-600">%</span></p>
                 </div>
               </div>
-            </div>
-          </div>
-        </TabsContent>
-
-        <TabsContent value="data" className="flex-1 overflow-auto mt-0">
-          <div className="h-full flex flex-col space-y-4">
-            {/* Upload Area */}
-            <div className="relative group">
-              <div className="border-2 border-dashed border-gray-300 rounded-xl p-6 text-center bg-gray-50 hover:bg-blue-50 hover:border-blue-400 transition-all">
-                <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-md">
-                  <Upload className="w-6 h-6 text-white" />
-                </div>
-                <p className="text-sm font-semibold text-gray-900 mb-1">Import Raw Data</p>
-                <p className="text-xs text-gray-600 mb-4">
-                  Upload CSV, EDF, or TXT files
-                </p>
-                <label htmlFor="file-upload">
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    asChild
-                    className="bg-blue-600 text-white border-blue-600 hover:bg-blue-700 hover:border-blue-700"
-                  >
-                    <span className="cursor-pointer">
-                      <Upload className="w-3 h-3 mr-2" />
-                      Choose Files
-                    </span>
-                  </Button>
-                </label>
-                <input
-                  id="file-upload"
-                  type="file"
-                  multiple
-                  accept=".csv,.edf,.txt"
-                  className="hidden"
-                  onChange={handleFileUpload}
-                />
-              </div>
-            </div>
-
-            {/* File List */}
-            <div className="flex-1 overflow-auto">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold text-gray-900 text-sm">
-                  Uploaded Files <span className="text-blue-600">({uploadedFiles.length})</span>
-                </h3>
-                <Button 
-                  variant="ghost" 
-                  size="sm"
-                  onClick={() => uploadedFiles.forEach(file => handleDownload(file))}
-                  className="text-blue-600 hover:bg-blue-50"
-                >
-                  <Download className="w-3 h-3 mr-1" />
-                  All
-                </Button>
-              </div>
-              <div className="space-y-2">
-                {uploadedFiles.map((file, index) => (
-                  <div 
-                    key={index}
-                    className="group flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-200 hover:bg-blue-50 hover:border-blue-300 transition-all hover:shadow-sm"
-                  >
-                    <div className="flex items-center gap-3 min-w-0 flex-1">
-                      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shrink-0 shadow-sm">
-                        <FileText className="w-4 h-4 text-white" />
-                      </div>
-                      <span className="text-xs text-gray-700 truncate font-medium">{file}</span>
-                    </div>
-                    <Button 
-                      variant="ghost" 
-                      size="sm" 
-                      className="h-7 w-7 p-0 shrink-0 text-blue-600 hover:bg-blue-100 opacity-0 group-hover:opacity-100 transition-opacity"
-                      onClick={() => handleDownload(file)}
-                    >
-                      <Download className="w-3 h-3" />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Download All Button */}
-            <div className="pt-3 border-t border-gray-200">
-              <Button 
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white border-none shadow-md rounded-xl"
-                onClick={() => alert('Downloading all files as ZIP...')}
-              >
-                <Download className="w-4 h-4 mr-2" />
-                Download All as ZIP
-              </Button>
             </div>
           </div>
         </TabsContent>

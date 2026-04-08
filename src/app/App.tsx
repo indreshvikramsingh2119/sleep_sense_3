@@ -1,9 +1,10 @@
 import { Moon, Activity, Stethoscope } from "lucide-react";
-import { PatientInfo } from "./components/PatientInfo";
+import { useState } from "react";
+import { PatientInfo, type Patient, type RawDataEntry } from "./components/PatientInfo";
 import { SleepMonitorChart } from "./components/SleepMonitorChart";
 
 export default function App() {
-  const patient = {
+  const patient: Patient = {
     name: "Sarah Johnson",
     age: 34,
     gender: "Female",
@@ -11,6 +12,12 @@ export default function App() {
     lastVisit: "April 4, 2026",
     avgSleepHours: 7.2,
     sleepQuality: "Good",
+  };
+
+  const [rawDataFiles, setRawDataFiles] = useState<RawDataEntry[]>([]);
+
+  const handleRawDataSaved = (entry: RawDataEntry) => {
+    setRawDataFiles((prev) => [entry, ...prev]);
   };
 
   return (
@@ -54,12 +61,12 @@ export default function App() {
         <div className="h-full flex gap-6">
           {/* Left Side - Patient Info */}
           <div className="w-96 shrink-0 bg-white rounded-2xl border border-gray-200 shadow-lg p-6">
-            <PatientInfo patient={patient} />
+            <PatientInfo patient={patient} rawDataFiles={rawDataFiles} />
           </div>
 
           {/* Right Side - Monitor Chart */}
           <div className="flex-1 min-w-0 bg-white rounded-2xl border border-gray-200 shadow-lg overflow-hidden">
-            <SleepMonitorChart />
+            <SleepMonitorChart patient={patient} onRawDataSaved={handleRawDataSaved} />
           </div>
         </div>
       </main>

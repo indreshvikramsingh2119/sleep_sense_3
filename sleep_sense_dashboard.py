@@ -5,11 +5,13 @@ Professional Sleep Monitoring System
 
 import sys
 import os
+import json
+from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTabWidget, QFileDialog, QScrollArea,
     QFrame, QGridLayout, QComboBox, QListWidget, QListWidgetItem,
-    QSplitter, QSizePolicy
+    QSplitter, QSizePolicy, QMessageBox
 )
 from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon, QPixmap
@@ -22,66 +24,18 @@ class PatientInfoWidget(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.uploaded_files = [
-            "sleep_data_2026-04-01.csv",
-        ]
+        self.saved_raw_files = []  # list[dict]: {timestamp, path, filename}
+        self.monitor_chart = None  # Reference to main chart for save functionality
         self.init_ui()
         
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(12)
-        
-        # Tab Buttons Container
-        tabs_container = QWidget()
-        tabs_layout = QHBoxLayout(tabs_container)
-        tabs_layout.setContentsMargins(0, 0, 0, 0)
-        tabs_layout.setSpacing(8)
-        
-        self.btn_patient_info = QPushButton("Patient Info")
-        self.btn_patient_info.setObjectName("tabButtonActive")
-        self.btn_patient_info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        
-        self.btn_raw_data = QPushButton("Raw Data")
-        self.btn_raw_data.setObjectName("tabButtonInactive")
-        self.btn_raw_data.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        
-        tabs_layout.addWidget(self.btn_patient_info)
-        tabs_layout.addWidget(self.btn_raw_data)
-        main_layout.addWidget(tabs_container)
-        
-        # Stacked Widget for content
-        from PyQt5.QtWidgets import QStackedWidget
-        self.stack = QStackedWidget()
-        
-        # Patient Info Tab
+
+        # Single panel (Raw Data tab removed as requested)
         info_tab = self.create_info_tab()
-        self.stack.addWidget(info_tab)
-        
-        # Raw Data Tab
-        data_tab = self.create_data_tab()
-        self.stack.addWidget(data_tab)
-        
-        main_layout.addWidget(self.stack)
-        
-        # Connect signals
-        self.btn_patient_info.clicked.connect(lambda: self.switch_tab(0))
-        self.btn_raw_data.clicked.connect(lambda: self.switch_tab(1))
-        
-    def switch_tab(self, index):
-        self.stack.setCurrentIndex(index)
-        if index == 0:
-            self.btn_patient_info.setObjectName("tabButtonActive")
-            self.btn_raw_data.setObjectName("tabButtonInactive")
-        else:
-            self.btn_patient_info.setObjectName("tabButtonInactive")
-            self.btn_raw_data.setObjectName("tabButtonActive")
-        
-        # Force style update
-        self.btn_patient_info.style().unpolish(self.btn_patient_info)
-        self.btn_patient_info.style().polish(self.btn_patient_info)
-        self.btn_raw_data.style().unpolish(self.btn_raw_data)
-        self.btn_raw_data.style().polish(self.btn_raw_data)
+        main_layout.addWidget(info_tab)
         
     def create_info_tab(self):
         """Create patient information tab"""
@@ -116,23 +70,33 @@ class PatientInfoWidget(QWidget):
         age_card = self.create_info_card("", "Age / Gender", "-- / ---", "infoCardBlue")
         details_layout.addWidget(age_card)
         
+        # Action Buttons (Save and Upload)
+        action_buttons = self.create_action_buttons()
+        details_layout.addWidget(action_buttons)
+        
         # Last Visit Card
-        visit_card = self.create_info_card("", "Last Visit", "--", "infoCardIndigo")
-        details_layout.addWidget(visit_card)
+        #visit_card = self.create_info_card("", "Last Visit", "--", "infoCardIndigo")
+        #details_layout.addWidget(visit_card)
         
         # Sleep Duration Card
-        sleep_card = self.create_info_card("", "Avg Sleep Duration", "--", "infoCardPurple")
-        details_layout.addWidget(sleep_card)
+        #sleep_card = self.create_info_card("", "Avg Sleep Duration", "--", "infoCardPurple")
+        #details_layout.addWidget(sleep_card)
         
         # Sleep Quality Card
-        quality_card = self.create_info_card("", "Sleep Quality", "--", "infoCardGreen")
-        details_layout.addWidget(quality_card)
+        
+        #quality_card = self.create_info_card("", "Sleep Quality", "--", "infoCardGreen")
+        #details_layout.addWidget(quality_card)
         
         scroll_layout.addLayout(details_layout)
+
+        # Raw Data File Section (inline, under patient details)
+        raw_section = self.create_raw_data_section()
+        scroll_layout.addWidget(raw_section)
         
         # Weekly Summary Section
-        summary_section = self.create_summary_section()
-        scroll_layout.addWidget(summary_section)
+        # (Optional) enable this once the section is fully wired
+        ## summary_section = self.create_summary_section()
+        # scroll_layout.addWidget(summary_section)
         
         scroll_layout.addStretch()
         
@@ -140,6 +104,106 @@ class PatientInfoWidget(QWidget):
         layout.addWidget(scroll)
         
         return widget
+
+    def create_action_buttons(self):
+        """Create save and upload action buttons"""
+        frame = QFrame()
+        frame.setObjectName("actionButtonsSection")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.setSpacing(8)
+
+        # Save Button
+        save_btn = QPushButton("💾 Save Data")
+        save_btn.setObjectName("actionButton")
+        save_btn.setMinimumHeight(36)
+        save_btn.clicked.connect(self.save_data)
+        frame_layout.addWidget(save_btn)
+
+        # Upload Button
+        upload_btn = QPushButton("📤 Upload Data")
+        upload_btn.setObjectName("actionButton")
+        upload_btn.setMinimumHeight(36)
+        upload_btn.clicked.connect(self.upload_data)
+        frame_layout.addWidget(upload_btn)
+
+        return frame
+
+    def save_data(self):
+        """Handle save data action - will be connected to main chart"""
+        if self.monitor_chart:
+            self.monitor_chart.confirm_and_save_raw_data()
+        else:
+            print("Monitor chart not connected")
+
+    def upload_data(self):
+        """Handle upload data action"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Data Files to Upload",
+            "",
+            "Data Files (*.csv *.edf *.txt *.json);;All Files (*)"
+        )
+        if files:
+            print(f"Uploading files: {files}")
+
+    def create_raw_data_section(self):
+        """Inline raw-data file list shown under patient details."""
+        frame = QFrame()
+        frame.setObjectName("rawDataSection")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("Save file List")
+        title.setStyleSheet("font-weight: 700; color: #111827;")
+        header.addWidget(title)
+        header.addStretch()
+
+        self.raw_count_label = QLabel("0")
+        self.raw_count_label.setStyleSheet("font-weight: 700; color: #2563eb;")
+        header.addWidget(self.raw_count_label)
+        frame_layout.addLayout(header)
+
+        self.raw_hint_label = QLabel("Press Save → Yes to generate raw data with a timestamp.")
+        self.raw_hint_label.setStyleSheet("font-size: 11px; color: #6b7280;")
+        self.raw_hint_label.setWordWrap(True)
+        frame_layout.addWidget(self.raw_hint_label)
+
+        self.raw_file_list = QListWidget()
+        self.raw_file_list.setObjectName("Saved file List")
+        self.raw_file_list.setVisible(False)
+        frame_layout.addWidget(self.raw_file_list)
+
+        return frame
+
+    def add_saved_raw_file(self, file_path: str, timestamp_iso: str):
+        """Append a saved raw-data file to the inline list UI."""
+        filename = os.path.basename(file_path)
+        self.saved_raw_files.insert(0, {"timestamp": timestamp_iso, "path": file_path, "filename": filename})
+
+        self.raw_count_label.setText(str(len(self.saved_raw_files)))
+        self.raw_hint_label.setVisible(len(self.saved_raw_files) == 0)
+        self.raw_file_list.setVisible(len(self.saved_raw_files) > 0)
+
+        # Render newest on top
+        item_text = f"{filename}\n{timestamp_iso}"
+        item = QListWidgetItem(item_text)
+        item.setToolTip(file_path)
+        self.raw_file_list.insertItem(0, item)
+
+    #def create_summary_section(self):
+    def create_summary_section(self):
+        """Stub summary section to prevent runtime errors if called."""
+        frame = QFrame()
+        frame.setObjectName("summarySection")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel("Weekly Summary")
+        label.setStyleSheet("font-size: 12px; color: #6b7280;")
+        layout.addWidget(label)
+        return frame
     
     def create_avatar_section(self):
         """Create patient avatar and name section"""
@@ -245,8 +309,8 @@ class PatientInfoWidget(QWidget):
         
         return frame
     
-    def create_summary_section(self):
-        """Create weekly summary section"""
+    #def create_summary_section(self):
+     #   """Create weekly summary section"""
         frame = QFrame()
         frame.setObjectName("summarySection")
         layout = QVBoxLayout(frame)
@@ -266,28 +330,28 @@ class PatientInfoWidget(QWidget):
         layout.addLayout(header_layout)
         
         # Stats Grid
-        grid = QGridLayout()
-        grid.setSpacing(8)
+        #grid = QGridLayout()
+        #grid.setSpacing(8)
         
         # Total Sleep
-        total_card = self.create_stat_card("Total Sleep", "---", "hrs", "statCardBlue")
-        grid.addWidget(total_card, 0, 0)
+        #total_card = self.create_stat_card("Total Sleep", "---", "hrs", "statCardBlue")
+        #grid.addWidget(total_card, 0, 0)
         
         # Deep Sleep
-        deep_card = self.create_stat_card("Deep Sleep", "---", "hrs", "statCardPurple")
-        grid.addWidget(deep_card, 0, 1)
+        #deep_card = self.create_stat_card("Deep Sleep", "---", "hrs", "statCardPurple")
+        #grid.addWidget(deep_card, 0, 1)
         
         # REM Sleep
-        rem_card = self.create_stat_card("REM Sleep", "---", "hrs", "statCardIndigo")
-        grid.addWidget(rem_card, 1, 0)
+        #rem_card = self.create_stat_card("REM Sleep", "---", "hrs", "statCardIndigo")
+        #grid.addWidget(rem_card, 1, 0)
         
         # Efficiency
-        eff_card = self.create_stat_card("Efficiency", "---", "%", "statCardGreen")
-        grid.addWidget(eff_card, 1, 1)
+        #eff_card = self.create_stat_card("Efficiency", "---", "%", "statCardGreen")
+        #grid.addWidget(eff_card, 1, 1)
         
-        layout.addLayout(grid)
+        #layout.addLayout(grid)
         
-        return frame
+        #return frame
     
     def create_stat_card(self, label_text, value, unit, object_name):
         """Create a stat card"""
@@ -323,7 +387,7 @@ class PatientInfoWidget(QWidget):
         return frame
     
     def create_data_tab(self):
-        """Create raw data tab"""
+        """Create raw data tab (deprecated - tab removed from UI)"""
         widget = QWidget()
         widget.setObjectName("dataTab")
         layout = QVBoxLayout(widget)
@@ -362,7 +426,7 @@ class PatientInfoWidget(QWidget):
         
         # File List Header
         header_layout = QHBoxLayout()
-        files_label = QLabel(f"Uploaded Files ({len(self.uploaded_files)})")
+        files_label = QLabel("Uploaded Files (0)")
         files_label.setStyleSheet("font-weight: 600; color: #111827;")
         header_layout.addWidget(files_label)
         header_layout.addStretch()
@@ -376,10 +440,9 @@ class PatientInfoWidget(QWidget):
         layout.addLayout(header_layout)
         
         # File List
-        self.file_list = QListWidget()
-        self.file_list.setObjectName("fileList")
-        self.populate_file_list()
-        layout.addWidget(self.file_list)
+        file_list = QListWidget()
+        file_list.setObjectName("fileList")
+        layout.addWidget(file_list)
         
         # Separator
         separator = QFrame()
@@ -396,37 +459,8 @@ class PatientInfoWidget(QWidget):
         return widget
     
     def populate_file_list(self):
-        """Populate file list"""
-        self.file_list.clear()
-        for filename in self.uploaded_files:
-            item_widget = QWidget()
-            item_layout = QHBoxLayout(item_widget)
-            item_layout.setContentsMargins(12, 8, 12, 8)
-            
-            # File icon
-            icon_label = QLabel("📄")
-            icon_label.setStyleSheet("font-size: 20px;")
-            item_layout.addWidget(icon_label)
-            
-            # File name
-            name_label = QLabel(filename)
-            name_label.setStyleSheet("color: #374151; font-size: 12px;")
-            item_layout.addWidget(name_label)
-            item_layout.addStretch()
-            
-            # Download button
-            download_btn = QPushButton("⬇")
-            download_btn.setObjectName("ghostButton")
-            download_btn.setMinimumSize(24, 24)
-            download_btn.setMaximumSize(32, 32)
-            download_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            download_btn.clicked.connect(lambda checked, f=filename: self.download_file(f))
-            item_layout.addWidget(download_btn)
-            
-            item = QListWidgetItem(self.file_list)
-            item.setSizeHint(item_widget.sizeHint())
-            self.file_list.addItem(item)
-            self.file_list.setItemWidget(item, item_widget)
+        """Deprecated (Raw Data tab removed)."""
+        return
     
     def upload_files(self):
         """Handle file upload"""
@@ -436,12 +470,9 @@ class PatientInfoWidget(QWidget):
             "",
             "Data Files (*.csv *.edf *.txt);;All Files (*)"
         )
+        # Raw Data tab removed from the UI; keep chooser only as no-op.
         if files:
-            for file in files:
-                filename = os.path.basename(file)
-                if filename not in self.uploaded_files:
-                    self.uploaded_files.append(filename)
-            self.populate_file_list()
+            pass
     
     def download_file(self, filename):
         """Download single file"""
@@ -466,12 +497,15 @@ class PatientInfoWidget(QWidget):
             print(f"Downloading all files to: {save_path}")
 
 
-class SleepMonitorChart(QWidget):
+class SleepMonitorChart(QWidget):#
     """Sleep Monitoring Chart Widget"""
+    raw_data_saved = pyqtSignal(str, str)  # file_path, timestamp_iso
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_time = QTime.currentTime()
+        self.patient_id = "--------"
+        self.current_time_window = 60  # Default to 60 seconds
         self.init_ui()
         self.init_charts()
         
@@ -520,18 +554,6 @@ class SleepMonitorChart(QWidget):
         self.charts_layout.setContentsMargins(0, 0, 0, 0)
         self.charts_layout.setSpacing(8)
         
-        # Add Watermark
-        self.watermark = QLabel("60S", self.charts_widget)
-        self.watermark.setObjectName("chartWatermark")
-        self.watermark.setAlignment(Qt.AlignCenter)
-        self.watermark.setStyleSheet("""
-            QLabel#chartWatermark {
-                color: rgba(37, 99, 235, 0.05);
-                font-size: 200px;
-                font-weight: bold;
-            }
-        """)
-        
         chart_layout.addWidget(self.charts_widget, stretch=1)
         
         # Status Bar
@@ -544,7 +566,7 @@ class SleepMonitorChart(QWidget):
         """Create control bar with playback controls"""
         frame = QFrame()
         frame.setObjectName("chartControlBar")
-        frame.setMinimumHeight(64)
+        frame.setMinimumHeight(80)
         
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(16, 4, 16, 4)
@@ -557,11 +579,24 @@ class SleepMonitorChart(QWidget):
         controls_layout.setSpacing(6)
         controls_layout.setContentsMargins(0, 0, 0, 0)
 
-        pause_btn = QPushButton("⏸ Pause")
+        backward_btn = QPushButton("◀")
+        backward_btn.setObjectName("controlButton")
+        backward_btn.setFixedHeight(35)
+        backward_btn.setMinimumWidth(75)
+        controls_layout.addWidget(backward_btn)
+
+        pause_btn = QPushButton("||")
         pause_btn.setObjectName("controlButton")
-        pause_btn.setFixedHeight(38)
-        pause_btn.setMinimumWidth(90)
+        pause_btn.setFixedHeight(35)
+        pause_btn.setMinimumWidth(75)
         controls_layout.addWidget(pause_btn)
+
+    
+        forward_btn = QPushButton("▶")
+        forward_btn.setObjectName("controlButton")
+        forward_btn.setFixedHeight(35)
+        forward_btn.setMinimumWidth(75)
+        controls_layout.addWidget(forward_btn)
 
         controls_container.setLayout(controls_layout)
         layout.addWidget(controls_container)
@@ -576,7 +611,7 @@ class SleepMonitorChart(QWidget):
         time_window_frame = QFrame()
         time_window_layout = QHBoxLayout(time_window_frame)
         time_window_layout.setContentsMargins(0, 0, 0, 0)
-        time_window_layout.setSpacing(4)
+        time_window_layout.setSpacing(5)
         time_windows = [
             ("10s", 10),
             ("30s", 30),
@@ -600,20 +635,109 @@ class SleepMonitorChart(QWidget):
 
         layout.addStretch()
 
-        # --- (Optional) Other controls can go here ---
-
         return frame
 
+    def set_patient_id(self, patient_id: str):
+        self.patient_id = patient_id or "--------"
+
+    def confirm_and_save_raw_data(self):
+        reply = QMessageBox.question(
+            self,
+            "Save raw data",
+            "Generate a timestamped raw-data file for the current session?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        file_path, timestamp_iso = self.save_raw_data_file()
+        if file_path:
+            self.raw_data_saved.emit(file_path, timestamp_iso)
+
+    def save_raw_data_file(self):
+        """Write a timestamped raw-data JSON file and return (path, timestamp_iso)."""
+        timestamp_iso = datetime.now().isoformat(timespec="seconds")
+        safe_ts = timestamp_iso.replace(":", "-")
+        out_dir = os.path.join(os.getcwd(), "raw_data")
+        os.makedirs(out_dir, exist_ok=True)
+        filename = f"raw_data_{self.patient_id}_{safe_ts}.json"
+        file_path = os.path.join(out_dir, filename)
+
+        # Generate representative signal arrays similar to the plotted traces
+        signals = [
+            ("Body Position", "#3b82f6", 0.5, 10, 50),
+            ("Airflow", "#8b5cf6", 0.3, 15, 50),
+            ("Snoring", "#ef4444", 1.0, 8, 50),
+            ("Thorex", "#f59e0b", 0.2, 5, 50),
+            ("Abdomen", "#10b981", 0.1, 2, 90),
+            ("SpO2", "#06b6d4", 1.5, 12, 50),
+            ("Pulse", "#f97316", 0.0, 0, 30),
+            ("Body Movement", "#8b5cf6", 0.1, 5, 20),
+            ("PR/HR", "#5c61f6", 0.1, 5, 20),
+        ]
+
+        time_points = 1000
+        x = np.linspace(0, 10, time_points).tolist()
+        channels = {}
+        for name, color, freq, amp, offset in signals:
+            y = (np.sin(np.linspace(0, 10, time_points) * freq * 2 * np.pi) * amp + offset + (np.random.rand(time_points) - 0.5) * amp * 0.1)
+            channels[name] = {"x": x, "y": y.tolist(), "color": color}
+
+        payload = {
+            "patient_id": self.patient_id,
+            "timestamp": timestamp_iso,
+            "channels": channels,
+        }
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+        return file_path, timestamp_iso
+
     def set_time_window(self, seconds):
-        """Set the time window for the sleep monitoring chart (stub for now)"""
+        """Set the time window for the sleep monitoring chart"""
+        # Update current time window
+        self.current_time_window = seconds
+        
         # Uncheck all, check only the clicked one
         for btn in self.time_window_buttons:
             btn.setChecked(False)
         sender = self.sender()
         if sender:
             sender.setChecked(True)
-        # TODO: Implement actual chart time window logic here
+        
+        # Update charts with new time window
+        self.update_charts_for_time_window(seconds)
         print(f"Time window set to: {seconds} seconds")
+    
+    def update_charts_for_time_window(self, seconds):
+        """Update chart data based on time window selection"""
+        # Clear existing charts
+        for i in reversed(range(self.charts_layout.count())):
+            child = self.charts_layout.itemAt(i).widget()
+            if child:
+                child.setParent(None)
+        
+        # Generate new data based on time window
+        signals = [
+            ("Body Position", "#3b82f6", 0.5, 10, 50),
+            ("Airflow", "#8b5cf6", 0.3, 15, 50),
+            ("Snoring", "#ef4444", 1.0, 8, 50),
+            ("Thorex ", "#f59e0b", 0.2, 5, 50),
+            ("Abdomen ", "#10b981", 0.1, 2, 90),
+            ("SpO2 ", "#06b6d4", 1.5, 12, 50),
+            ("Pulse ", "#f97316", 0.0, 0, 30),
+            ("Body Movement", "#8b5cf6", 0.1, 5, 20),
+            ("PR/HR)", "#5c61f6", 0.1, 5, 20),
+        ]
+        
+        # Adjust frequency based on time window (longer window = lower frequency for visibility)
+        frequency_factor = max(0.1, 10.0 / (seconds / 10.0))
+        
+        for name, color, base_freq, amp, offset in signals:
+            adjusted_freq = base_freq * frequency_factor
+            chart = self.create_signal_chart(name, color, adjusted_freq, amp, offset)
+            self.charts_layout.addWidget(chart)
     
     def create_status_bar(self):
         """Create bottom status bar"""
@@ -625,48 +749,6 @@ class SleepMonitorChart(QWidget):
         layout.setContentsMargins(20, 0, 20, 0)
         layout.setSpacing(15)
         
-        # Recording status
-        recording_frame = QFrame()
-        recording_frame.setObjectName("recordingBadge")
-        recording_layout = QHBoxLayout(recording_frame)
-        recording_layout.setContentsMargins(10, 4, 10, 4)
-        recording_layout.setSpacing(8)
-        
-        rec_dot = QLabel("●")
-        rec_dot.setStyleSheet("color: #10b981; font-size: 12px;")
-        recording_layout.addWidget(rec_dot)
-        
-        rec_label = QLabel("Recording")
-        rec_label.setStyleSheet("font-size: 12px; font-weight: 700; color: #065f46;")
-        recording_layout.addWidget(rec_label)
-        layout.addWidget(recording_frame)
-        
-        # Status labels with better visibility
-        status_font = "font-size: 12px; color: #64748b; font-weight: 500;"
-        
-        self.stage_label = QLabel("Stage: 1")
-        self.stage_label.setStyleSheet(status_font)
-        layout.addWidget(self.stage_label)
-        
-        self.date_label = QLabel("2025-05-03 23:04:00")
-        self.date_label.setStyleSheet(status_font)
-        layout.addWidget(self.date_label)
-        
-        layout.addStretch()
-        
-        # Duration info
-        self.duration_label = QLabel("Duration: 08:19")
-        self.duration_label.setStyleSheet(status_font)
-        layout.addWidget(self.duration_label)
-        
-        self.tracing_label = QLabel("Tracing: 1/2")
-        self.tracing_label.setStyleSheet(status_font)
-        layout.addWidget(self.tracing_label)
-        
-        self.seconds_label = QLabel("Seconds: 1/7140")
-        self.seconds_label.setStyleSheet(status_font)
-        layout.addWidget(self.seconds_label)
-        
         return frame
     
     def init_charts(self):
@@ -675,14 +757,15 @@ class SleepMonitorChart(QWidget):
         pg.setConfigOption('foreground', 'k')
         
         signals = [
-            ("CPAP Pressure", "#3b82f6", 0.5, 10, 50),
-            ("Body Position", "#8b5cf6", 0.3, 15, 50),
-            ("Pulse", "#ef4444", 1.0, 8, 50),
-            ("SpO2 ", "#f59e0b", 0.2, 5, 50),
-            ("Air Flow ", "#10b981", 0.1, 2, 90),
-            ("Snoring ", "#06b6d4", 1.5, 12, 50),
-            ("Body Move ", "#f97316", 0.0, 0, 30),  # Flat line for position
-            ("Pulse Wave", "#8b5cf6", 0.1, 5, 20),
+            ("Body Position", "#3b82f6", 0.5, 10, 50),
+            ("Airflow", "#8b5cf6", 0.3, 15, 50),
+            ("Snoring", "#ef4444", 1.0, 8, 50),
+            ("Thorex ", "#f59e0b", 0.2, 5, 50),
+            ("Abdomen ", "#10b981", 0.1, 2, 90),
+            ("SpO2 ", "#06b6d4", 1.5, 12, 50),
+            ("Pulse ", "#f97316", 0.0, 0, 30),  # Flat line for position
+            ("Body Movement", "#8b5cf6", 0.1, 5, 20),
+            ("PR/HR)", "#5c61f6", 0.1, 5, 20),
         ]
         
         for name, color, freq, amp, offset in signals:
@@ -692,9 +775,10 @@ class SleepMonitorChart(QWidget):
     def create_signal_chart(self, name, color, frequency, amplitude, offset):
         """Create a single signal trace chart with side label"""
         container = QWidget()
+        container.setObjectName("signalChartContainer")
         container.setMinimumHeight(70)
         container_layout = QHBoxLayout(container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setContentsMargins(4, 4, 4, 4)  # Add padding for border visibility
         container_layout.setSpacing(8) # Added spacing between label and plot
         
         # Side Label
@@ -722,6 +806,48 @@ class SleepMonitorChart(QWidget):
         label_layout.addWidget(label)
         container_layout.addWidget(label_frame)
         
+        # Plot Container with Zoom Controls
+        plot_container = QWidget()
+        plot_container_layout = QVBoxLayout(plot_container)
+        plot_container_layout.setContentsMargins(0, 0, 0, 0)
+        plot_container_layout.setSpacing(2)
+        
+        # Zoom Controls
+        zoom_frame = QFrame()
+        zoom_layout = QHBoxLayout(zoom_frame)
+        zoom_layout.setContentsMargins(0, 0, 0, 0)
+        zoom_layout.setSpacing(4)
+        
+        # Store original Y range for zoom calculations
+        self.original_y_min = 0
+        self.original_y_max = 100
+        self.current_y_min = 0
+        self.current_y_max = 100
+        
+        # Zoom In button
+        zoom_in_btn = QPushButton("+")
+        zoom_in_btn.setObjectName("zoomButton")
+        zoom_in_btn.setFixedSize(24, 20)
+        zoom_in_btn.clicked.connect(lambda: self.zoom_vertical(plot_widget, 0.8))
+        zoom_layout.addWidget(zoom_in_btn)
+        
+        # Zoom Out button
+        zoom_out_btn = QPushButton("-")
+        zoom_out_btn.setObjectName("zoomButton")
+        zoom_out_btn.setFixedSize(24, 20)
+        zoom_out_btn.clicked.connect(lambda: self.zoom_vertical(plot_widget, 1.2))
+        zoom_layout.addWidget(zoom_out_btn)
+        
+        # Reset button
+        reset_btn = QPushButton("R")
+        reset_btn.setObjectName("zoomButton")
+        reset_btn.setFixedSize(24, 20)
+        reset_btn.clicked.connect(lambda: self.reset_zoom(plot_widget))
+        zoom_layout.addWidget(reset_btn)
+        
+        zoom_layout.addStretch()
+        plot_container_layout.addWidget(zoom_frame)
+        
         # Plot Widget
         plot_widget = pg.PlotWidget()
         plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -741,9 +867,41 @@ class SleepMonitorChart(QWidget):
         pen = pg.mkPen(color=color, width=1.5)
         plot_widget.plot(x, y, pen=pen)
         
-        container_layout.addWidget(plot_widget)
+        plot_container_layout.addWidget(plot_widget)
+        container_layout.addWidget(plot_container)
         
         return container
+    
+    def zoom_vertical(self, plot_widget, zoom_factor):
+        """Zoom in/out vertically on the plot"""
+        # Get current Y range
+        current_range = plot_widget.getViewBox().viewRange()
+        y_min, y_max = current_range[1]
+        
+        # Calculate center point
+        center = (y_min + y_max) / 2
+        current_range_size = y_max - y_min
+        
+        # Calculate new range size
+        new_range_size = current_range_size * zoom_factor
+        
+        # Calculate new bounds
+        new_y_min = center - new_range_size / 2
+        new_y_max = center + new_range_size / 2
+        
+        # Apply limits to keep within 0-100 range
+        if new_y_min < 0:
+            new_y_min = 0
+            new_y_max = new_range_size
+        elif new_y_max > 100:
+            new_y_max = 100
+            new_y_min = 100 - new_range_size
+            
+        plot_widget.setYRange(new_y_min, new_y_max)
+    
+    def reset_zoom(self, plot_widget):
+        """Reset zoom to original range"""
+        plot_widget.setYRange(0, 100)
     
     def update_time(self):
         """Update current time display"""
@@ -801,8 +959,8 @@ class SleepSenseDashboard(QMainWindow):
         patient_layout = QVBoxLayout(patient_panel)
         patient_layout.setContentsMargins(0, 0, 0, 0)
         
-        patient_info = PatientInfoWidget()
-        patient_layout.addWidget(patient_info)
+        self.patient_info = PatientInfoWidget()
+        patient_layout.addWidget(self.patient_info)
         
         splitter.addWidget(patient_panel)
         
@@ -812,8 +970,14 @@ class SleepSenseDashboard(QMainWindow):
         chart_layout = QVBoxLayout(chart_panel)
         chart_layout.setContentsMargins(0, 0, 0, 0)
         
-        monitor_chart = SleepMonitorChart()
-        chart_layout.addWidget(monitor_chart)
+        self.monitor_chart = SleepMonitorChart()
+        self.monitor_chart.set_patient_id("--------")
+        self.monitor_chart.raw_data_saved.connect(self.patient_info.add_saved_raw_file)
+        
+        # Connect monitor chart reference to patient info for save functionality
+        self.patient_info.monitor_chart = self.monitor_chart
+        
+        chart_layout.addWidget(self.monitor_chart)
         
         splitter.addWidget(chart_panel)
         splitter.setSizes([300, 1000]) # Initial sizes, will be adjusted by policies
@@ -915,7 +1079,9 @@ class SleepSenseDashboard(QMainWindow):
     
     def load_stylesheet(self):
         """Load QSS stylesheet"""
-        qss_file = "sleep_sense_medical_white.qss"
+        # Get the directory where this script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        qss_file = os.path.join(script_dir, "sleep_sense_medical_white.qss")
         if os.path.exists(qss_file):
             with open(qss_file, 'r') as f:
                 self.setStyleSheet(f.read())
