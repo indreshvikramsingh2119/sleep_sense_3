@@ -232,6 +232,7 @@ QFrame#playbackControls {
     background-color: #f1f5f9;
     border: 1px solid #e2e8f0;
     border-radius: 12px;
+    padding: 4px;
 }
 
 /* Specific Control Buttons */
@@ -241,13 +242,67 @@ QPushButton#controlButton {
     border: 1px solid #e2e8f0;
     border-radius: 8px;
     font-size: 18px;
-    padding: 0px;
+    padding: 4px 8px;
+    margin: 2px;
 }
 
 QPushButton#controlButton:hover {
     background-color: #e2e8f0;
     border-color: #cbd5e1;
     color: #1e293b;
+}
+
+QPushButton#controlButton:pressed {
+    background-color: #cbd5e1;
+    border-color: #94a3b8;
+}
+
+/* Time Window Buttons */
+QPushButton#timeWindowButton {
+    background-color: #f8fafc;
+    color: #64748b;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 4px 8px;
+    min-height: 32px;
+    min-width: 48px;
+}
+
+QPushButton#timeWindowButton:hover {
+    background-color: #f1f5f9;
+    border-color: #cbd5e1;
+    color: #334155;
+}
+
+QPushButton#timeWindowButton:checked {
+    background-color: #2563eb;
+    color: #ffffff;
+    border-color: #2563eb;
+    font-weight: 600;
+}
+
+/* Zoom Buttons */
+QPushButton#zoomButton {
+    background-color: #f1f5f9;
+    color: #64748b;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 0px;
+}
+
+QPushButton#zoomButton:hover {
+    background-color: #e2e8f0;
+    border-color: #cbd5e1;
+    color: #334155;
+}
+
+QPushButton#zoomButton:pressed {
+    background-color: #cbd5e1;
+    border-color: #94a3b8;
 }
 
 QPushButton#playButtonMain {
@@ -265,19 +320,32 @@ QPushButton#playButtonMain:hover {
 
 /* Action Buttons (Settings, Export, etc.) */
 QPushButton#actionButton {
-    background-color: #f1f5f9;
+    background-color: #f8fafc;
     color: #475569;
     border: 1px solid #e2e8f0;
-    border-radius: 8px;
+    border-radius: 12px;
     font-size: 13px;
     font-weight: 600;
-    padding: 0 12px;
+    padding: 8px 16px;
+    min-height: 36px;
 }
 
 QPushButton#actionButton:hover {
-    background-color: #e2e8f0;
+    background-color: #f1f5f9;
     border-color: #cbd5e1;
     color: #1e293b;
+}
+
+QPushButton#actionButton:pressed {
+    background-color: #e2e8f0;
+    border-color: #94a3b8;
+}
+
+/* Action Buttons Section */
+QFrame#actionButtonsSection {
+    background-color: transparent;
+    border: none;
+    margin: 4px 0;
 }
 
 /* Tab Buttons */
@@ -362,6 +430,29 @@ QFrame#chartControlBar {
     background-color: #f9fafb;
     border-bottom: 1px solid #e5e7eb;
     padding: 12px;
+}
+
+/* Main charts container */
+QWidget#chartsContainer {
+    background-color: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    margin: 4px;
+    padding: 8px;
+}
+
+/* Chart containers for individual signal traces */
+QWidget#signalChartContainer {
+    background-color: #ffffff;
+    border: 1px solid #f3f4f6;
+    border-radius: 6px;
+    margin: 2px;
+    padding: 4px;
+}
+
+QWidget#signalChartContainer:hover {
+    border-color: #e5e7eb;
+    background-color: #fafafa;
 }
 
 /* Signal Labels */
@@ -584,6 +675,35 @@ QSlider::handle:horizontal {
 
 QSlider::handle:horizontal:hover {
     background-color: #1d4ed8;
+}
+
+/* ==================== LIST WIDGET ==================== */
+
+QListWidget {
+    background-color: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    color: #111827;
+    font-size: 12px;
+    padding: 8px;
+}
+
+QListWidget::item {
+    background-color: transparent;
+    border: none;
+    padding: 8px 12px;
+    margin: 2px 0;
+    border-radius: 8px;
+}
+
+QListWidget::item:selected {
+    background-color: #eff6ff;
+    color: #1d4ed8;
+    border: 1px solid #bfdbfe;
+}
+
+QListWidget::item:hover {
+    background-color: #f8fafc;
 }
 
 /* ==================== TABLE ==================== */

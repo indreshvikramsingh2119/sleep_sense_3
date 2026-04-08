@@ -1,5 +1,16 @@
 import { Button } from "./ui/button";
-import { Play, Pause, SkipBack, SkipForward, Maximize2, Settings, Download } from "lucide-react";
+import { Play, Pause, SkipBack, SkipForward, Maximize2, Settings, Download, FileText } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "./ui/alert-dialog";
 import {
   LineChart,
   Line,
@@ -8,6 +19,7 @@ import {
   CartesianGrid,
   ResponsiveContainer,
 } from "recharts";
+import type { Patient, RawDataEntry } from "./PatientInfo";
 
 // Generate continuous signal data
 const generateSignalData = (points: number, frequency: number, amplitude: number, offset: number = 0) => {
@@ -85,9 +97,67 @@ function SignalTrace({ data, color, label, showGrid = true, height, gradientId }
   );
 }
 
-export function SleepMonitorChart() {
+export function SleepMonitorChart({
+  patient,
+  onRawDataSaved,
+}: {
+  patient: Patient;
+  onRawDataSaved: (entry: RawDataEntry) => void;
+}) {
   const currentTime = "23:04:00";
   const startTime = "22:04:00";
+
+  const handleSaveYes = () => {
+    const timestampIso = new Date().toISOString();
+    const safeTimestamp = timestampIso.replace(/[:.]/g, "-");
+    const fileName = `raw_data_${patient.patientId}_${safeTimestamp}.json`;
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    const payload = {
+      patient: {
+        patientId: patient.patientId,
+        name: patient.name,
+        age: patient.age,
+        gender: patient.gender,
+      },
+      timestamp: timestampIso,
+      channels: {
+        abdominalMove: abdominalData,
+        bodyMove: bodyMoveData,
+        snoring: snoringData,
+        apnea: apneaData,
+        spO2: spo2Data,
+        pulseWave: pulseWaveData,
+        bodyPos: bodyPosData,
+        cpapPress: cpapPressData,
+      },
+      timePoints,
+    };
+
+    const content = JSON.stringify(payload, null, 2);
+    const entry: RawDataEntry = {
+      id,
+      timestamp: timestampIso,
+      fileName,
+      content,
+    };
+
+    onRawDataSaved(entry);
+
+    // Also download the file immediately.
+    const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
 
   return (
     <div className="h-full flex flex-col">
@@ -116,10 +186,40 @@ export function SleepMonitorChart() {
         </div>
         
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" className="text-gray-700 hover:bg-gray-100 rounded-lg border border-gray-200 bg-white shadow-sm">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-gray-700 hover:bg-gray-100 rounded-lg border border-gray-200 bg-white shadow-sm"
+          >
             <Settings className="w-4 h-4 mr-2" />
             Settings
           </Button>
+
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-gray-700 hover:bg-gray-100 rounded-lg border border-gray-200 bg-white shadow-sm"
+              >
+                <FileText className="w-4 h-4 mr-2" />
+                Save
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Save raw data?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This generates a timestamped raw-data JSON file from the current session.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={handleSaveYes}>Yes</AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+
           <Button variant="ghost" size="sm" className="text-gray-700 hover:bg-gray-100 rounded-lg border border-gray-200 bg-white shadow-sm">
             <Download className="w-4 h-4 mr-2" />
             Export
