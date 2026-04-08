@@ -24,8 +24,6 @@ class PatientInfoWidget(QWidget):
         super().__init__(parent)
         self.uploaded_files = [
             "sleep_data_2026-04-01.csv",
-            "sleep_data_2026-04-02.csv",
-            "sleep_data_2026-04-03.csv"
         ]
         self.init_ui()
         
@@ -115,19 +113,19 @@ class PatientInfoWidget(QWidget):
         details_layout.setSpacing(10) # Adjusted spacing between info cards
         
         # Age/Gender Card
-        age_card = self.create_info_card("👤", "Age / Gender", "34 years / Female", "infoCardBlue")
+        age_card = self.create_info_card("", "Age / Gender", "-- / ---", "infoCardBlue")
         details_layout.addWidget(age_card)
         
         # Last Visit Card
-        visit_card = self.create_info_card("📅", "Last Visit", "April 4, 2026", "infoCardIndigo")
+        visit_card = self.create_info_card("", "Last Visit", "--", "infoCardIndigo")
         details_layout.addWidget(visit_card)
         
         # Sleep Duration Card
-        sleep_card = self.create_info_card("🌙", "Avg Sleep Duration", "7.2 hours/night", "infoCardPurple")
+        sleep_card = self.create_info_card("", "Avg Sleep Duration", "--", "infoCardPurple")
         details_layout.addWidget(sleep_card)
         
         # Sleep Quality Card
-        quality_card = self.create_info_card("❤️", "Sleep Quality", "Good", "infoCardGreen")
+        quality_card = self.create_info_card("", "Sleep Quality", "--", "infoCardGreen")
         details_layout.addWidget(quality_card)
         
         scroll_layout.addLayout(details_layout)
@@ -156,7 +154,6 @@ class PatientInfoWidget(QWidget):
         avatar_container.setFixedSize(90, 90)
         avatar_container.setStyleSheet("""
             QFrame {
-                background-color: #f3f4f6;
                 border: 2px solid #e5e7eb;
                 border-radius: 45px;
             }
@@ -166,7 +163,7 @@ class PatientInfoWidget(QWidget):
         avatar_layout.setContentsMargins(0, 0, 0, 0)
         
         # Avatar label (SJ for Sarah Johnson)
-        avatar_label = QLabel("SJ")
+        avatar_label = QLabel("--")
         avatar_label.setAlignment(Qt.AlignCenter)
         avatar_label.setStyleSheet("""
             QLabel {
@@ -183,14 +180,14 @@ class PatientInfoWidget(QWidget):
         layout.addWidget(avatar_container, alignment=Qt.AlignCenter)
         
         # Patient Name
-        name_label = QLabel("Sarah Johnson")
+        name_label = QLabel("Patient Name")
         name_label.setObjectName("patientName")
         name_label.setAlignment(Qt.AlignCenter)
         name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #111827;")
         layout.addWidget(name_label)
         
         # Patient ID
-        id_label = QLabel("ID: SS-2024-1847")
+        id_label = QLabel("ID: --------")
         id_label.setObjectName("patientId")
         id_label.setAlignment(Qt.AlignCenter)
         id_label.setStyleSheet("font-size: 12px; color: #6b7280; background: transparent; border: none;")
@@ -273,19 +270,19 @@ class PatientInfoWidget(QWidget):
         grid.setSpacing(8)
         
         # Total Sleep
-        total_card = self.create_stat_card("Total Sleep", "48.5", "hrs", "statCardBlue")
+        total_card = self.create_stat_card("Total Sleep", "---", "hrs", "statCardBlue")
         grid.addWidget(total_card, 0, 0)
         
         # Deep Sleep
-        deep_card = self.create_stat_card("Deep Sleep", "12.3", "hrs", "statCardPurple")
+        deep_card = self.create_stat_card("Deep Sleep", "---", "hrs", "statCardPurple")
         grid.addWidget(deep_card, 0, 1)
         
         # REM Sleep
-        rem_card = self.create_stat_card("REM Sleep", "10.8", "hrs", "statCardIndigo")
+        rem_card = self.create_stat_card("REM Sleep", "---", "hrs", "statCardIndigo")
         grid.addWidget(rem_card, 1, 0)
         
         # Efficiency
-        eff_card = self.create_stat_card("Efficiency", "87", "%", "statCardGreen")
+        eff_card = self.create_stat_card("Efficiency", "---", "%", "statCardGreen")
         grid.addWidget(eff_card, 1, 1)
         
         layout.addLayout(grid)
@@ -552,71 +549,71 @@ class SleepMonitorChart(QWidget):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(16, 4, 16, 4)
         layout.setSpacing(12)
-        
-        # Playback controls container
+
+        # --- Playback Controls ---
         controls_container = QFrame()
         controls_container.setObjectName("playbackControls")
         controls_layout = QHBoxLayout(controls_container)
         controls_layout.setSpacing(6)
-        controls_layout.setContentsMargins(6, 6, 6, 6)
-        
-        # Increased button sizes for better visibility
-        skip_back_btn = QPushButton("⏮")
-        skip_back_btn.setObjectName("controlButton")
-        skip_back_btn.setFixedSize(40, 40)
-        skip_back_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        controls_layout.addWidget(skip_back_btn)
-        
-        play_btn = QPushButton("▶")
-        play_btn.setObjectName("playButtonMain")
-        play_btn.setFixedSize(40, 40)
-        play_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        controls_layout.addWidget(play_btn)
-        
-        skip_forward_btn = QPushButton("⏭")
-        skip_forward_btn.setObjectName("controlButton")
-        skip_forward_btn.setFixedSize(40, 40)
-        skip_forward_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        controls_layout.addWidget(skip_forward_btn)
-        
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+
+        pause_btn = QPushButton("⏸ Pause")
+        pause_btn.setObjectName("controlButton")
+        pause_btn.setFixedHeight(38)
+        pause_btn.setMinimumWidth(90)
+        controls_layout.addWidget(pause_btn)
+
+        controls_container.setLayout(controls_layout)
         layout.addWidget(controls_container)
-        
-        # Report selector
-        self.report_combo = QComboBox()
-        self.report_combo.addItems([
-            "Sleep Monitoring Report",
-            "Detailed Analysis",
-            "Event Summary"
-        ])
-        self.report_combo.setMinimumWidth(180) # Adjusted minimum width
-        self.report_combo.setMinimumHeight(38)
-        self.report_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        layout.addWidget(self.report_combo)
-        
+
+        # --- Report Selector ---
+        report_label = QLabel("Sleep Monitoring Report")
+        report_label.setObjectName("reportLabel")
+        report_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #1e293b; margin-left: 12px; margin-right: 12px;")
+        layout.addWidget(report_label)
+
+        # --- Time Window Buttons ---
+        time_window_frame = QFrame()
+        time_window_layout = QHBoxLayout(time_window_frame)
+        time_window_layout.setContentsMargins(0, 0, 0, 0)
+        time_window_layout.setSpacing(4)
+        time_windows = [
+            ("10s", 10),
+            ("30s", 30),
+            ("60s", 60),
+            ("2m", 120),
+            ("5m", 300),
+            ("10m", 600),
+        ]
+        self.time_window_buttons = []
+        for label, value in time_windows:
+            btn = QPushButton(label)
+            btn.setObjectName("timeWindowButton")
+            btn.setFixedHeight(32)
+            btn.setMinimumWidth(48)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, v=value: self.set_time_window(v))
+            time_window_layout.addWidget(btn)
+            self.time_window_buttons.append(btn)
+        self.time_window_buttons[2].setChecked(True)
+        layout.addWidget(time_window_frame)
+
         layout.addStretch()
-        
-        # Action buttons
-        settings_btn = QPushButton("⚙ Settings")
-        settings_btn.setObjectName("actionButton")
-        settings_btn.setMinimumHeight(38)
-        settings_btn.setMinimumWidth(100)
-        settings_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        layout.addWidget(settings_btn)
-        
-        export_btn = QPushButton("⬇ Export")
-        export_btn.setObjectName("actionButton")
-        export_btn.setMinimumHeight(38)
-        export_btn.setMinimumWidth(100)
-        export_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        layout.addWidget(export_btn)
-        
-        maximize_btn = QPushButton("⛶")
-        maximize_btn.setObjectName("actionButton")
-        maximize_btn.setFixedSize(38, 38)
-        maximize_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        layout.addWidget(maximize_btn)
-        
+
+        # --- (Optional) Other controls can go here ---
+
         return frame
+
+    def set_time_window(self, seconds):
+        """Set the time window for the sleep monitoring chart (stub for now)"""
+        # Uncheck all, check only the clicked one
+        for btn in self.time_window_buttons:
+            btn.setChecked(False)
+        sender = self.sender()
+        if sender:
+            sender.setChecked(True)
+        # TODO: Implement actual chart time window logic here
+        print(f"Time window set to: {seconds} seconds")
     
     def create_status_bar(self):
         """Create bottom status bar"""
@@ -678,14 +675,14 @@ class SleepMonitorChart(QWidget):
         pg.setConfigOption('foreground', 'k')
         
         signals = [
-            ("Abdominal Move", "#3b82f6", 0.5, 10, 50),
-            ("Body Move", "#8b5cf6", 0.3, 15, 50),
-            ("Snoring", "#ef4444", 1.0, 8, 50),
-            ("Apnea", "#f59e0b", 0.2, 5, 50),
-            ("SpO2", "#10b981", 0.1, 2, 90),
-            ("Pulse Wave", "#06b6d4", 1.5, 12, 50),
-            ("Body Pos", "#f97316", 0.0, 0, 30),  # Flat line for position
-            ("CPAP Press", "#8b5cf6", 0.1, 5, 20),
+            ("CPAP Pressure", "#3b82f6", 0.5, 10, 50),
+            ("Body Position", "#8b5cf6", 0.3, 15, 50),
+            ("Pulse", "#ef4444", 1.0, 8, 50),
+            ("SpO2 ", "#f59e0b", 0.2, 5, 50),
+            ("Air Flow ", "#10b981", 0.1, 2, 90),
+            ("Snoring ", "#06b6d4", 1.5, 12, 50),
+            ("Body Move ", "#f97316", 0.0, 0, 30),  # Flat line for position
+            ("Pulse Wave", "#8b5cf6", 0.1, 5, 20),
         ]
         
         for name, color, freq, amp, offset in signals:
