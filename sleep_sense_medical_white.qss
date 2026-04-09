@@ -36,7 +36,7 @@ QLabel#headerSubtitle {
 /* Logo Container */
 QFrame#logoContainer {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                stop:0 #34d399, stop:1 #10b981);
+                                stop:0 #2CA3FA, stop:1 #1E88E5);
     border-radius: 12px;
     min-width: 48px;
     max-width: 48px;
@@ -129,7 +129,7 @@ QFrame#iconPurple {
 
 QFrame#iconGreen {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                stop:0 #10b981, stop:1 #059669);
+                                stop:0 #2CA3FA, stop:1 #1E88E5);
 }
 
 /* ==================== PATIENT INFO ==================== */
@@ -240,10 +240,12 @@ QPushButton#controlButton {
     background-color: #f1f5f9;
     color: #475569;
     border: 1px solid #e2e8f0;
-    border-radius: 8px;
-    font-size: 18px;
-    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 14px;
+    padding: 0px;
     margin: 2px;
+    min-height: 28px;
+    max-height: 28px;
 }
 
 QPushButton#controlButton:hover {
@@ -255,6 +257,31 @@ QPushButton#controlButton:hover {
 QPushButton#controlButton:pressed {
     background-color: #cbd5e1;
     border-color: #94a3b8;
+}
+
+/* Restore All Charts Button */
+QPushButton#restoreAllButton {
+    background-color: #2CA3FA;
+    color: #ffffff;
+    border: 1px solid #1E88E5;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 0px;
+    margin: 2px;
+    min-height: 28px;
+    max-height: 28px;
+}
+
+QPushButton#restoreAllButton:hover {
+    background-color: #1E88E5;
+    border-color: #2CA3FA;
+    color: #ffffff;
+}
+
+QPushButton#restoreAllButton:pressed {
+    background-color: #1976D2;
+    border-color: #1565C0;
 }
 
 /* Time Window Buttons */
@@ -281,6 +308,91 @@ QPushButton#timeWindowButton:checked {
     color: #ffffff;
     border-color: #2563eb;
     font-weight: 600;
+}
+
+/* Time Window Dropdown - Modern & Attractive */
+QComboBox#timeWindowDropdown {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #ffffff, stop:1 #f8fafc);
+    color: #1e293b;
+    border: 2px solid #e5e7eb;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 12px;
+    min-height: 30px;
+    min-width: 80px;
+}
+
+QComboBox#timeWindowDropdown:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #f8fafc, stop:1 #f1f5f9);
+    border-color: #2563eb;
+    color: #111827;
+}
+
+QComboBox#timeWindowDropdown:focus {
+    border-color: #2563eb;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #ffffff, stop:1 #eff6ff);
+    outline: none;
+}
+
+QComboBox#timeWindowDropdown::drop-down {
+    border: none;
+    width: 26px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 transparent, stop:1 rgba(37, 99, 235, 0.05));
+    border-radius: 0 8px 8px 0;
+    margin-right: -2px;
+}
+
+QComboBox#timeWindowDropdown::down-arrow {
+    image: none;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 5px solid #6b7280;
+    margin-right: 10px;
+}
+
+QComboBox#timeWindowDropdown::down-arrow:hover {
+    border-top-color: #2563eb;
+}
+
+QComboBox#timeWindowDropdown QAbstractItemView {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #ffffff, stop:1 #f8fafc);
+    border: 2px solid #e5e7eb;
+    border-radius: 12px;
+    selection-background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                                stop:0 #eff6ff, stop:1 #dbeafe);
+    selection-color: #2563eb;
+    padding: 8px;
+    outline: none;
+}
+
+QComboBox#timeWindowDropdown QAbstractItemView::item {
+    padding: 8px 16px;
+    border-radius: 8px;
+    margin: 2px;
+    font-weight: 500;
+    color: #374151;
+    background-color: transparent;
+}
+
+QComboBox#timeWindowDropdown QAbstractItemView::item:selected {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 #eff6ff, stop:1 #dbeafe);
+    color: #2563eb;
+    font-weight: 700;
+    border: 1px solid rgba(37, 99, 235, 0.2);
+}
+
+QComboBox#timeWindowDropdown QAbstractItemView::item:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 #f1f5f9, stop:1 #e5e7eb);
+    color: #1e293b;
+    border: 1px solid rgba(37, 99, 235, 0.1);
 }
 
 /* Zoom Buttons */

@@ -227,12 +227,12 @@ class PatientInfoWidget(QWidget):
         avatar_layout.setContentsMargins(0, 0, 0, 0)
         
         # Avatar label (SJ for Sarah Johnson)
-        avatar_label = QLabel("--")
+        avatar_label = QLabel("")
         avatar_label.setAlignment(Qt.AlignCenter)
         avatar_label.setStyleSheet("""
             QLabel {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                            stop:0 #34d399, stop:1 #10b981);
+                                            stop:0 #2CA3FA, stop:1 #1E88E5);
                 color: white;
                 font-size: 28px;
                 font-weight: bold;
@@ -506,13 +506,16 @@ class SleepMonitorChart(QWidget):#
         self.current_time = QTime.currentTime()
         self.patient_id = "--------"
         self.current_time_window = 60  # Default to 60 seconds
+        self.is_playing = False
+        self.playback_speed = 1.0
+        self.play_pause_btn = None  # Initialize button reference
         self.init_ui()
         self.init_charts()
         
         # Timer for updating time
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_time)
-        self.timer.start(1000)  # Update every second
+        # Don't start timer initially - wait for user to press play
         
     def init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -581,21 +584,23 @@ class SleepMonitorChart(QWidget):#
 
         backward_btn = QPushButton("◀")
         backward_btn.setObjectName("controlButton")
-        backward_btn.setFixedHeight(35)
-        backward_btn.setMinimumWidth(75)
+        backward_btn.setFixedHeight(28) 
+        backward_btn.setMinimumWidth(60)
         controls_layout.addWidget(backward_btn)
 
-        pause_btn = QPushButton("||")
-        pause_btn.setObjectName("controlButton")
-        pause_btn.setFixedHeight(35)
-        pause_btn.setMinimumWidth(75)
-        controls_layout.addWidget(pause_btn)
+        # Start/Pause button (toggles between play and pause)
+        self.play_pause_btn = QPushButton("...")
+        self.play_pause_btn.setObjectName("controlButton")
+        self.play_pause_btn.setFixedHeight(28)
+        self.play_pause_btn.setMinimumWidth(60)
+        self.play_pause_btn.clicked.connect(self.toggle_playback)
+        controls_layout.addWidget(self.play_pause_btn)
 
     
         forward_btn = QPushButton("▶")
         forward_btn.setObjectName("controlButton")
-        forward_btn.setFixedHeight(35)
-        forward_btn.setMinimumWidth(75)
+        forward_btn.setFixedHeight(28)
+        forward_btn.setMinimumWidth(60)
         controls_layout.addWidget(forward_btn)
 
         controls_container.setLayout(controls_layout)
@@ -607,31 +612,38 @@ class SleepMonitorChart(QWidget):#
         report_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #1e293b; margin-left: 12px; margin-right: 12px;")
         layout.addWidget(report_label)
 
-        # --- Time Window Buttons ---
-        time_window_frame = QFrame()
-        time_window_layout = QHBoxLayout(time_window_frame)
-        time_window_layout.setContentsMargins(0, 0, 0, 0)
-        time_window_layout.setSpacing(5)
+        # --- Time Window Dropdown ---
+        time_window_label = QLabel("Time Window:")
+        time_window_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #1e293b;")
+        layout.addWidget(time_window_label)
+        
+        # Create dropdown for time window selection
+        self.time_window_dropdown = QComboBox()
+        self.time_window_dropdown.setObjectName("timeWindowDropdown")
+        self.time_window_dropdown.setFixedHeight(30)
+        self.time_window_dropdown.setMinimumWidth(80)
+        
+        # Add time window options
         time_windows = [
-            ("10s", 10),
-            ("30s", 30),
-            ("60s", 60),
-            ("2m", 120),
-            ("5m", 300),
-            ("10m", 600),
+            ("10m", 10),
+            ("5m", 30), 
+            ("2m", 60),
+            ("1m", 120),
+            ("20s", 300),
+            ("10s", 600),
         ]
-        self.time_window_buttons = []
+        
         for label, value in time_windows:
-            btn = QPushButton(label)
-            btn.setObjectName("timeWindowButton")
-            btn.setFixedHeight(32)
-            btn.setMinimumWidth(48)
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda checked, v=value: self.set_time_window(v))
-            time_window_layout.addWidget(btn)
-            self.time_window_buttons.append(btn)
-        self.time_window_buttons[2].setChecked(True)
-        layout.addWidget(time_window_frame)
+            self.time_window_dropdown.addItem(label, value)
+        
+        # Set default selection to 2m (index 2)
+        self.time_window_dropdown.setCurrentIndex(2)
+        self.current_time_window = 60
+        
+        # Connect dropdown to time window function
+        self.time_window_dropdown.currentIndexChanged.connect(self.on_time_window_changed)
+        
+        layout.addWidget(self.time_window_dropdown)
 
         layout.addStretch()
 
@@ -694,17 +706,23 @@ class SleepMonitorChart(QWidget):#
 
         return file_path, timestamp_iso
 
-    def set_time_window(self, seconds):
-        """Set the time window for the sleep monitoring chart"""
-        # Update current time window
+    def on_time_window_changed(self, index):
+        """Handle time window dropdown change"""
+        # Get the value from dropdown item data
+        seconds = self.time_window_dropdown.itemData(index)
         self.current_time_window = seconds
         
-        # Uncheck all, check only the clicked one
-        for btn in self.time_window_buttons:
-            btn.setChecked(False)
-        sender = self.sender()
-        if sender:
-            sender.setChecked(True)
+        # Update charts with new time window
+        self.update_charts_for_time_window(seconds)
+        print(f"Time window changed to: {self.time_window_dropdown.itemText(index)} ({seconds} seconds)")
+    
+    def set_time_window(self, seconds):
+        """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
+        # Find matching dropdown item and set it
+        for i in range(self.time_window_dropdown.count()):
+            if self.time_window_dropdown.itemData(i) == seconds:
+                self.time_window_dropdown.setCurrentIndex(i)
+                break
         
         # Update charts with new time window
         self.update_charts_for_time_window(seconds)
@@ -717,6 +735,7 @@ class SleepMonitorChart(QWidget):#
             child = self.charts_layout.itemAt(i).widget()
             if child:
                 child.setParent(None)
+                
         
         # Generate new data based on time window
         signals = [
@@ -763,7 +782,7 @@ class SleepMonitorChart(QWidget):#
             ("Thorex ", "#f59e0b", 0.2, 5, 50),
             ("Abdomen ", "#10b981", 0.1, 2, 90),
             ("SpO2 ", "#06b6d4", 1.5, 12, 50),
-            ("Pulse ", "#f97316", 0.0, 0, 30),  # Flat line for position
+            ("Pulse ", "#f97316", 0.0, 0, 30),  
             ("Body Movement", "#8b5cf6", 0.1, 5, 20),
             ("PR/HR)", "#5c61f6", 0.1, 5, 20),
         ]
@@ -804,10 +823,12 @@ class SleepMonitorChart(QWidget):#
             }}
         """)
         label_layout.addWidget(label)
+        
         container_layout.addWidget(label_frame)
         
         # Plot Container with Zoom Controls
         plot_container = QWidget()
+        plot_container.setObjectName("plotContainer")
         plot_container_layout = QVBoxLayout(plot_container)
         plot_container_layout.setContentsMargins(0, 0, 0, 0)
         plot_container_layout.setSpacing(2)
@@ -863,14 +884,53 @@ class SleepMonitorChart(QWidget):#
         x = np.linspace(0, 10, time_points)
         y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
         
-        # Plot the signal
+        # Plot the signal and store reference for line visibility control
         pen = pg.mkPen(color=color, width=1.5)
-        plot_widget.plot(x, y, pen=pen)
+        plot_curve = plot_widget.plot(x, y, pen=pen)
+        
+        # Add click event handler to label for line visibility
+        label.mousePressEvent = lambda event: self.toggle_line_visibility(label, name, plot_curve)
         
         plot_container_layout.addWidget(plot_widget)
         container_layout.addWidget(plot_container)
         
         return container
+    
+    def toggle_line_visibility(self, label, chart_name, plot_curve):
+        """Toggle visibility of graph line when label is clicked"""
+        # Check if the line is currently hidden
+        if hasattr(plot_curve, '_is_hidden') and plot_curve._is_hidden:
+            # Show the line
+            plot_curve.setVisible(True)
+            plot_curve._is_hidden = False
+            label.setStyleSheet("""
+                QLabel#chartSideLabel {
+                    font-size: 12px;
+                    font-weight: bold;
+                    color: #4b5563;
+                    background-color: #f9fafb;
+                    border: 1px solid #e5e7eb;
+                    border-radius: 4px;
+                    padding: 6px;
+                }
+            """)
+            print(f"Graph line '{chart_name}' shown")
+        else:
+            # Hide the line
+            plot_curve.setVisible(False)
+            plot_curve._is_hidden = True
+            label.setStyleSheet("""
+                QLabel#chartSideLabel {
+                    font-size: 12px;
+                    font-weight: bold;
+                    color: #9ca3af;
+                    background-color: #f8fafc;
+                    border: 1px solid #d1d5db;
+                    border-radius: 4px;
+                    padding: 6px;
+                }
+            """)
+            print(f"Graph line '{chart_name}' hidden")
     
     def zoom_vertical(self, plot_widget, zoom_factor):
         """Zoom in/out vertically on the plot"""
@@ -903,10 +963,59 @@ class SleepMonitorChart(QWidget):#
         """Reset zoom to original range"""
         plot_widget.setYRange(0, 100)
     
+    def toggle_playback(self):
+        """Toggle between play and pause"""
+        print(f"Toggle playback - Current state: {self.is_playing}")
+        if self.is_playing:
+            self.pause_playback()
+        else:
+            self.start_playback()
+    
+    def start_playback(self):
+        """Start playback"""
+        print("Starting playback")
+        self.is_playing = True
+        self.play_pause_btn.setText("⏸")
+        # Start timer
+        self.timer.start(1000)
+        print(f"Playback started - Timer active: {self.timer.isActive()}")
+    
+    def pause_playback(self):
+        """Pause playback"""
+        print("Pausing playback")
+        self.is_playing = False
+        self.play_pause_btn.setText("▶")
+        # Stop timer
+        self.timer.stop()
+        print(f"Playback paused - Timer active: {self.timer.isActive()}")
+    
+    def forward_playback(self):
+        """Fast forward playback"""
+        print(f"Forward button clicked - Playing: {self.is_playing}")
+        if self.is_playing:
+            # Jump forward by current time window
+            self.current_time = self.current_time.addSecs(self.current_time_window)
+            self.update_time_display()
+            print(f"Jumped forward to: {self.current_time.toString('HH:mm:ss')}")
+    
+    def backward_playback(self):
+        """Rewind playback"""
+        print(f"Backward button clicked - Playing: {self.is_playing}")
+        if self.is_playing:
+            # Jump backward by current time window
+            self.current_time = self.current_time.addSecs(-self.current_time_window)
+            self.update_time_display()
+            print(f"Jumped backward to: {self.current_time.toString('HH:mm:ss')}")
+    
+    def update_time_display(self):
+        """Update time display without adding seconds"""
+        self.current_time_label.setText(f"Current: {self.current_time.toString('HH:mm:ss')}")
+    
     def update_time(self):
         """Update current time display"""
-        self.current_time = self.current_time.addSecs(1)
-        self.current_time_label.setText(f"Current: {self.current_time.toString('HH:mm:ss')}")
+        if self.is_playing:
+            self.current_time = self.current_time.addSecs(1)
+        self.update_time_display()
 
     def resizeEvent(self, event):
         """Handle resize for watermark centering"""
@@ -916,6 +1025,7 @@ class SleepMonitorChart(QWidget):#
 
 
 class SleepSenseDashboard(QMainWindow):
+    
     """Main Sleep Sense Dashboard Window"""
     
     def __init__(self):
