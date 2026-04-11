@@ -1,0 +1,937 @@
+"""
+Sleep Monitor Chart Widget - Sleep Monitoring Chart Component
+"""
+
+import os
+import json
+import numpy as np
+from datetime import datetime
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QFrame, QComboBox, QMessageBox, QMenu, QAction
+)
+from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QPoint, QRect
+from PyQt5.QtGui import QFont
+import pyqtgraph as pg
+from .custom_viewbox import CustomViewBox
+
+
+class SleepMonitorChart(QWidget):
+    """Sleep Monitoring Chart Widget"""
+    raw_data_saved = pyqtSignal(str, str)  # file_path, timestamp_iso
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current_time = QTime.currentTime()
+        self.patient_id = "--------"
+        self.current_time_window = 60  # Default to 60 seconds
+        self.is_playing = False
+        self.playback_speed = 1.0
+        self.play_pause_btn = None  # Initialize button reference
+        
+        # Area selection variables
+        self.selection_start = None
+        self.selection_end = None
+        self.selection_start_scene = None  # Store scene pos for pixel distance
+        self.selection_end_scene = None
+        self.is_selecting = False
+        self.current_selection_chart = None
+        self.selection_labels = {}  # Store selection labels for each chart
+        self.last_click_time = 0  # Debounce duplicate clicks
+        
+        # Timer for detecting selection completion
+        self.selection_timer = QTimer(self)
+        self.selection_timer.setSingleShot(True)
+        self.selection_timer.timeout.connect(self.finish_selection)
+        self.init_ui()
+        self.init_charts()
+        
+        # Timer for updating time
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_time)
+        # Don't start timer initially - wait for user to press play
+        
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(8) # Increased spacing between control bar and chart container
+        
+        # Control Bar
+        control_bar = self.create_control_bar()
+        main_layout.addWidget(control_bar)
+        
+        # Chart Area
+        chart_container = QWidget()
+        chart_container.setObjectName("chartBackground")
+        chart_layout = QVBoxLayout(chart_container)
+        chart_layout.setContentsMargins(0, 0, 0, 0)
+        chart_layout.setSpacing(8)
+        
+        # Time labels overlay
+        time_overlay = QWidget()
+        time_overlay.setMinimumHeight(40)
+        time_layout = QHBoxLayout(time_overlay)
+        time_layout.setContentsMargins(16, 8, 16, 8)
+        
+        self.start_time_label = QLabel("Start: ----")
+        self.start_time_label.setObjectName("timeLabelStart")
+        time_layout.addWidget(self.start_time_label)
+        time_layout.addStretch()
+        
+        self.current_time_label = QLabel("Current: 23:04:00")
+        self.current_time_label.setObjectName("timeLabelCurrent")
+        time_layout.addWidget(self.current_time_label)
+        
+        chart_layout.addWidget(time_overlay)
+        
+        # Charts container
+        self.charts_widget = QWidget()
+        self.charts_widget.setObjectName("chartsContainer")
+        self.charts_layout = QVBoxLayout(self.charts_widget)
+        self.charts_layout.setContentsMargins(0, 0, 0, 0)
+        self.charts_layout.setSpacing(8)
+        
+        chart_layout.addWidget(self.charts_widget, stretch=1)
+        
+        # Status Bar
+        status_bar = self.create_status_bar()
+        chart_layout.addWidget(status_bar)
+        
+        main_layout.addWidget(chart_container)
+        
+    def create_control_bar(self):
+        """Create control bar with playback controls"""
+        frame = QFrame()
+        frame.setObjectName("chartControlBar")
+        frame.setMinimumHeight(80)
+        
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(16, 4, 16, 4)
+        layout.setSpacing(12)
+
+        # --- Playback Controls ---
+        controls_container = QFrame()
+        controls_container.setObjectName("playbackControls")
+        controls_layout = QHBoxLayout(controls_container)
+        controls_layout.setSpacing(6)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+
+        backward_btn = QPushButton("◀◀")
+        backward_btn.setObjectName("controlButton")
+        backward_btn.setFixedHeight(28) 
+        backward_btn.setMinimumWidth(60)
+        backward_btn.clicked.connect(self.backward_playback)
+        controls_layout.addWidget(backward_btn)
+
+        # Start/Pause button (toggles between play and pause)
+        self.play_pause_btn = QPushButton("▶")
+        self.play_pause_btn.setObjectName("controlButton")
+        self.play_pause_btn.setFixedHeight(28)
+        self.play_pause_btn.setMinimumWidth(60)
+        self.play_pause_btn.clicked.connect(self.toggle_playback)
+        controls_layout.addWidget(self.play_pause_btn)
+
+    
+        forward_btn = QPushButton("▶▶")
+        forward_btn.setObjectName("controlButton")
+        forward_btn.setFixedHeight(28)
+        forward_btn.setMinimumWidth(60)
+        forward_btn.clicked.connect(self.forward_playback)
+        controls_layout.addWidget(forward_btn)
+
+        controls_container.setLayout(controls_layout)
+        layout.addWidget(controls_container)
+
+        # --- Report Selector ---
+        report_label = QLabel("Sleep Monitoring Report")
+        report_label.setObjectName("reportLabel")
+        report_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #1e293b; margin-left: 12px; margin-right: 12px;")
+        layout.addWidget(report_label)
+
+        # --- Time Window Dropdown ---
+        time_window_label = QLabel("Time Window:")
+        time_window_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #1e293b;")
+        layout.addWidget(time_window_label)
+        
+        # Create dropdown for time window selection
+        self.time_window_dropdown = QComboBox()
+        self.time_window_dropdown.setObjectName("timeWindowDropdown")
+        self.time_window_dropdown.setFixedHeight(30)
+        self.time_window_dropdown.setMinimumWidth(80)
+        
+        # Add time window options
+        time_windows = [
+            ("10m", 10),
+            ("5m", 30), 
+            ("2m", 60),
+            ("1m", 120),
+            ("20s", 300),
+            ("10s", 600),
+        ]
+        
+        for label, value in time_windows:
+            self.time_window_dropdown.addItem(label, value)
+        
+        # Set default selection to 2m (index 2)
+        self.time_window_dropdown.setCurrentIndex(2)
+        self.current_time_window = 60
+        
+        # Connect dropdown to time window function
+        self.time_window_dropdown.currentIndexChanged.connect(self.on_time_window_changed)
+        
+        layout.addWidget(self.time_window_dropdown)
+
+        layout.addStretch()
+
+        return frame
+
+    def set_patient_id(self, patient_id: str):
+        self.patient_id = patient_id or "--------"
+
+    def confirm_and_save_raw_data(self):
+        reply = QMessageBox.question(
+            self,
+            "Save raw data",
+            "Generate a timestamped raw-data file for the current session?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        file_path, timestamp_iso = self.save_raw_data_file()
+        if file_path:
+            self.raw_data_saved.emit(file_path, timestamp_iso)
+
+    def save_raw_data_file(self):
+        """Write a timestamped raw-data JSON file and return (path, timestamp_iso)."""
+        timestamp_iso = datetime.now().isoformat(timespec="seconds")
+        safe_ts = timestamp_iso.replace(":", "-")
+        out_dir = os.path.join(os.getcwd(), "raw_data")
+        os.makedirs(out_dir, exist_ok=True)
+        filename = f"raw_data_{self.patient_id}_{safe_ts}.json"
+        file_path = os.path.join(out_dir, filename)
+
+        # Generate representative signal arrays similar to the plotted traces
+        signals = [
+            ("Body Position", "#3b82f6", 0.5, 10, 50),
+            ("Airflow", "#8b5cf6", 0.3, 15, 50),
+            ("Snoring", "#ef4444", 1.0, 8, 50),
+            ("Thorex", "#f59e0b", 0.2, 5, 50),
+            ("Abdomen", "#10b981", 0.1, 2, 90),
+            ("SpO2", "#06b6d4", 1.5, 12, 50),
+            ("Pulse", "#f97316", 0.0, 0, 30),
+            ("Body Movement", "#8b5cf6", 0.1, 5, 20),
+            ("PR/HR", "#5c61f6", 0.1, 5, 20),
+        ]
+
+        time_points = 1000
+        x = np.linspace(0, 10, time_points).tolist()
+        channels = {}
+        for name, color, freq, amp, offset in signals:
+            y = (np.sin(np.linspace(0, 10, time_points) * freq * 2 * np.pi) * amp + offset + (np.random.rand(time_points) - 0.5) * amp * 0.1)
+            channels[name] = {"x": x, "y": y.tolist(), "color": color}
+
+        payload = {
+            "patient_id": self.patient_id,
+            "timestamp": timestamp_iso,
+            "channels": channels,
+        }
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+        return file_path, timestamp_iso
+
+    def on_time_window_changed(self, index):
+        """Handle time window dropdown change"""
+        # Get the value from dropdown item data
+        seconds = self.time_window_dropdown.itemData(index)
+        self.current_time_window = seconds
+        
+        # Update charts with new time window
+        self.update_charts_for_time_window(seconds)
+        print(f"Time window changed to: {self.time_window_dropdown.itemText(index)} ({seconds} seconds)")
+    
+    def set_time_window(self, seconds):
+        """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
+        # Find matching dropdown item and set it
+        for i in range(self.time_window_dropdown.count()):
+            if self.time_window_dropdown.itemData(i) == seconds:
+                self.time_window_dropdown.setCurrentIndex(i)
+                break
+        
+        # Update charts with new time window
+        self.update_charts_for_time_window(seconds)
+        print(f"Time window set to: {seconds} seconds")
+    
+    def update_charts_for_time_window(self, seconds):
+        """Update chart data based on time window selection"""
+        # Clear existing charts
+        for i in reversed(range(self.charts_layout.count())):
+            child = self.charts_layout.itemAt(i).widget()
+            if child:
+                child.setParent(None)
+                
+        
+        # Generate new data based on time window
+        signals = [
+            ("Body Position", "#3b82f6", 0.5, 10, 50),
+            ("Airflow", "#8b5cf6", 0.3, 15, 50),
+            ("Snoring", "#ef4444", 1.0, 8, 50),
+            ("Thorex ", "#f59e0b", 0.2, 5, 50),
+            ("Abdomen ", "#10b981", 0.1, 2, 90),
+            ("SpO2 ", "#06b6d4", 1.5, 12, 50),
+            ("Pulse ", "#f97316", 0.0, 0, 30),
+            ("Body Movement", "#8b5cf6", 0.1, 5, 20),
+            ("PR/HR)", "#5c61f6", 0.1, 5, 20),
+        ]
+        
+        # Adjust frequency based on time window (longer window = lower frequency for visibility)
+        frequency_factor = max(0.1, 10.0 / (seconds / 10.0))
+        
+        for name, color, base_freq, amp, offset in signals:
+            adjusted_freq = base_freq * frequency_factor
+            chart = self.create_signal_chart(name, color, adjusted_freq, amp, offset)
+            self.charts_layout.addWidget(chart)
+    
+    def create_status_bar(self):
+        """Create bottom status bar"""
+        frame = QFrame()
+        frame.setObjectName("statusBar")
+        frame.setMinimumHeight(44)
+        
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(20, 0, 20, 0)
+        layout.setSpacing(15)
+        
+        return frame
+    
+    def init_charts(self):
+        """Initialize signal trace charts"""
+        pg.setConfigOption('background', 'w')
+        pg.setConfigOption('foreground', 'k')
+        
+        signals = [
+            ("Body Position", "#3b82f6", 0.5, 10, 50),
+            ("Airflow", "#8b5cf6", 0.3, 15, 50),
+            ("Snoring", "#ef4444", 1.0, 8, 50),
+            ("Thorex ", "#f59e0b", 0.2, 5, 50),
+            ("Abdomen ", "#10b981", 0.1, 2, 90),
+            ("SpO2 ", "#06b6d4", 1.5, 12, 50),
+            ("Pulse ", "#f97316", 0.0, 0, 30),  
+            ("Body Movement", "#8b5cf6", 0.1, 5, 20),
+            ("PR/HR)", "#5c61f6", 0.1, 5, 20),
+        ]
+        
+        for name, color, freq, amp, offset in signals:
+            chart = self.create_signal_chart(name, color, freq, amp, offset)
+            self.charts_layout.addWidget(chart)
+    
+    def create_signal_chart(self, name, color, frequency, amplitude, offset):
+        """Create a single signal trace chart with side label"""
+        from PyQt5.QtWidgets import QSizePolicy
+        
+        container = QWidget()
+        container.setObjectName("signalChartContainer")
+        container.setMinimumHeight(70)
+        container_layout = QHBoxLayout(container)
+        container_layout.setContentsMargins(4, 4, 4, 4)  # Add padding for border visibility
+        container_layout.setSpacing(8) # Added spacing between label and plot
+        
+        # Side Label
+        label_frame = QFrame()
+        label_frame.setFixedWidth(140) # Further increased width for better label visibility
+        label_layout = QVBoxLayout(label_frame)
+        label_layout.setContentsMargins(8, 4, 8, 4)
+        label_layout.setAlignment(Qt.AlignCenter)
+        
+        label = QLabel(name)
+        label.setObjectName("chartSideLabel")
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet(f"""
+            QLabel#chartSideLabel {{
+                font-size: 12px; /* Increased font size */
+                font-weight: bold;
+                color: #4b5563;
+                background-color: #f9fafb;
+                border: 1px solid #e5e7eb;
+                border-radius: 4px;
+                padding: 6px; /* Increased padding */
+            }}
+        """)
+        label_layout.addWidget(label)
+        
+        container_layout.addWidget(label_frame)
+        
+        # Plot Container with Zoom Controls
+        plot_container = QWidget()
+        plot_container.setObjectName("plotContainer")
+        plot_container_layout = QVBoxLayout(plot_container)
+        plot_container_layout.setContentsMargins(0, 0, 0, 0)
+        plot_container_layout.setSpacing(2)
+        
+        # Zoom Controls
+        zoom_frame = QFrame()
+        zoom_layout = QHBoxLayout(zoom_frame)
+        zoom_layout.setContentsMargins(0, 0, 0, 0)
+        zoom_layout.setSpacing(4)
+        
+        # Store original Y range for zoom calculations
+        self.original_y_min = 0
+        self.original_y_max = 100
+        self.current_y_min = 0
+        self.current_y_max = 100
+        
+        # Zoom In button
+        zoom_in_btn = QPushButton("+")
+        zoom_in_btn.setObjectName("zoomButton")
+        zoom_in_btn.setFixedSize(24, 20)
+        zoom_in_btn.clicked.connect(lambda: self.zoom_vertical(plot_widget, 0.8))
+        zoom_layout.addWidget(zoom_in_btn)
+        
+        # Zoom Out button
+        zoom_out_btn = QPushButton("-")
+        zoom_out_btn.setObjectName("zoomButton")
+        zoom_out_btn.setFixedSize(24, 20)
+        zoom_out_btn.clicked.connect(lambda: self.zoom_vertical(plot_widget, 1.2))
+        zoom_layout.addWidget(zoom_out_btn)
+        
+        # Reset button
+        reset_btn = QPushButton("R")
+        reset_btn.setObjectName("zoomButton")
+        reset_btn.setFixedSize(24, 20)
+        reset_btn.clicked.connect(lambda: self.reset_zoom(plot_widget))
+        zoom_layout.addWidget(reset_btn)
+        
+        zoom_layout.addStretch()
+        plot_container_layout.addWidget(zoom_frame)
+        
+        # Plot Widget with custom ViewBox
+        plot_widget = pg.PlotWidget(viewBox=CustomViewBox())
+        plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        plot_widget.showGrid(x=True, y=True, alpha=0.1)
+        plot_widget.setYRange(0, 100)
+        plot_widget.getAxis('bottom').setStyle(showValues=False)
+        plot_widget.getAxis('left').setStyle(showValues=False)
+        plot_widget.setMouseEnabled(x=True, y=False)
+        plot_widget.hideButtons()  # Hide the 'A' button
+        
+        # Generate signal data
+        time_points = 1000
+        x = np.linspace(0, 10, time_points)
+        y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
+        
+        # Plot the signal and store reference for line visibility control
+        pen = pg.mkPen(color=color, width=1.5)
+        plot_curve = plot_widget.plot(x, y, pen=pen)
+        
+        # Store chart name and plot widget for selection handling
+        plot_widget.chart_name = name
+        plot_widget.plot_curve = plot_curve
+        
+        # Enable mouse tracking for area selection
+        plot_widget.setMouseEnabled(x=True, y=True)
+        plot_widget.scene().sigMouseMoved.connect(lambda pos, pw=plot_widget: self.on_mouse_moved(pos, pw))
+        plot_widget.scene().sigMouseClicked.connect(lambda event, pw=plot_widget: self.on_mouse_clicked(event, pw))
+        vb = plot_widget.getViewBox()
+        vb.sigMouseReleased.connect(lambda event, pw=plot_widget: self.on_mouse_released(event, pw))
+        
+        # Add click event handler to label for line visibility
+        label.mousePressEvent = lambda event: self.toggle_line_visibility(label, name, plot_curve)
+        
+        # Create selection overlay widget (initially hidden)
+        selection_overlay = QLabel(plot_widget)  # Parent to plot widget
+        selection_overlay.setObjectName("selectionOverlay")
+        selection_overlay.setAlignment(Qt.AlignCenter)
+        selection_overlay.setStyleSheet("""
+            QLabel#selectionOverlay {
+                background-color: rgba(59, 130, 246, 0.25);
+                border: 2px solid #3b82f6;
+                border-radius: 4px;
+                color: white;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 4px 8px;
+                text-align: center;
+                text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+            }
+        """)
+        selection_overlay.setVisible(False)
+        
+        # Store overlay reference
+        plot_widget.selection_overlay = selection_overlay
+        
+        plot_container_layout.addWidget(plot_widget)
+        container_layout.addWidget(plot_container)
+        
+        return container
+    
+    def toggle_line_visibility(self, label, chart_name, plot_curve):
+        """Toggle visibility of graph line when label is clicked"""
+        # Check if the line is currently hidden
+        if hasattr(plot_curve, '_is_hidden') and plot_curve._is_hidden:
+            # Show the line
+            plot_curve.setVisible(True)
+            plot_curve._is_hidden = False
+            label.setStyleSheet("""
+                QLabel#chartSideLabel {
+                    font-size: 12px;
+                    font-weight: bold;
+                    color: #4b5563;
+                    background-color: #f9fafb;
+                    border: 1px solid #e5e7eb;
+                    border-radius: 4px;
+                    padding: 6px;
+                }
+            """)
+            print(f"Graph line '{chart_name}' shown")
+        else:
+            # Hide the line
+            plot_curve.setVisible(False)
+            plot_curve._is_hidden = True
+            label.setStyleSheet("""
+                QLabel#chartSideLabel {
+                    font-size: 12px;
+                    font-weight: bold;
+                    color: #9ca3af;
+                    background-color: #f8fafc;
+                    border: 1px solid #d1d5db;
+                    border-radius: 4px;
+                    padding: 6px;
+                }
+            """)
+            print(f"Graph line '{chart_name}' hidden")
+    
+    def zoom_vertical(self, plot_widget, zoom_factor):
+        """Zoom in/out vertically on the plot"""
+        # Get current Y range
+        current_range = plot_widget.getViewBox().viewRange()
+        y_min, y_max = current_range[1]
+        
+        # Calculate center point
+        center = (y_min + y_max) / 2
+        current_range_size = y_max - y_min
+        
+        # Calculate new range size
+        new_range_size = current_range_size * zoom_factor
+        
+        # Calculate new bounds
+        new_y_min = center - new_range_size / 2
+        new_y_max = center + new_range_size / 2
+        
+        # Apply limits to keep within 0-100 range
+        if new_y_min < 0:
+            new_y_min = 0
+            new_y_max = new_range_size
+        elif new_y_max > 100:
+            new_y_max = 100
+            new_y_min = 100 - new_range_size
+            
+        plot_widget.setYRange(new_y_min, new_y_max)
+    
+    def reset_zoom(self, plot_widget):
+        """Reset zoom to original range"""
+        plot_widget.setYRange(0, 100)
+    
+    def toggle_playback(self):
+        """Toggle between play and pause"""
+        print(f"Toggle playback - Current state: {self.is_playing}")
+        if self.is_playing:
+            self.pause_playback()
+        else:
+            self.start_playback()
+    
+    def start_playback(self):
+        """Start playback"""
+        print("Starting playback")
+        self.is_playing = True
+        self.play_pause_btn.setText("⏸")
+        # Start timer
+        self.timer.start(1000)
+        print(f"Playback started - Timer active: {self.timer.isActive()}")
+    
+    def pause_playback(self):
+        """Pause playback"""
+        print("Pausing playback")
+        self.is_playing = False
+        self.play_pause_btn.setText("▶")
+        # Stop timer
+        self.timer.stop()
+        print(f"Playback paused - Timer active: {self.timer.isActive()}")
+    
+    def forward_playback(self):
+        """Fast forward playback"""
+        print(f"Forward button clicked - Playing: {self.is_playing}")
+        if self.is_playing:
+            # Jump forward by current time window
+            self.current_time = self.current_time.addSecs(self.current_time_window)
+            self.update_time_display()
+            print(f"Jumped forward to: {self.current_time.toString('HH:mm:ss')}")
+    
+    def backward_playback(self):
+        """Rewind playback"""
+        print(f"Backward button clicked - Playing: {self.is_playing}")
+        if self.is_playing:
+            # Jump backward by current time window
+            self.current_time = self.current_time.addSecs(-self.current_time_window)
+            self.update_time_display()
+            print(f"Jumped backward to: {self.current_time.toString('HH:mm:ss')}")
+    
+    def update_time_display(self):
+        """Update time display without adding seconds"""
+        self.current_time_label.setText(f"Current: {self.current_time.toString('HH:mm:ss')}")
+    
+    def update_time(self):
+        """Update current time display"""
+        if self.is_playing:
+            self.current_time = self.current_time.addSecs(1)
+        self.update_time_display()
+
+    def on_mouse_moved(self, scene_pos, plot_widget):
+        """Handle mouse move for area selection"""
+        if not self.is_selecting or not self.selection_start:
+            return
+        if plot_widget != self.current_selection_chart:
+            return  # Only process for current chart
+        vb = plot_widget.getViewBox()
+        mouse_point = vb.mapSceneToView(scene_pos)
+        self.selection_end = mouse_point
+        self.selection_end_scene = scene_pos
+        self.update_selection_overlay(self.selection_start, self.selection_end)
+    
+    
+    def on_mouse_clicked(self, event, plot_widget):
+        """Handle mouse click for area selection and label removal"""
+        if event.button() == Qt.LeftButton:
+            scene_pos = event.scenePos()
+            widget_rect = plot_widget.rect()
+            widget_pos = plot_widget.mapFromScene(scene_pos)
+            if not widget_rect.contains(widget_pos):
+                return
+            # Debounce - prevent duplicate clicks
+            import time
+            current_time = time.time()
+            if current_time - self.last_click_time < 0.1:
+                return
+            self.last_click_time = current_time
+            if self.check_label_click(plot_widget, scene_pos):
+                return
+            vb = plot_widget.getViewBox()
+            mouse_point = vb.mapSceneToView(scene_pos)
+            self.is_selecting = True
+            self.current_selection_chart = plot_widget
+            self.selection_start = mouse_point
+            self.selection_start_scene = scene_pos
+            self.selection_end = None
+            self.selection_end_scene = None
+            if hasattr(plot_widget, 'selection_overlay'):
+                plot_widget.selection_overlay.setVisible(False)
+            print(f"Started selection on {plot_widget.chart_name}")
+    
+    def on_mouse_released(self, event, plot_widget):
+        """Finish selection on mouse release"""
+        if not self.is_selecting or plot_widget != self.current_selection_chart:
+            return
+        self.is_selecting = False
+        if self.selection_start_scene and self.selection_end_scene:
+            distance = abs(self.selection_end_scene.x() - self.selection_start_scene.x())
+            if distance > 10:
+                print("Selection finished properly")
+                self.show_selection_menu()
+            else:
+                self.clear_selection()
+    
+    def find_plot_widget_at_position(self, scene_pos):
+        """Find which plot widget contains the given scene position"""
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if hasattr(container, 'findChildren'):
+                plots = container.findChildren(pg.PlotWidget)
+                if plots:
+                    plot_widget = plots[0]
+                    # Check if click is within this plot widget's bounds
+                    widget_rect = plot_widget.rect()
+                    widget_pos = plot_widget.mapFromScene(scene_pos)
+                    if widget_rect.contains(widget_pos):
+                        return plot_widget
+        return None
+    
+    def finish_selection(self):
+        """Finish selection and show dropdown menu (timer-based mouse release detection)"""
+        if self.is_selecting and self.current_selection_chart and self.selection_start:
+            self.is_selecting = False
+            
+            if self.selection_start_scene and self.selection_end_scene:
+                # Calculate PIXEL distance using scene coordinates
+                distance = abs(self.selection_end_scene.x() - self.selection_start_scene.x())
+                
+                if distance > 10:  # Minimum 10 pixels for valid selection
+                    print(f"Selection finished: {distance} pixels")
+                    self.show_selection_menu()
+                else:
+                    # Selection too small, clear it
+                    print("Selection too small, clearing")
+                    self.clear_selection()
+            else:
+                # No proper selection made
+                self.clear_selection()
+    
+    def update_selection_overlay(self, start_pos, end_pos):
+        """Update the visual selection overlay"""
+        if not self.current_selection_chart:
+            return
+        # Hide overlays of all other charts
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if hasattr(container, 'findChildren'):
+                plots = container.findChildren(pg.PlotWidget)
+                if plots and plots[0] != self.current_selection_chart:
+                    if hasattr(plots[0], 'selection_overlay'):
+                        plots[0].selection_overlay.setVisible(False)
+        overlay = self.current_selection_chart.selection_overlay
+        if not overlay:
+            return
+        vb = self.current_selection_chart.getViewBox()
+        p1 = vb.mapViewToScene(start_pos)
+        p2 = vb.mapViewToScene(end_pos)
+        w1 = self.current_selection_chart.mapFromScene(p1)
+        w2 = self.current_selection_chart.mapFromScene(p2)
+        x_min = min(w1.x(), w2.x())
+        x_max = max(w1.x(), w2.x())
+        width = x_max - x_min
+        if width < 30:
+            width = 30
+        plot_rect = self.current_selection_chart.rect()
+        x_min = max(0, min(x_min, plot_rect.width() - width))
+        width = min(width, plot_rect.width() - x_min)
+        overlay.setGeometry(int(x_min), 0, int(width), self.current_selection_chart.height())
+        overlay.setVisible(True)
+        overlay.setText("Selecting...")
+        overlay.raise_()
+        overlay.setStyleSheet("""
+            QLabel#selectionOverlay {
+                background-color: rgba(59, 130, 246, 0.3);
+                border: 2px solid #3b82f6;
+                border-radius: 4px;
+                color: white;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 4px 6px;
+                text-align: center;
+            }
+        """)
+    
+    def show_selection_menu(self):
+        """Show dropdown menu with OSA, CSA, MSA, HSA options"""
+        if not self.current_selection_chart:
+            return
+            
+        # Update overlay to show waiting state
+        overlay = self.current_selection_chart.selection_overlay
+        if overlay and self.selection_start and self.selection_end:
+            self.update_selection_overlay(self.selection_start, self.selection_end)
+            overlay.setText("Choose Label...")
+            overlay.setStyleSheet("""
+                QLabel#selectionOverlay {
+                    background-color: rgba(245, 158, 11, 0.3);
+                    border: 2px solid #f59e0b;
+                    border-radius: 4px;
+                    color: white;
+                    font-size: 12px;
+                    font-weight: bold;
+                    padding: 4px 6px;
+                    text-align: center;
+                    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+                }
+            """)
+            
+        # Create context menu
+        menu = QMenu(self)
+        menu.setTitle("Select Sleep Event Type")
+        
+        # Add actions for each sleep event type
+        osa_action = QAction("OSA - Obstructive Sleep Apnea", self)
+        osa_action.triggered.connect(lambda: self.apply_selection_label("OSA"))
+        menu.addAction(osa_action)
+        
+        csa_action = QAction("CSA - Central Sleep Apnea", self)
+        csa_action.triggered.connect(lambda: self.apply_selection_label("CSA"))
+        menu.addAction(csa_action)
+        
+        msa_action = QAction("MSA - Mixed Sleep Apnea", self)
+        msa_action.triggered.connect(lambda: self.apply_selection_label("MSA"))
+        menu.addAction(msa_action)
+        
+        hsa_action = QAction("HSA - Hypopnea Sleep Apnea", self)
+        hsa_action.triggered.connect(lambda: self.apply_selection_label("HSA"))
+        menu.addAction(hsa_action)
+        
+        # Add separator and clear option
+        menu.addSeparator()
+        clear_action = QAction("Clear Selection", self)
+        clear_action.triggered.connect(self.clear_selection)
+        menu.addAction(clear_action)
+        
+        # Show menu at cursor position
+        cursor_pos = self.mapFromGlobal(self.cursor().pos())
+        menu.popup(self.mapToGlobal(cursor_pos))
+    
+    def apply_selection_label(self, label_type):
+        """Apply the selected label to the area"""
+        if not self.current_selection_chart or not self.selection_start or not self.selection_end:
+            return
+            
+        # Store the selection label
+        chart_name = self.current_selection_chart.chart_name
+        if chart_name not in self.selection_labels:
+            self.selection_labels[chart_name] = []
+            
+        # Add new selection
+        selection_data = {
+            'label': label_type,
+            'start': self.selection_start,
+            'end': self.selection_end,
+            'color': self.get_label_color(label_type)
+        }
+        self.selection_labels[chart_name].append(selection_data)
+        
+        # Update overlay to show the label with proper positioning
+        overlay = self.current_selection_chart.selection_overlay
+        if overlay:
+            overlay.setText(label_type)
+            
+            # Update overlay geometry to match selected area
+            self.update_selection_overlay(self.selection_start, self.selection_end)
+            
+            # Apply label styling with better text visibility
+            overlay.setStyleSheet(f"""
+                QLabel#selectionOverlay {{
+                    background-color: {selection_data['color']};
+                    border: 2px solid {selection_data['color'].replace('0.2', '0.8')};
+                    border-radius: 6px;
+                    color: white;
+                    font-size: 14px;
+                    font-weight: bold;
+                    padding: 8px 12px;
+                    text-align: center;
+                    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+                }}
+            """)
+            
+        print(f"Applied label '{label_type}' to {chart_name} chart")
+        # Clear selection variables
+        self.selection_start = None
+        self.selection_end = None
+        self.selection_start_scene = None
+        self.selection_end_scene = None
+        self.current_selection_chart = None
+        self.is_selecting = False
+    
+    def get_label_color(self, label_type):
+        """Get color for different label types"""
+        colors = {
+            'OSA': 'rgba(239, 68, 68, 0.2)',  # Red
+            'CSA': 'rgba(59, 130, 246, 0.2)',  # Blue
+            'MSA': 'rgba(245, 158, 11, 0.2)',  # Orange
+            'HSA': 'rgba(16, 185, 129, 0.2)'   # Green
+        }
+        return colors.get(label_type, 'rgba(107, 114, 128, 0.2)')
+    
+    def check_label_click(self, plot_widget, scene_pos):
+        """Check if click is on an existing label and show remove option"""
+        chart_name = plot_widget.chart_name
+        if chart_name not in self.selection_labels or not self.selection_labels[chart_name]:
+            return False
+        vb = plot_widget.getViewBox()
+        widget_pos = plot_widget.mapFromScene(scene_pos)
+        for i, selection_data in enumerate(self.selection_labels[chart_name]):
+            p1 = vb.mapViewToScene(selection_data['start'])
+            p2 = vb.mapViewToScene(selection_data['end'])
+            label_start = plot_widget.mapFromScene(p1)
+            label_end = plot_widget.mapFromScene(p2)
+            if (min(label_start.x(), label_end.x()) <= widget_pos.x() <= max(label_start.x(), label_end.x())):
+                self.show_remove_menu(plot_widget, chart_name, i, selection_data, scene_pos)
+                return True
+        return False
+    
+    def show_remove_menu(self, plot_widget, chart_name, label_index, selection_data, scene_pos):
+        """Show menu to remove or modify existing label"""
+        menu = QMenu(self)
+        menu.setTitle(f"Label: {selection_data['label']}")
+        
+        # Remove action
+        remove_action = QAction(f"Remove '{selection_data['label']}'", self)
+        remove_action.triggered.connect(lambda: self.remove_label(chart_name, label_index))
+        menu.addAction(remove_action)
+        
+        # Change label action
+        menu.addSeparator()
+        change_action = QAction("Change Label...", self)
+        change_action.triggered.connect(lambda: self.change_label(chart_name, label_index))
+        menu.addAction(change_action)
+        
+        # Show menu at click position
+        widget_pos = plot_widget.mapFromScene(scene_pos)
+        global_pos = plot_widget.mapToGlobal(widget_pos)
+        menu.popup(global_pos)
+    
+    def remove_label(self, chart_name, label_index):
+        """Remove a specific label"""
+        if chart_name in self.selection_labels and 0 <= label_index < len(self.selection_labels[chart_name]):
+            removed_label = self.selection_labels[chart_name].pop(label_index)
+            print(f"Removed label '{removed_label['label']}' from {chart_name}")
+            
+            # Hide overlay if no more labels
+            if not self.selection_labels[chart_name]:
+                # Find the plot widget and hide overlay
+                for i in range(self.charts_layout.count()):
+                    container = self.charts_layout.itemAt(i).widget()
+                    if hasattr(container, 'findChildren'):
+                        plots = container.findChildren(pg.PlotWidget)
+                        if plots and plots[0].chart_name == chart_name:
+                            if hasattr(plots[0], 'selection_overlay'):
+                                plots[0].selection_overlay.setVisible(False)
+                            break
+    
+    def change_label(self, chart_name, label_index):
+        """Change an existing label to a different type"""
+        if chart_name in self.selection_labels and 0 <= label_index < len(self.selection_labels[chart_name]):
+            # Store the selection data for re-application
+            old_selection = self.selection_labels[chart_name][label_index]
+            
+            # Remove the old label
+            self.remove_label(chart_name, label_index)
+            
+            # Set up for new label selection
+            self.selection_start = old_selection['start']
+            self.selection_end = old_selection['end']
+            
+            # Find the plot widget
+            for i in range(self.charts_layout.count()):
+                container = self.charts_layout.itemAt(i).widget()
+                if hasattr(container, 'findChildren'):
+                    plots = container.findChildren(pg.PlotWidget)
+                    if plots and plots[0].chart_name == chart_name:
+                        self.current_selection_chart = plots[0]
+                        # Show selection menu for new label
+                        self.show_selection_menu()
+                        break
+    
+    def clear_selection(self):
+        """Clear the current selection"""
+        if self.current_selection_chart and hasattr(self.current_selection_chart, 'selection_overlay'):
+            self.current_selection_chart.selection_overlay.setVisible(False)
+        self.selection_start = None
+        self.selection_end = None
+        self.selection_start_scene = None
+        self.selection_end_scene = None
+        self.current_selection_chart = None
+        self.is_selecting = False
+        print("Selection cleared")
+    
+    def resizeEvent(self, event):
+        """Handle resize for watermark centering"""
+        super().resizeEvent(event)
+        if hasattr(self, 'watermark'):
+            self.watermark.setGeometry(self.charts_widget.rect())

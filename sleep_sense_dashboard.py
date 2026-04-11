@@ -319,7 +319,7 @@ class PatientInfoWidget(QWidget):
         
         # Header
         header_layout = QHBoxLayout()
-        header_label = QLabel("📈 Weekly Summary")
+        header_label = QLabel(" Weekly Summary")
         header_label.setObjectName("sectionHeader")
         header_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
         header_layout.addWidget(header_label)
@@ -400,7 +400,7 @@ class PatientInfoWidget(QWidget):
         upload_layout.setAlignment(Qt.AlignCenter)
         upload_layout.setSpacing(12)
         
-        upload_icon = QLabel("📤")
+        upload_icon = QLabel("")
         upload_icon.setAlignment(Qt.AlignCenter)
         upload_icon.setStyleSheet("font-size: 48px;")
         upload_layout.addWidget(upload_icon)
@@ -415,7 +415,7 @@ class PatientInfoWidget(QWidget):
         upload_desc.setStyleSheet("font-size: 11px; color: #6b7280;")
         upload_layout.addWidget(upload_desc)
         
-        upload_btn = QPushButton("📤 Choose Files")
+        upload_btn = QPushButton(" Choose Files")
         upload_btn.setObjectName("uploadButton")
         upload_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         upload_btn.setMinimumHeight(40)
