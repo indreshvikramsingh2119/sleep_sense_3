@@ -250,6 +250,7 @@ class SleepMonitorChart(QWidget):
         
         # Update charts with new time window
         self.update_charts_for_time_window(seconds)
+        self.restore_all_selections()
         print(f"Time window changed to: {self.time_window_dropdown.itemText(index)} ({seconds} seconds)")
     
     def set_time_window(self, seconds):
@@ -262,6 +263,7 @@ class SleepMonitorChart(QWidget):
         
         # Update charts with new time window
         self.update_charts_for_time_window(seconds)
+        self.restore_all_selections()
         print(f"Time window set to: {seconds} seconds")
     
     def update_charts_for_time_window(self, seconds):
@@ -433,14 +435,17 @@ class SleepMonitorChart(QWidget):
         # Enable mouse tracking for area selection
         plot_widget.setMouseEnabled(x=True, y=True)
         plot_widget.scene().sigMouseMoved.connect(lambda pos, pw=plot_widget: self.on_mouse_moved(pos, pw))
-        plot_widget.scene().sigMouseClicked.connect(lambda event, pw=plot_widget: self.on_mouse_clicked(event, pw))
+        plot_widget.mousePressEvent = lambda event, pw=plot_widget: self.custom_mouse_press(event, pw)
         vb = plot_widget.getViewBox()
         vb.sigMouseReleased.connect(lambda event, pw=plot_widget: self.on_mouse_released(event, pw))
         
         # Add click event handler to label for line visibility
         label.mousePressEvent = lambda event: self.toggle_line_visibility(label, name, plot_curve)
         
-        # Create selection overlay widget (initially hidden)
+        # Initialize multiple overlays list
+        plot_widget.selection_overlays = []
+        
+        # Create temporary selection overlay for preview (initially hidden)
         selection_overlay = QLabel(plot_widget)  # Parent to plot widget
         selection_overlay.setObjectName("selectionOverlay")
         selection_overlay.setAlignment(Qt.AlignCenter)
@@ -459,7 +464,7 @@ class SleepMonitorChart(QWidget):
         """)
         selection_overlay.setVisible(False)
         
-        # Store overlay reference
+        # Store temporary overlay reference for preview only
         plot_widget.selection_overlay = selection_overlay
         
         plot_container_layout.addWidget(plot_widget)
@@ -625,8 +630,50 @@ class SleepMonitorChart(QWidget):
             self.selection_start_scene = scene_pos
             self.selection_end = None
             self.selection_end_scene = None
-            if hasattr(plot_widget, 'selection_overlay'):
-                plot_widget.selection_overlay.setVisible(False)
+            # Keep preview overlay hidden, don't touch persistent overlays
+            print(f"Started selection on {plot_widget.chart_name}")
+        elif event.button() == Qt.RightButton:
+            # RIGHT CLICK logic
+            if self.selection_start and self.selection_end:
+                print("Right click detected -> opening menu")
+                self.show_selection_menu()
+    
+    def custom_mouse_press(self, event, plot_widget):
+        """Custom mouse press handler for better right-click detection"""
+        if event.button() == Qt.RightButton:
+            if self.selection_start and self.selection_end:
+                self.show_selection_menu()
+        else:
+            # Handle left click directly without converting to scene event
+            widget_pos = event.pos()
+            widget_rect = plot_widget.rect()
+            if not widget_rect.contains(widget_pos):
+                return
+            
+            # Debounce - prevent duplicate clicks
+            import time
+            current_time = time.time()
+            if current_time - self.last_click_time < 0.1:
+                return
+            self.last_click_time = current_time
+            
+            # Convert to scene position for existing logic
+            scene_pos = plot_widget.mapToScene(widget_pos)
+            
+            # Check for label click
+            if self.check_label_click(plot_widget, scene_pos):
+                return
+            
+            # Start selection
+            vb = plot_widget.getViewBox()
+            mouse_point = vb.mapSceneToView(scene_pos)
+            self.is_selecting = True
+            self.current_selection_chart = plot_widget
+            self.selection_start = mouse_point
+            self.selection_start_scene = scene_pos
+            self.selection_end = None
+            self.selection_end_scene = None
+            # Keep preview overlay hidden, don't touch persistent overlays
             print(f"Started selection on {plot_widget.chart_name}")
     
     def on_mouse_released(self, event, plot_widget):
@@ -638,7 +685,7 @@ class SleepMonitorChart(QWidget):
             distance = abs(self.selection_end_scene.x() - self.selection_start_scene.x())
             if distance > 10:
                 print("Selection finished properly")
-                self.show_selection_menu()
+                print("Selection completed. Right click to label.")
             else:
                 self.clear_selection()
     
@@ -724,8 +771,11 @@ class SleepMonitorChart(QWidget):
     
     def show_selection_menu(self):
         """Show dropdown menu with OSA, CSA, MSA, HSA options"""
+        print("show_selection_menu called!")
         if not self.current_selection_chart:
+            print("No current_selection_chart, returning")
             return
+        print(f"Current selection chart: {self.current_selection_chart.chart_name}")
             
         # Update overlay to show waiting state
         overlay = self.current_selection_chart.selection_overlay
@@ -747,6 +797,7 @@ class SleepMonitorChart(QWidget):
             """)
             
         # Create context menu
+        print("Creating context menu...")
         menu = QMenu(self)
         menu.setTitle("Select Sleep Event Type")
         
@@ -774,66 +825,122 @@ class SleepMonitorChart(QWidget):
         menu.addAction(clear_action)
         
         # Show menu at cursor position
-        cursor_pos = self.mapFromGlobal(self.cursor().pos())
-        menu.popup(self.mapToGlobal(cursor_pos))
+        print("Getting cursor position...")
+        from PyQt5.QtGui import QCursor
+        global_cursor_pos = QCursor.pos()
+        print(f"Cursor position: {global_cursor_pos}")
+        print("Showing menu...")
+        menu.exec_(global_cursor_pos)
+        print("Menu exec called!")
     
     def apply_selection_label(self, label_type):
         """Apply the selected label to the area"""
         if not self.current_selection_chart or not self.selection_start or not self.selection_end:
             return
-            
-        # Store the selection label
-        chart_name = self.current_selection_chart.chart_name
+
+        plot_widget = self.current_selection_chart
+        chart_name = plot_widget.chart_name
+
         if chart_name not in self.selection_labels:
             self.selection_labels[chart_name] = []
-            
-        # Add new selection
+
         selection_data = {
             'label': label_type,
             'start': self.selection_start,
             'end': self.selection_end,
             'color': self.get_label_color(label_type)
         }
+
         self.selection_labels[chart_name].append(selection_data)
+
+        # CREATE NEW OVERLAY (instead of reusing one)
+        overlay = QLabel(plot_widget)
+        overlay.setAlignment(Qt.AlignCenter)
+        overlay.setText(label_type)
+        overlay.setStyleSheet(f"""
+            background-color: {selection_data['color']};
+            border: 2px solid {selection_data['color'].replace('0.2', '0.8')};
+            border-radius: 6px;
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+        """)
         
-        # Update overlay to show the label with proper positioning
-        overlay = self.current_selection_chart.selection_overlay
-        if overlay:
-            overlay.setText(label_type)
-            
-            # Update overlay geometry to match selected area
-            self.update_selection_overlay(self.selection_start, self.selection_end)
-            
-            # Apply label styling with better text visibility
-            overlay.setStyleSheet(f"""
-                QLabel#selectionOverlay {{
-                    background-color: {selection_data['color']};
-                    border: 2px solid {selection_data['color'].replace('0.2', '0.8')};
-                    border-radius: 6px;
-                    color: white;
-                    font-size: 14px;
-                    font-weight: bold;
-                    padding: 8px 12px;
-                    text-align: center;
-                    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
-                }}
-            """)
-            
-        print(f"Applied label '{label_type}' to {chart_name} chart")
-        # Clear selection variables
+        # Make overlay clickable
+        overlay.mousePressEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_click(event, ov, cn)
+        overlay.mouseDoubleClickEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_double_click(event, ov, cn)
+
+        # Position overlay
+        vb = plot_widget.getViewBox()
+        p1 = vb.mapViewToScene(selection_data['start'])
+        p2 = vb.mapViewToScene(selection_data['end'])
+        w1 = plot_widget.mapFromScene(p1)
+        w2 = plot_widget.mapFromScene(p2)
+
+        x_min = min(w1.x(), w2.x())
+        x_max = max(w1.x(), w2.x())
+
+        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
+        overlay.show()
+
+        # store overlay
+        plot_widget.selection_overlays.append(overlay)
+
+        print(f"Label '{label_type}' added (persistent)")
+
+        # clear temp selection
         self.selection_start = None
         self.selection_end = None
-        self.selection_start_scene = None
-        self.selection_end_scene = None
         self.current_selection_chart = None
-        self.is_selecting = False
+    
+    def handle_overlay_click(self, event, overlay, chart_name):
+        """Handle right click on overlay"""
+        if event.button() == Qt.RightButton:
+            self.show_overlay_menu(event.globalPos(), overlay, chart_name)
+    
+    def handle_overlay_double_click(self, event, overlay, chart_name):
+        """Double click = quick remove option"""
+        self.show_overlay_menu(event.globalPos(), overlay, chart_name)
+    
+    def show_overlay_menu(self, global_pos, overlay, chart_name):
+        """Show remove menu for overlay"""
+        menu = QMenu(self)
+
+        remove_action = QAction("Remove Selection", self)
+        remove_action.triggered.connect(lambda: self.delete_overlay(overlay, chart_name))
+        menu.addAction(remove_action)
+
+        menu.exec_(global_pos)
+    
+    def delete_overlay(self, overlay, chart_name):
+        """Delete selected overlay with data sync"""
+        overlay.hide()
+        overlay.deleteLater()
+
+        # Remove from overlay list and data
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            plots = container.findChildren(pg.PlotWidget)
+
+            if plots and plots[0].chart_name == chart_name:
+                pw = plots[0]
+
+                if overlay in pw.selection_overlays:
+                    index = pw.selection_overlays.index(overlay)
+                    pw.selection_overlays.remove(overlay)
+
+                    # remove from data also
+                    if chart_name in self.selection_labels and index < len(self.selection_labels[chart_name]):
+                        self.selection_labels[chart_name].pop(index)
+
+        print("Overlay + data deleted")
     
     def get_label_color(self, label_type):
-        """Get color for different label types"""
+        """Get color for label type"""
         colors = {
-            'OSA': 'rgba(239, 68, 68, 0.2)',  # Red
-            'CSA': 'rgba(59, 130, 246, 0.2)',  # Blue
-            'MSA': 'rgba(245, 158, 11, 0.2)',  # Orange
+            'OSA': 'rgba(239, 68, 68, 0.2)',    # Red
+            'CSA': 'rgba(59, 130, 246, 0.2)',   # Blue
+            'MSA': 'rgba(245, 158, 11, 0.2)',   # Yellow
             'HSA': 'rgba(16, 185, 129, 0.2)'   # Green
         }
         return colors.get(label_type, 'rgba(107, 114, 128, 0.2)')
@@ -929,6 +1036,47 @@ class SleepMonitorChart(QWidget):
         self.current_selection_chart = None
         self.is_selecting = False
         print("Selection cleared")
+    
+    def restore_all_selections(self):
+        """Restore all selection overlays when charts are recreated"""
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            plots = container.findChildren(pg.PlotWidget)
+
+            if not plots:
+                continue
+
+            plot_widget = plots[0]
+            chart_name = plot_widget.chart_name
+
+            if chart_name not in self.selection_labels:
+                continue
+
+            for selection in self.selection_labels[chart_name]:
+                overlay = QLabel(plot_widget)
+                overlay.setText(selection['label'])
+                overlay.setStyleSheet(f"""
+                    background-color: {selection['color']};
+                    border: 2px solid {selection['color'].replace('0.2', '0.8')};
+                    border-radius: 6px;
+                    color: white;
+                    font-size: 12px;
+                    font-weight: bold;
+                """)
+
+                vb = plot_widget.getViewBox()
+                p1 = vb.mapViewToScene(selection['start'])
+                p2 = vb.mapViewToScene(selection['end'])
+                w1 = plot_widget.mapFromScene(p1)
+                w2 = plot_widget.mapFromScene(p2)
+
+                x_min = min(w1.x(), w2.x())
+                x_max = max(w1.x(), w2.x())
+
+                overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
+                overlay.show()
+
+                plot_widget.selection_overlays.append(overlay)
     
     def resizeEvent(self, event):
         """Handle resize for watermark centering"""
