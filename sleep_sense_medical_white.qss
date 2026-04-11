@@ -35,13 +35,12 @@ QLabel#headerSubtitle {
 
 /* Logo Container */
 QFrame#logoContainer {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                stop:0 #2CA3FA, stop:1 #1E88E5);
+    background: transparent;
     border-radius: 12px;
-    min-width: 48px;
-    max-width: 48px;
-    min-height: 48px;
-    max-height: 48px;
+    min-width: 120px;
+    max-width: 120px;
+    min-height: 44px;
+    max-height: 44px;
 }
 
 /* Status Badges */
@@ -397,24 +396,48 @@ QComboBox#timeWindowDropdown QAbstractItemView::item:hover {
 
 /* Zoom Buttons */
 QPushButton#zoomButton {
-    background-color: #f1f5f9;
-    color: #64748b;
-    border: 1px solid #e2e8f0;
+    background-color: #f9fafb;
+    border: 1px solid #e5e7eb;
     border-radius: 4px;
-    font-size: 11px;
+    color: #6b7280;
+    font-size: 10px;
     font-weight: bold;
-    padding: 0px;
+    padding: 2px;
 }
 
 QPushButton#zoomButton:hover {
-    background-color: #e2e8f0;
-    border-color: #cbd5e1;
-    color: #334155;
+    background-color: #f3f4f6;
+    border-color: #d1d5db;
+    color: #374151;
 }
 
 QPushButton#zoomButton:pressed {
-    background-color: #cbd5e1;
-    border-color: #94a3b8;
+    background-color: #e5e7eb;
+    border-color: #9ca3af;
+    color: #1f2937;
+}
+
+/* Revert Button */
+QPushButton#revertButton {
+    background-color: #fef3c7;
+    border: 1px solid #fbbf24;
+    border-radius: 4px;
+    color: #92400e;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 2px;
+}
+
+QPushButton#revertButton:hover {
+    background-color: #fde68a;
+    border-color: #f59e0b;
+    color: #78350f;
+}
+
+QPushButton#revertButton:pressed {
+    background-color: #fbbf24;
+    border-color: #d97706;
+    color: #451a03;
 }
 
 QPushButton#playButtonMain {
@@ -555,7 +578,7 @@ QWidget#chartsContainer {
 
 /* Chart containers for individual signal traces */
 QWidget#signalChartContainer {
-    background-color: #ffffff;
+    background-color: transparent;
     border: 1px solid #f3f4f6;
     border-radius: 6px;
     margin: 2px;
@@ -564,7 +587,12 @@ QWidget#signalChartContainer {
 
 QWidget#signalChartContainer:hover {
     border-color: #e5e7eb;
-    background-color: #fafafa;
+    background-color: transparent;
+}
+
+/* PyQtGraph Plot Widgets - Transparent Background */
+PlotWidget {
+    background: transparent;
 }
 
 /* Signal Labels */

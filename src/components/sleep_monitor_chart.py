@@ -8,10 +8,10 @@ import numpy as np
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QMessageBox, QMenu, QAction
+    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QPoint, QRect
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QPoint, QRect, QMimeData
+from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen
 import pyqtgraph as pg
 from .custom_viewbox import CustomViewBox
 
@@ -28,6 +28,14 @@ class SleepMonitorChart(QWidget):
         self.is_playing = False
         self.playback_speed = 1.0
         self.play_pause_btn = None  # Initialize button reference
+        self.hidden_graphs_dropdown = None  # Initialize dropdown reference
+        self.hidden_graphs = {}  # Store hidden graph data: {name: {container, plot_curve, color, frequency, amplitude, offset, position}}
+        self.graph_order = []  # Track original order of graphs: [name1, name2, ...]
+        self.dragged_graph = None  # Track currently dragged graph
+        self.manual_drag_container = None  # Track manually dragging container
+        self.manual_drag_graph_name = None  # Track manually dragging graph name
+        self.manual_drag_start_height = None  # Store original height during manual drag
+        self.manual_drag_start_y = None  # Store starting Y position during manual drag
         
         # Area selection variables
         self.selection_start = None
@@ -51,6 +59,37 @@ class SleepMonitorChart(QWidget):
         self.timer.timeout.connect(self.update_time)
         # Don't start timer initially - wait for user to press play
         
+    def scroll_up(self):
+        """Scroll up by a fixed amount"""
+        if hasattr(self, 'scroll_area'):
+            scrollbar = self.scroll_area.verticalScrollBar()
+            current_value = scrollbar.value()
+            new_value = max(0, current_value - 100)  # Scroll up by 100 pixels
+            scrollbar.setValue(new_value)
+    
+    def scroll_down(self):
+        """Scroll down by a fixed amount"""
+        if hasattr(self, 'scroll_area'):
+            scrollbar = self.scroll_area.verticalScrollBar()
+            current_value = scrollbar.value()
+            max_value = scrollbar.maximum()
+            new_value = min(max_value, current_value + 100)  # Scroll down by 100 pixels
+            scrollbar.setValue(new_value)
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard events for arrow key scrolling"""
+        if event.key() == Qt.Key_Up:
+            # Scroll up with UP arrow key
+            self.scroll_up()
+            event.accept()
+        elif event.key() == Qt.Key_Down:
+            # Scroll down with DOWN arrow key
+            self.scroll_down()
+            event.accept()
+        else:
+            # Let other key events be handled normally
+            super().keyPressEvent(event)
+    
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -84,14 +123,52 @@ class SleepMonitorChart(QWidget):
         
         chart_layout.addWidget(time_overlay)
         
-        # Charts container
+        # Charts container with functional scrollbar only
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setObjectName("chartsScrollArea")
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        # Enable functional scrollbar with proper styling
+        self.scroll_area.verticalScrollBar().setStyleSheet("""
+            QScrollBar:vertical {
+                background: #f3f4f6;
+                width: 12px;
+                border-radius: 6px;
+                margin: 0px 0px 0px 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #9ca3af;
+                min-height: 20px;
+                border-radius: 6px;
+                border: 1px solid #6b7280;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #6b7280;
+                border: 1px solid #4b5563;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: #4b5563;
+                border: 1px solid #374151;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                width: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+        """)
+        
         self.charts_widget = QWidget()
         self.charts_widget.setObjectName("chartsContainer")
         self.charts_layout = QVBoxLayout(self.charts_widget)
         self.charts_layout.setContentsMargins(0, 0, 0, 0)
         self.charts_layout.setSpacing(8)
         
-        chart_layout.addWidget(self.charts_widget, stretch=1)
+        self.scroll_area.setWidget(self.charts_widget)
+        chart_layout.addWidget(self.scroll_area, stretch=1)
         
         # Status Bar
         status_bar = self.create_status_bar()
@@ -180,6 +257,24 @@ class SleepMonitorChart(QWidget):
         self.time_window_dropdown.currentIndexChanged.connect(self.on_time_window_changed)
         
         layout.addWidget(self.time_window_dropdown)
+
+        # --- Hidden Graphs Dropdown ---
+        hidden_graphs_label = QLabel("Hidden Graphs:")
+        hidden_graphs_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #1e293b;")
+        layout.addWidget(hidden_graphs_label)
+        
+        # Create dropdown for hidden graphs
+        self.hidden_graphs_dropdown = QComboBox()
+        self.hidden_graphs_dropdown.setObjectName("hiddenGraphsDropdown")
+        self.hidden_graphs_dropdown.setFixedHeight(30)
+        self.hidden_graphs_dropdown.setMinimumWidth(120)
+        self.hidden_graphs_dropdown.addItem("Select to restore...")  # Placeholder item
+        self.hidden_graphs_dropdown.setEnabled(False)  # Disable until graphs are hidden
+        
+        # Connect dropdown to restore function
+        self.hidden_graphs_dropdown.currentIndexChanged.connect(self.restore_hidden_graph)
+        
+        layout.addWidget(self.hidden_graphs_dropdown)
 
         layout.addStretch()
 
@@ -273,8 +368,17 @@ class SleepMonitorChart(QWidget):
             child = self.charts_layout.itemAt(i).widget()
             if child:
                 child.setParent(None)
-                
         
+        # Clear hidden graphs and dropdown when time window changes
+        self.hidden_graphs.clear()
+        self.hidden_graphs_dropdown.clear()
+        self.hidden_graphs_dropdown.addItem("Select to restore...")
+        self.hidden_graphs_dropdown.setEnabled(False)
+        
+        # Reset graph order
+        self.graph_order.clear()
+        self.dragged_graph = None
+                
         # Generate new data based on time window
         signals = [
             ("Body Position", "#3b82f6", 0.5, 10, 50),
@@ -291,10 +395,12 @@ class SleepMonitorChart(QWidget):
         # Adjust frequency based on time window (longer window = lower frequency for visibility)
         frequency_factor = max(0.1, 10.0 / (seconds / 10.0))
         
-        for name, color, base_freq, amp, offset in signals:
+        for position, (name, color, base_freq, amp, offset) in enumerate(signals):
             adjusted_freq = base_freq * frequency_factor
             chart = self.create_signal_chart(name, color, adjusted_freq, amp, offset)
-            self.charts_layout.addWidget(chart)
+            self.charts_layout.addWidget(chart, stretch=1)
+            # Track the original order
+            self.graph_order.append(name)
     
     def create_status_bar(self):
         """Create bottom status bar"""
@@ -325,17 +431,20 @@ class SleepMonitorChart(QWidget):
             ("PR/HR)", "#5c61f6", 0.1, 5, 20),
         ]
         
-        for name, color, freq, amp, offset in signals:
+        for position, (name, color, freq, amp, offset) in enumerate(signals):
             chart = self.create_signal_chart(name, color, freq, amp, offset)
-            self.charts_layout.addWidget(chart)
+            self.charts_layout.addWidget(chart, stretch=1)
+            # Track the original order
+            self.graph_order.append(name)
     
     def create_signal_chart(self, name, color, frequency, amplitude, offset):
         """Create a single signal trace chart with side label"""
-        from PyQt5.QtWidgets import QSizePolicy
         
         container = QWidget()
         container.setObjectName("signalChartContainer")
-        container.setMinimumHeight(70)
+        container.setMinimumHeight(120)  # Set default minimum height
+        container.setMaximumHeight(120)  # Set default maximum height to maintain exact size
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         container_layout = QHBoxLayout(container)
         container_layout.setContentsMargins(4, 4, 4, 4)  # Add padding for border visibility
         container_layout.setSpacing(8) # Added spacing between label and plot
@@ -409,6 +518,33 @@ class SleepMonitorChart(QWidget):
         zoom_layout.addStretch()
         plot_container_layout.addWidget(zoom_frame)
         
+        drag_btn = QPushButton("Expand")
+        drag_btn.setObjectName("dragButton")
+        drag_btn.setFixedSize(48, 22)  # Increased size for better visibility
+        drag_btn.setStyleSheet("""
+            QPushButton#dragButton {
+                background-color: #dbeafe;
+                border: 2px solid #3b82f6;
+                border-radius: 6px;
+                color: #1d4ed8;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 2px;
+            }
+            QPushButton#dragButton:hover {
+                background-color: #bfdbfe;
+                border-color: #2563eb;
+                color: #1e40af;
+            }
+            QPushButton#dragButton:pressed {
+                background-color: #93c5fd;
+                border-color: #1d4ed8;
+                color: #1e3a8a;
+            }
+        """)
+        drag_btn.clicked.connect(lambda: self.start_manual_drag(name, container))
+        plot_container_layout.addWidget(drag_btn)
+        
         # Plot Widget with custom ViewBox
         plot_widget = pg.PlotWidget(viewBox=CustomViewBox())
         plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -428,6 +564,13 @@ class SleepMonitorChart(QWidget):
         pen = pg.mkPen(color=color, width=1.5)
         plot_curve = plot_widget.plot(x, y, pen=pen)
         
+        # Store graph data
+        plot_widget.graph_name = name
+        plot_widget.graph_color = color
+        plot_widget.graph_frequency = frequency
+        plot_widget.graph_amplitude = amplitude
+        plot_widget.graph_offset = offset
+        
         # Store chart name and plot widget for selection handling
         plot_widget.chart_name = name
         plot_widget.plot_curve = plot_curve
@@ -440,7 +583,13 @@ class SleepMonitorChart(QWidget):
         vb.sigMouseReleased.connect(lambda event, pw=plot_widget: self.on_mouse_released(event, pw))
         
         # Add click event handler to label for line visibility
-        label.mousePressEvent = lambda event: self.toggle_line_visibility(label, name, plot_curve)
+        label.mousePressEvent = lambda event: self.toggle_graph_visibility(label, name, plot_curve, container, plot_widget)
+                
+        # Enable drag and drop for entire container (only for reordering)
+        container.setAcceptDrops(True)
+        container.mousePressEvent = lambda event: self.start_drag(event, name, container)
+        container.mouseMoveEvent = lambda event: self.continue_drag(event, name)
+        container.mouseReleaseEvent = lambda event: self.end_drag(event, name)
         
         # Initialize multiple overlays list
         plot_widget.selection_overlays = []
@@ -471,6 +620,290 @@ class SleepMonitorChart(QWidget):
         container_layout.addWidget(plot_container)
         
         return container
+    
+    def start_manual_drag(self, graph_name, container):
+        """Toggle manual drag resizing when drag button is clicked"""
+        # Check if this container is already in manual drag mode
+        if self.manual_drag_container == container:
+            # Toggle back to original size
+            self.reset_to_original_size(container, graph_name)
+        else:
+            # Start manual drag mode
+            # Remove maximum height constraint to allow resizing
+            container.setMaximumHeight(16777215)  # Very large number (effectively no limit)
+            container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            
+            # Set up manual drag tracking
+            self.manual_drag_container = container
+            self.manual_drag_graph_name = graph_name
+            self.manual_drag_start_height = container.height()
+            
+            # Enable mouse tracking for manual drag
+            container.setMouseTracking(True)
+            container.mousePressEvent = lambda event: self.manual_drag_mouse_press(event, graph_name, container)
+            container.mouseMoveEvent = lambda event: self.manual_drag_mouse_move(event, graph_name)
+            container.mouseReleaseEvent = lambda event: self.manual_drag_mouse_release(event, graph_name)
+            
+            print(f"Manual drag mode enabled for graph '{graph_name}'")
+    
+    def reset_to_original_size(self, container, graph_name):
+        """Reset container to original size (120px)"""
+        # Reset to original size
+        container.setMinimumHeight(120)
+        container.setMaximumHeight(120)
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        
+        # Clear manual drag mode
+        if self.manual_drag_container == container:
+            container.setMouseTracking(False)
+            container.mousePressEvent = lambda event: self.start_drag(event, graph_name, container)
+            container.mouseMoveEvent = lambda event: self.continue_drag(event, graph_name)
+            container.mouseReleaseEvent = lambda event: self.end_drag(event, graph_name)
+            
+            # Clear manual drag tracking
+            self.manual_drag_container = None
+            self.manual_drag_graph_name = None
+            self.manual_drag_start_height = None
+            self.manual_drag_start_y = None
+        
+        print(f"Graph '{graph_name}' reset to original size (120px)")
+    
+    def manual_drag_mouse_press(self, event, graph_name, container):
+        """Handle mouse press during manual drag"""
+        if event.button() == Qt.LeftButton and self.manual_drag_container == container:
+            self.manual_drag_start_y = event.globalY()
+            container.setCursor(Qt.SizeVerCursor)
+            print(f"Started manual dragging graph '{graph_name}' from height {self.manual_drag_start_height}")
+    
+    def manual_drag_mouse_move(self, event, graph_name):
+        """Handle mouse move during manual drag"""
+        if self.manual_drag_container and event.buttons() == Qt.LeftButton and self.manual_drag_start_y is not None:
+            # Calculate new height
+            delta_y = event.globalY() - self.manual_drag_start_y
+            new_height = self.manual_drag_start_height + delta_y
+            
+            # Set minimum height constraint
+            min_height = 80
+            new_height = max(min_height, new_height)
+            
+            # Apply exact manual size
+            self.manual_drag_container.setMinimumHeight(new_height)
+            self.manual_drag_container.setMaximumHeight(new_height)
+            
+            # Force layout update
+            self.manual_drag_container.updateGeometry()
+            self.charts_widget.updateGeometry()
+    
+    def manual_drag_mouse_release(self, event, graph_name):
+        """Handle mouse release during manual drag"""
+        if self.manual_drag_container:
+            self.manual_drag_container.setCursor(Qt.ArrowCursor)
+            final_height = self.manual_drag_container.height()
+            print(f"Finished manual dragging graph '{graph_name}' to height {final_height}")
+            
+            # Reset to normal mouse events
+            self.manual_drag_container.setMouseTracking(False)
+            self.manual_drag_container.mousePressEvent = lambda event: self.start_drag(event, graph_name, self.manual_drag_container)
+            self.manual_drag_container.mouseMoveEvent = lambda event: self.continue_drag(event, graph_name)
+            self.manual_drag_container.mouseReleaseEvent = lambda event: self.end_drag(event, graph_name)
+            
+            # Clear manual drag tracking
+            self.manual_drag_container = None
+            self.manual_drag_graph_name = None
+            self.manual_drag_start_height = None
+            self.manual_drag_start_y = None
+    
+    def start_drag(self, event, graph_name, container):
+        """Start drag operation"""
+        if event.button() == Qt.LeftButton:
+            self.dragged_graph = container
+            self.dragged_graph_name = graph_name
+            self.drag_start_pos = event.pos()
+            # No revert button functionality
+    
+    def continue_drag(self, event, graph_name):
+        """Continue drag operation"""
+        if self.dragged_graph and event.buttons() == Qt.LeftButton:
+            # Calculate drag distance
+            drag_distance = event.pos().y() - self.drag_start_pos.y()
+            
+            # If dragged down enough, just track the drag without removing from layout
+            if abs(drag_distance) > 20:
+                if not hasattr(self.dragged_graph, '_is_dragging'):
+                    self.dragged_graph._is_dragging = True
+                    # Don't remove from layout, just track drag state
+    
+    def end_drag(self, event, graph_name):
+        """End drag operation"""
+        if self.dragged_graph:
+            # No revert button to hide
+            
+            # If was being dragged, find new position and reinsert
+            if hasattr(self.dragged_graph, '_is_dragging'):
+                delattr(self.dragged_graph, '_is_dragging')
+                
+                # Find drop position based on mouse
+                drop_pos = event.pos()
+                
+                # Find which position to insert at
+                insert_index = self.find_drop_position(drop_pos)
+                
+                # Reinsert at new position
+                self.dragged_graph.setParent(self.charts_widget)
+                self.charts_layout.insertWidget(insert_index, self.dragged_graph)
+                
+                print(f"Graph '{graph_name}' moved to position {insert_index}")
+            
+            self.dragged_graph = None
+    
+    def find_drop_position(self, drop_pos):
+        """Find the correct position to insert dragged graph"""
+        for i in range(self.charts_layout.count()):
+            widget = self.charts_layout.itemAt(i).widget()
+            if widget:
+                widget_rect = widget.geometry()
+                if drop_pos.y() < widget_rect.center().y():
+                    return i
+        
+        # If below all, insert at end
+        return self.charts_layout.count()
+    
+    def toggle_graph_visibility(self, label, chart_name, plot_curve, container, plot_widget):
+        """Toggle visibility of entire graph row when label is clicked"""
+        # Check if the graph is currently hidden
+        if chart_name in self.hidden_graphs:
+            # Graph is already hidden, this shouldn't happen normally
+            return
+        
+        # Hide the entire graph row and store its data
+        print(f"Hiding graph '{chart_name}'")
+        
+        # Find the original position of this graph
+        original_position = self.graph_order.index(chart_name)
+        
+        # Store graph data for restoration
+        self.hidden_graphs[chart_name] = {
+            'container': container,
+            'plot_curve': plot_curve,
+            'color': plot_widget.graph_color,
+            'frequency': plot_widget.graph_frequency,
+            'amplitude': plot_widget.graph_amplitude,
+            'offset': plot_widget.graph_offset,
+            'position': original_position
+        }
+        
+        # Remove the container from the layout safely
+        self.charts_layout.removeWidget(container)
+        container.setParent(None)
+        container.setVisible(False)
+        
+        # Add to dropdown
+        self.hidden_graphs_dropdown.addItem(chart_name)
+        self.hidden_graphs_dropdown.setEnabled(True)
+        
+        # Reset dropdown to placeholder if this was the first hidden graph
+        if len(self.hidden_graphs) == 1:
+            self.hidden_graphs_dropdown.setCurrentIndex(0)
+        
+        print(f"Graph '{chart_name}' hidden and added to dropdown")
+    
+    def restore_hidden_graph(self, index):
+        """Restore a hidden graph when selected from dropdown"""
+        # Ignore the placeholder item (index 0)
+        if index == 0:
+            return
+        
+        # Get the graph name from dropdown
+        graph_name = self.hidden_graphs_dropdown.itemText(index)
+        
+        # Check if graph exists in hidden graphs
+        if graph_name not in self.hidden_graphs:
+            print(f"Graph '{graph_name}' not found in hidden graphs")
+            return
+        
+        # Block signals to prevent multiple calls
+        self.hidden_graphs_dropdown.blockSignals(True)
+        
+        try:
+            # Get stored graph data
+            graph_data = self.hidden_graphs[graph_name]
+            old_container = graph_data['container']
+            
+            # Create a completely fresh container with same properties as new graphs
+            new_container = self.create_signal_chart(
+                graph_name,
+                graph_data['color'],
+                graph_data['frequency'],
+                graph_data['amplitude'],
+                graph_data['offset']
+            )
+            
+            # Find the plot widget in the new container and replace it with the stored one
+            old_plot_widget = None
+            for i in range(new_container.layout().count()):
+                widget = new_container.layout().itemAt(i).widget()
+                if isinstance(widget, pg.PlotWidget):
+                    old_plot_widget = widget
+                    break
+            
+            # Find the stored plot widget in the old container
+            stored_plot_widget = None
+            for i in range(old_container.layout().count()):
+                widget = old_container.layout().itemAt(i).widget()
+                if isinstance(widget, pg.PlotWidget):
+                    stored_plot_widget = widget
+                    break
+            
+            # If we found both plot widgets, replace the new one with the stored one
+            if old_plot_widget and stored_plot_widget:
+                # Copy properties from stored plot widget
+                old_plot_widget.graph_name = stored_plot_widget.graph_name
+                old_plot_widget.graph_color = stored_plot_widget.graph_color
+                old_plot_widget.graph_frequency = stored_plot_widget.graph_frequency
+                old_plot_widget.graph_amplitude = stored_plot_widget.graph_amplitude
+                old_plot_widget.graph_offset = stored_plot_widget.graph_offset
+                
+                # Copy plot data
+                old_plot_widget.clear()
+                for item in stored_plot_widget.listDataItems():
+                    old_plot_widget.addItem(item)
+            
+            # Remove from hidden graphs dictionary first
+            del self.hidden_graphs[graph_name]
+            
+            # Remove from dropdown
+            self.hidden_graphs_dropdown.removeItem(index)
+            
+            # Find the correct position to insert this graph
+            insert_position = graph_data['position']
+            
+            # Count how many visible graphs come before this position
+            visible_before = 0
+            for i in range(insert_position):
+                if self.graph_order[i] not in self.hidden_graphs:
+                    visible_before += 1
+            
+            # Insert the fresh container at the correct position with stretch factor
+            self.charts_layout.insertWidget(visible_before, new_container, stretch=1)
+            
+            # Reconnect mouse event handlers for drag functionality
+            new_container.setAcceptDrops(True)
+            new_container.mousePressEvent = lambda event: self.start_drag(event, graph_name, new_container)
+            new_container.mouseMoveEvent = lambda event: self.continue_drag(event, graph_name)
+            new_container.mouseReleaseEvent = lambda event: self.end_drag(event, graph_name)
+            
+            # Disable dropdown if no more hidden graphs
+            if len(self.hidden_graphs) == 0:
+                self.hidden_graphs_dropdown.setEnabled(False)
+            else:
+                # Reset to placeholder
+                self.hidden_graphs_dropdown.setCurrentIndex(0)
+            
+            print(f"Graph '{graph_name}' restored")
+        
+        finally:
+            # Unblock signals
+            self.hidden_graphs_dropdown.blockSignals(False)
     
     def toggle_line_visibility(self, label, chart_name, plot_curve):
         """Toggle visibility of graph line when label is clicked"""
