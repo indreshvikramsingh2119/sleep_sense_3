@@ -5,10 +5,7 @@ Professional Sleep Monitoring System
 
 import sys
 import os
-<<<<<<< Updated upstream
-=======
 import json
->>>>>>> Stashed changes
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -53,16 +50,6 @@ class PatientInfoWidget(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff) # Disable horizontal scroll
         
-<<<<<<< Updated upstream
-        # Content Widget
-        content = QWidget()
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
-        
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(16, 16, 16, 16)
-        content_layout.setSpacing(16)
-=======
         scroll_content = QWidget()
         scroll_content.setObjectName("scrollContent")
         scroll_content.setContentsMargins(16, 16, 16, 16) # Add internal padding
@@ -223,7 +210,6 @@ class PatientInfoWidget(QWidget):
         layout = QVBoxLayout(frame)
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(8)
->>>>>>> Stashed changes
         
         # Patient ID Section
         patient_frame = QFrame()
@@ -236,11 +222,6 @@ class PatientInfoWidget(QWidget):
         patient_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
         patient_layout.addWidget(patient_label)
         
-<<<<<<< Updated upstream
-        # Patient ID input
-        id_layout = QHBoxLayout()
-        id_layout.setSpacing(8)
-=======
         # Avatar label (SJ for Sarah Johnson)
         avatar_label = QLabel("--")
         avatar_label.setAlignment(Qt.AlignCenter)
@@ -255,7 +236,6 @@ class PatientInfoWidget(QWidget):
             }
         """)
         avatar_layout.addWidget(avatar_label)
->>>>>>> Stashed changes
         
         id_label = QLabel("Patient ID:")
         id_label.setStyleSheet("font-size: 12px; color: #374151;")
@@ -273,13 +253,6 @@ class PatientInfoWidget(QWidget):
         patient_layout.addLayout(id_layout)
         content_layout.addWidget(patient_frame)
         
-<<<<<<< Updated upstream
-        # Weekly Summary Section
-        summary_frame = QFrame()
-        summary_frame.setObjectName("summarySection")
-        summary_layout = QVBoxLayout(summary_frame)
-        summary_layout.setSpacing(8)
-=======
         # Separator
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
@@ -339,7 +312,6 @@ class PatientInfoWidget(QWidget):
         layout = QVBoxLayout(frame)
         layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 0, 0)
->>>>>>> Stashed changes
         
         # Header
         header_layout = QHBoxLayout()
@@ -352,45 +324,6 @@ class PatientInfoWidget(QWidget):
         summary_layout.addLayout(header_layout)
         
         # Stats Grid
-<<<<<<< Updated upstream
-        stats_grid = QGridLayout()
-        stats_grid.setSpacing(8)
-        
-        # Create stat cards
-        stats = [
-            ("Total Sessions", "12", "sessions"),
-            ("Avg Duration", "7.5", "hours"),
-            ("OSA Events", "45", "events"),
-            ("CSA Events", "8", "events"),
-            ("MSA Events", "23", "events"),
-            ("HSA Events", "67", "events")
-        ]
-        
-        for i, (label, value, unit) in enumerate(stats):
-            card = self.create_stat_card(label, value, unit)
-            row, col = i // 3, i % 3
-            stats_grid.addWidget(card, row, col)
-        
-        summary_layout.addLayout(stats_grid)
-        content_layout.addWidget(summary_frame)
-        
-        # Raw Data Section
-        raw_frame = QFrame()
-        raw_frame.setObjectName("rawDataSection")
-        raw_layout = QVBoxLayout(raw_frame)
-        raw_layout.setSpacing(8)
-        
-        raw_header = QLabel("Raw Data Files")
-        raw_header.setObjectName("sectionHeader")
-        raw_header.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
-        raw_layout.addWidget(raw_header)
-        
-        # File List
-        self.file_list = QListWidget()
-        self.file_list.setObjectName("fileList")
-        self.file_list.setMaximumHeight(120)
-        raw_layout.addWidget(self.file_list)
-=======
         #grid = QGridLayout()
         #grid.setSpacing(8)
         
@@ -504,7 +437,6 @@ class PatientInfoWidget(QWidget):
         file_list = QListWidget()
         file_list.setObjectName("fileList")
         layout.addWidget(file_list)
->>>>>>> Stashed changes
         
         # Buttons
         button_layout = QHBoxLayout()
@@ -527,34 +459,6 @@ class PatientInfoWidget(QWidget):
         
         return widget
     
-<<<<<<< Updated upstream
-    def create_stat_card(self, label, value, unit):
-        """Create a statistics card"""
-        card = QFrame()
-        card.setObjectName("statCard")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(8, 8, 8, 8)
-        card_layout.setSpacing(4)
-        
-        value_label = QLabel(f"{value} {unit}")
-        value_label.setObjectName("statValue")
-        value_label.setAlignment(Qt.AlignCenter)
-        value_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #1e293b;")
-        card_layout.addWidget(value_label)
-        
-        label_widget = QLabel(label)
-        label_widget.setObjectName("statLabel")
-        label_widget.setAlignment(Qt.AlignCenter)
-        label_widget.setStyleSheet("font-size: 11px; color: #6b7280;")
-        card_layout.addWidget(label_widget)
-        
-        return card
-    
-    def on_patient_id_changed(self, text):
-        """Handle patient ID change"""
-        if self.monitor_chart:
-            self.monitor_chart.set_patient_id(text)
-=======
     def populate_file_list(self):
         """Deprecated (Raw Data tab removed)."""
         return
@@ -570,7 +474,6 @@ class PatientInfoWidget(QWidget):
         # Raw Data tab removed from the UI; keep chooser only as no-op.
         if files:
             pass
->>>>>>> Stashed changes
     
     def save_current_data(self):
         """Save current data"""
@@ -587,19 +490,6 @@ class PatientInfoWidget(QWidget):
         )
         if save_path:
             print(f"Downloading all files to: {save_path}")
-<<<<<<< Updated upstream
-    
-    def add_saved_raw_file(self, file_path, timestamp_iso):
-        """Add saved raw file to the list"""
-        filename = os.path.basename(file_path)
-        timestamp_str = timestamp_iso.replace("T", " ").replace("-", ":").split(":")
-        timestamp_str = f"{timestamp_str[2]}-{timestamp_str[1]}-{timestamp_str[0]} {timestamp_str[3]}:{timestamp_str[4]}:{timestamp_str[5]}"
-        
-        item = QListWidgetItem(f"{timestamp_str} - {filename}")
-        item.setData(Qt.UserRole, {"path": file_path, "timestamp": timestamp_iso, "filename": filename})
-        self.file_list.addItem(item)
-        self.saved_raw_files.append({"timestamp": timestamp_iso, "path": file_path, "filename": filename})
-=======
 
 
 class SleepMonitorChart(QWidget):#
@@ -929,27 +819,7 @@ class SleepMonitorChart(QWidget):#
         self.current_y_min = 0
         self.current_y_max = 100
         
-        # Zoom In button
-        zoom_in_btn = QPushButton("+")
-        zoom_in_btn.setObjectName("zoomButton")
-        zoom_in_btn.setFixedSize(24, 20)
-        zoom_in_btn.clicked.connect(lambda: self.zoom_vertical(plot_widget, 0.8))
-        zoom_layout.addWidget(zoom_in_btn)
-        
-        # Zoom Out button
-        zoom_out_btn = QPushButton("-")
-        zoom_out_btn.setObjectName("zoomButton")
-        zoom_out_btn.setFixedSize(24, 20)
-        zoom_out_btn.clicked.connect(lambda: self.zoom_vertical(plot_widget, 1.2))
-        zoom_layout.addWidget(zoom_out_btn)
-        
-        # Reset button
-        reset_btn = QPushButton("R")
-        reset_btn.setObjectName("zoomButton")
-        reset_btn.setFixedSize(24, 20)
-        reset_btn.clicked.connect(lambda: self.reset_zoom(plot_widget))
-        zoom_layout.addWidget(reset_btn)
-        
+        #c
         zoom_layout.addStretch()
         plot_container_layout.addWidget(zoom_frame)
         
@@ -1018,7 +888,6 @@ class SleepMonitorChart(QWidget):#
         super().resizeEvent(event)
         if hasattr(self, 'watermark'):
             self.watermark.setGeometry(self.charts_widget.rect())
->>>>>>> Stashed changes
 
 
 class SleepSenseDashboard(QMainWindow):

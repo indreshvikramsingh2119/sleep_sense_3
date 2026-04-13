@@ -579,8 +579,11 @@ class SleepMonitorChart(QWidget):
         plot_widget.setMouseEnabled(x=True, y=True)
         plot_widget.scene().sigMouseMoved.connect(lambda pos, pw=plot_widget: self.on_mouse_moved(pos, pw))
         plot_widget.mousePressEvent = lambda event, pw=plot_widget: self.custom_mouse_press(event, pw)
+        plot_widget.mouseReleaseEvent = lambda event, pw=plot_widget: self.custom_mouse_release(event, pw)
+        
+        # Connect resize event to update overlay positions
         vb = plot_widget.getViewBox()
-        vb.sigMouseReleased.connect(lambda event, pw=plot_widget: self.on_mouse_released(event, pw))
+        vb.sigResized.connect(lambda pw=plot_widget: self.on_plot_resized(pw))
         
         # Add click event handler to label for line visibility
         label.mousePressEvent = lambda event: self.toggle_graph_visibility(label, name, plot_curve, container, plot_widget)
@@ -590,6 +593,19 @@ class SleepMonitorChart(QWidget):
         container.mousePressEvent = lambda event: self.start_drag(event, name, container)
         container.mouseMoveEvent = lambda event: self.continue_drag(event, name)
         container.mouseReleaseEvent = lambda event: self.end_drag(event, name)
+        
+        # Store plot widget reference in container for resize handling
+        container.plot_widget = plot_widget
+        
+        # Override container resize event
+        original_resize = container.resizeEvent
+        def container_resize_event(event):
+            # Call original resize event if it exists
+            if original_resize:
+                original_resize(event)
+            # Update overlays when container resizes
+            self.on_container_resized(container)
+        container.resizeEvent = container_resize_event
         
         # Initialize multiple overlays list
         plot_widget.selection_overlays = []
@@ -1072,55 +1088,179 @@ class SleepMonitorChart(QWidget):
                 self.show_selection_menu()
     
     def custom_mouse_press(self, event, plot_widget):
-        """Custom mouse press handler for better right-click detection"""
-        if event.button() == Qt.RightButton:
-            if self.selection_start and self.selection_end:
-                self.show_selection_menu()
-        else:
-            # Handle left click directly without converting to scene event
-            widget_pos = event.pos()
-            widget_rect = plot_widget.rect()
-            if not widget_rect.contains(widget_pos):
-                return
+        """Custom mouse press handler for better selection handling"""
+        # Handle left click directly without converting to scene event
+        widget_pos = event.pos()
+        widget_rect = plot_widget.rect()
+        if not widget_rect.contains(widget_pos):
+            return
+        
+        # Debounce - prevent duplicate clicks
+        import time
+        current_time = time.time()
+        if current_time - self.last_click_time < 0.1:
+            return
+        self.last_click_time = current_time
+        
+        # Convert to scene position for existing logic
+        scene_pos = plot_widget.mapToScene(widget_pos)
+        
+        # Check for label click
+        if self.check_label_click(plot_widget, scene_pos):
+            return
+        
+        # Start selection
+        vb = plot_widget.getViewBox()
+        mouse_point = vb.mapSceneToView(scene_pos)
+        self.is_selecting = True
+        self.current_selection_chart = plot_widget
+        self.selection_start = mouse_point
+        self.selection_start_scene = scene_pos
+        self.selection_end = None
+        self.selection_end_scene = None
+        # Keep preview overlay hidden, don't touch persistent overlays
+        print(f"Started selection on {plot_widget.chart_name}")
+    
+    def custom_mouse_release(self, event, plot_widget):
+        """Custom mouse release handler for reliable selection completion"""
+        if event.button() == Qt.LeftButton:
+            self.on_mouse_released(event, plot_widget)
+    
+    def on_container_resized(self, container):
+        """Handle container resize to update overlay positions"""
+        if not hasattr(container, 'plot_widget'):
+            return
             
-            # Debounce - prevent duplicate clicks
-            import time
-            current_time = time.time()
-            if current_time - self.last_click_time < 0.1:
-                return
-            self.last_click_time = current_time
+        plot_widget = container.plot_widget
+        print(f"Container resized for {plot_widget.chart_name}")
+        
+        # Update persistent overlays for this chart
+        if hasattr(plot_widget, 'selection_overlays'):
+            chart_name = plot_widget.chart_name
+            if chart_name in self.selection_labels:
+                overlays = plot_widget.selection_overlays
+                labels_data = self.selection_labels[chart_name]
+                
+                # Update each overlay position based on stored data
+                for i, overlay in enumerate(overlays):
+                    if i < len(labels_data):
+                        selection_data = labels_data[i]
+                        vb = plot_widget.getViewBox()
+                        
+                        # Get current view range to calculate proportional position
+                        view_range = vb.viewRange()
+                        x_min_range, x_max_range = view_range[0]
+                        
+                        # Calculate proportional positions based on data coordinates
+                        start_x = selection_data['start'].x()
+                        end_x = selection_data['end'].x()
+                        
+                        # Map data coordinates to view coordinates proportionally
+                        total_range = x_max_range - x_min_range
+                        if total_range > 0:
+                            start_prop = (start_x - x_min_range) / total_range
+                            end_prop = (end_x - x_min_range) / total_range
+                        else:
+                            start_prop = 0
+                            end_prop = 1
+                        
+                        # Convert to widget coordinates
+                        widget_width = plot_widget.width()
+                        x_min = max(0, min(start_prop, end_prop) * widget_width)
+                        x_max = min(widget_width, max(start_prop, end_prop) * widget_width)
+                        
+                        print(f"Overlay {i} - Chart: {chart_name}")
+                        print(f"Overlay {i} - Data coords: start={start_x}, end={end_x}")
+                        print(f"Overlay {i} - View range: {x_min_range} to {x_max_range}")
+                        print(f"Overlay {i} - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
+                        print(f"Overlay {i} - Widget coords: x_min={x_min:.1f}, x_max={x_max:.1f}, width={x_max-x_min:.1f}")
+                        
+                        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
+                        print(f"Overlay {i} - Final geometry: {overlay.geometry()}")
+        
+        # Update current selection overlay if active
+        if (self.current_selection_chart == plot_widget and 
+            hasattr(plot_widget, 'selection_overlay') and
+            self.selection_start and self.selection_end):
+            self.update_selection_overlay(self.selection_start, self.selection_end)
             
-            # Convert to scene position for existing logic
-            scene_pos = plot_widget.mapToScene(widget_pos)
-            
-            # Check for label click
-            if self.check_label_click(plot_widget, scene_pos):
-                return
-            
-            # Start selection
-            vb = plot_widget.getViewBox()
-            mouse_point = vb.mapSceneToView(scene_pos)
-            self.is_selecting = True
-            self.current_selection_chart = plot_widget
-            self.selection_start = mouse_point
-            self.selection_start_scene = scene_pos
-            self.selection_end = None
-            self.selection_end_scene = None
-            # Keep preview overlay hidden, don't touch persistent overlays
-            print(f"Started selection on {plot_widget.chart_name}")
+            # Check if overlay is in "Choose Label" state and update accordingly
+            overlay = plot_widget.selection_overlay
+            if overlay and "Choose Label" in overlay.text():
+                overlay.setText("Choose Label...")
+                overlay.setStyleSheet("""
+                    QLabel#selectionOverlay {
+                        background-color: rgba(251, 146, 60, 0.4);
+                        border: 2px solid #f97316;
+                        border-radius: 6px;
+                        color: white;
+                        font-size: 14px;
+                        font-weight: bold;
+                        padding: 6px 10px;
+                        text-align: center;
+                        text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.7);
+                    }
+                """)
+    
+    def on_plot_resized(self, plot_widget):
+        """Handle plot widget resize to update overlay positions"""
+        # Update persistent overlays for this chart
+        if hasattr(plot_widget, 'selection_overlays'):
+            chart_name = plot_widget.chart_name
+            if chart_name in self.selection_labels:
+                overlays = plot_widget.selection_overlays
+                labels_data = self.selection_labels[chart_name]
+                
+                # Update each overlay position based on stored data
+                for i, overlay in enumerate(overlays):
+                    if i < len(labels_data):
+                        selection_data = labels_data[i]
+                        vb = plot_widget.getViewBox()
+                        p1 = vb.mapViewToScene(selection_data['start'])
+                        p2 = vb.mapViewToScene(selection_data['end'])
+                        w1 = plot_widget.mapFromScene(p1)
+                        w2 = plot_widget.mapFromScene(p2)
+                        
+                        x_min = min(w1.x(), w2.x())
+                        x_max = max(w1.x(), w2.x())
+                        
+                        print(f"Overlay {i} - original start: {selection_data['start']}, end: {selection_data['end']}")
+                        print(f"Overlay {i} - w1: {w1}, w2: {w2}")
+                        print(f"Overlay {i} - x_min: {x_min}, x_max: {x_max}, width: {int(x_max - x_min)}, height: {plot_widget.height()}")
+                        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
+                        print(f"Overlay {i} - new geometry: {overlay.geometry()}")
+        
+        # Update current selection overlay if active
+        if (self.current_selection_chart == plot_widget and 
+            hasattr(plot_widget, 'selection_overlay') and
+            self.selection_start and self.selection_end):
+            self.update_selection_overlay(self.selection_start, self.selection_end)
     
     def on_mouse_released(self, event, plot_widget):
         """Finish selection on mouse release"""
         if not self.is_selecting or plot_widget != self.current_selection_chart:
             return
+
         self.is_selecting = False
+
         if self.selection_start_scene and self.selection_end_scene:
             distance = abs(self.selection_end_scene.x() - self.selection_start_scene.x())
+
             if distance > 10:
                 print("Selection finished properly")
-                print("Selection completed. Right click to label.")
+
+                # 🔥 IMPORTANT: ensure end point set
+                vb = plot_widget.getViewBox()
+                mouse_point = vb.mapSceneToView(self.selection_end_scene)
+                self.selection_end = mouse_point
+
+                # 🔥 FORCE MENU OPEN
+                self.show_selection_menu()
+
             else:
                 self.clear_selection()
+        else:
+            self.clear_selection()
     
     def find_plot_widget_at_position(self, scene_pos):
         """Find which plot widget contains the given scene position"""
@@ -1158,7 +1298,7 @@ class SleepMonitorChart(QWidget):
                 self.clear_selection()
     
     def update_selection_overlay(self, start_pos, end_pos):
-        """Update the visual selection overlay"""
+        """Update the visual selection overlay using proportional coordinate mapping"""
         if not self.current_selection_chart:
             return
         # Hide overlays of all other charts
@@ -1173,18 +1313,40 @@ class SleepMonitorChart(QWidget):
         if not overlay:
             return
         vb = self.current_selection_chart.getViewBox()
-        p1 = vb.mapViewToScene(start_pos)
-        p2 = vb.mapViewToScene(end_pos)
-        w1 = self.current_selection_chart.mapFromScene(p1)
-        w2 = self.current_selection_chart.mapFromScene(p2)
-        x_min = min(w1.x(), w2.x())
-        x_max = max(w1.x(), w2.x())
+        
+        # Get current view range to calculate proportional position
+        view_range = vb.viewRange()
+        x_min_range, x_max_range = view_range[0]
+        
+        # Calculate proportional positions based on data coordinates
+        start_x = start_pos.x()
+        end_x = end_pos.x()
+        
+        # Map data coordinates to view coordinates proportionally
+        total_range = x_max_range - x_min_range
+        if total_range > 0:
+            start_prop = (start_x - x_min_range) / total_range
+            end_prop = (end_x - x_min_range) / total_range
+        else:
+            start_prop = 0
+            end_prop = 1
+        
+        # Convert to widget coordinates
+        widget_width = self.current_selection_chart.width()
+        x_min = max(0, min(start_prop, end_prop) * widget_width)
+        x_max = min(widget_width, max(start_prop, end_prop) * widget_width)
         width = x_max - x_min
+        
+        # Ensure minimum width
         if width < 30:
             width = 30
-        plot_rect = self.current_selection_chart.rect()
-        x_min = max(0, min(x_min, plot_rect.width() - width))
-        width = min(width, plot_rect.width() - x_min)
+        
+        print(f"update_selection_overlay - Chart: {self.current_selection_chart.chart_name}")
+        print(f"update_selection_overlay - Data coords: start={start_x}, end={end_x}")
+        print(f"update_selection_overlay - View range: {x_min_range} to {x_max_range}")
+        print(f"update_selection_overlay - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
+        print(f"update_selection_overlay - Widget coords: x_min={x_min:.1f}, x_max={x_max:.1f}, width={width:.1f}")
+        
         overlay.setGeometry(int(x_min), 0, int(width), self.current_selection_chart.height())
         overlay.setVisible(True)
         overlay.setText("Selecting...")
@@ -1217,15 +1379,15 @@ class SleepMonitorChart(QWidget):
             overlay.setText("Choose Label...")
             overlay.setStyleSheet("""
                 QLabel#selectionOverlay {
-                    background-color: rgba(245, 158, 11, 0.3);
-                    border: 2px solid #f59e0b;
-                    border-radius: 4px;
+                    background-color: rgba(251, 146, 60, 0.4);
+                    border: 2px solid #f97316;
+                    border-radius: 6px;
                     color: white;
-                    font-size: 12px;
+                    font-size: 14px;
                     font-weight: bold;
-                    padding: 4px 6px;
+                    padding: 6px 10px;
                     text-align: center;
-                    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+                    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.7);
                 }
             """)
             
@@ -1316,6 +1478,10 @@ class SleepMonitorChart(QWidget):
         overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
         overlay.show()
 
+        # Hide the temporary "Choose Label" overlay
+        if hasattr(plot_widget, 'selection_overlay'):
+            plot_widget.selection_overlay.setVisible(False)
+
         # store overlay
         plot_widget.selection_overlays.append(overlay)
 
@@ -1324,6 +1490,8 @@ class SleepMonitorChart(QWidget):
         # clear temp selection
         self.selection_start = None
         self.selection_end = None
+        self.selection_start_scene = None
+        self.selection_end_scene = None
         self.current_selection_chart = None
     
     def handle_overlay_click(self, event, overlay, chart_name):
@@ -1459,9 +1627,23 @@ class SleepMonitorChart(QWidget):
                         break
     
     def clear_selection(self):
-        """Clear the current selection"""
+        """Clear the current selection but keep persistent overlays"""
         if self.current_selection_chart and hasattr(self.current_selection_chart, 'selection_overlay'):
             self.current_selection_chart.selection_overlay.setVisible(False)
+            # Reset overlay text and style for next use
+            self.current_selection_chart.selection_overlay.setText("Selecting...")
+            self.current_selection_chart.selection_overlay.setStyleSheet("""
+                QLabel#selectionOverlay {
+                    background-color: rgba(59, 130, 246, 0.3);
+                    border: 2px solid #3b82f6;
+                    border-radius: 4px;
+                    color: white;
+                    font-size: 12px;
+                    font-weight: bold;
+                    padding: 4px 6px;
+                    text-align: center;
+                }
+            """)
         self.selection_start = None
         self.selection_end = None
         self.selection_start_scene = None

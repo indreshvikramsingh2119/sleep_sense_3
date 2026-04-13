@@ -697,3 +697,29 @@ QLabel#primaryText {
 QLabel#successText {
     color: #047857;
 }
+
+/* ==================== ZOOM BUTTONS ==================== */
+
+QPushButton#zoomButton {
+    background-color: #f8fafc;
+    color: #475569;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: bold;
+    min-width: 24px;
+    min-height: 20px;
+    max-width: 24px;
+    max-height: 20px;
+}
+
+QPushButton#zoomButton:hover {
+    background-color: #e2e8f0;
+    border-color: #cbd5e1;
+    color: #1e293b;
+}
+
+QPushButton#zoomButton:pressed {
+    background-color: #cbd5e1;
+    border-color: #94a3b8;
+}
