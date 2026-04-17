@@ -3,3 +3,4 @@
 PyQt5>=5.15.10
 pyqtgraph>=0.13.3
 numpy>=1.26.0
+pandas>=1.5.0
