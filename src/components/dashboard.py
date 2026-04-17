@@ -5,7 +5,7 @@ Sleep Sense Dashboard - Main Dashboard Component
 import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QFrame, QSplitter, QSizePolicy
+    QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
@@ -25,8 +25,8 @@ class SleepSenseDashboard(QMainWindow):
         
     def init_ui(self):
         self.setWindowTitle("Sleep Sense - Medical Sleep Monitoring System")
-        self.setGeometry(100, 100, 1600, 900)
-        self.setMinimumSize(1200, 700)  # Ensure all buttons and controls are fully visible
+        self.setGeometry(100, 100, 1200, 900)  # Reduced window width to force scrollbar
+        self.setMinimumSize(1000, 700)  # Ensure all buttons and controls are fully visible
         
         # Central Widget
         central_widget = QWidget()
@@ -41,8 +41,14 @@ class SleepSenseDashboard(QMainWindow):
         header = self.create_header()
         main_layout.addWidget(header)
         
-        # Main Content Area
+        # Main Content Area with Scroll
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
         content_widget = QWidget()
+        content_widget.setMinimumWidth(2000)  # Force minimum width to trigger horizontal scrollbar
         content_layout = QHBoxLayout(content_widget)
         content_layout.setContentsMargins(16, 16, 16, 16)
         content_layout.setSpacing(16)
@@ -85,7 +91,10 @@ class SleepSenseDashboard(QMainWindow):
         splitter.setStretchFactor(1, 1) # Right panel takes all available extra space
         
         content_layout.addWidget(splitter)
-        main_layout.addWidget(content_widget)
+        
+        # Set content widget to scroll area
+        scroll_area.setWidget(content_widget)
+        main_layout.addWidget(scroll_area)
         
     def create_header(self):
         """Create application header"""

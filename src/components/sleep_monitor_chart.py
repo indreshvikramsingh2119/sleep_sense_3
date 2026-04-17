@@ -1,3 +1,6 @@
+
+
+
 """
 Sleep Monitor Chart Widget - Sleep Monitoring Chart Component
 """
@@ -5,6 +8,7 @@ Sleep Monitor Chart Widget - Sleep Monitoring Chart Component
 import os
 import json
 import numpy as np
+import pandas as pd
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -36,6 +40,10 @@ class SleepMonitorChart(QWidget):
         self.manual_drag_graph_name = None  # Track manually dragging graph name
         self.manual_drag_start_height = None  # Store original height during manual drag
         self.manual_drag_start_y = None  # Store starting Y position during manual drag
+        
+        # Time window data management
+        self.spo2_full_data = None  # Store full SpO2 data (time, spo2)
+        self.current_time_offset = 0  # Current starting time for window
         
         # Area selection variables
         self.selection_start = None
@@ -128,7 +136,7 @@ class SleepMonitorChart(QWidget):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setObjectName("chartsScrollArea")
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         
         # Enable functional scrollbar with proper styling
         self.scroll_area.verticalScrollBar().setStyleSheet("""
@@ -161,11 +169,49 @@ class SleepMonitorChart(QWidget):
             }
         """)
         
+        # Add horizontal scrollbar styling
+        self.scroll_area.horizontalScrollBar().setStyleSheet("""
+            QScrollBar:horizontal {
+                background: #f3f4f6;
+                height: 12px;
+                border-radius: 6px;
+                margin: 0px 0px 0px 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #9ca3af;
+                min-width: 20px;
+                border-radius: 6px;
+                border: 1px solid #6b7280;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #6b7280;
+                border: 1px solid #4b5563;
+            }
+            QScrollBar::handle:horizontal:pressed {
+                background: #4b5563;
+                border: 1px solid #374151;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+                height: 0px;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: none;
+            }
+        """)
+        
         self.charts_widget = QWidget()
         self.charts_widget.setObjectName("chartsContainer")
+        self.charts_widget.setMinimumWidth(1500)  # Force minimum width to trigger horizontal scrollbar
         self.charts_layout = QVBoxLayout(self.charts_widget)
         self.charts_layout.setContentsMargins(0, 0, 0, 0)
         self.charts_layout.setSpacing(8)
+        
+        # Add stretch items to help with centering
+        self.top_spacer = QWidget()
+        self.bottom_spacer = QWidget()
+        self.top_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.bottom_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         self.scroll_area.setWidget(self.charts_widget)
         chart_layout.addWidget(self.scroll_area, stretch=1)
@@ -236,14 +282,14 @@ class SleepMonitorChart(QWidget):
         self.time_window_dropdown.setFixedHeight(30)
         self.time_window_dropdown.setMinimumWidth(80)
         
-        # Add time window options
+        # Add time window options (in seconds)
         time_windows = [
-            ("10m", 10),
-            ("5m", 30), 
-            ("2m", 60),
-            ("1m", 120),
-            ("20s", 300),
-            ("10s", 600),
+            ("10s", 10),
+            ("30s", 30), 
+            ("1m", 60),
+            ("2m", 120),
+            ("5m", 300),
+            ("10m", 600),
         ]
         
         for label, value in time_windows:
@@ -257,6 +303,37 @@ class SleepMonitorChart(QWidget):
         self.time_window_dropdown.currentIndexChanged.connect(self.on_time_window_changed)
         
         layout.addWidget(self.time_window_dropdown)
+
+        # --- Time Navigation Controls ---
+        nav_container = QFrame()
+        nav_layout = QHBoxLayout(nav_container)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
+
+        # Backward navigation button
+        nav_backward_btn = QPushButton("")
+        nav_backward_btn.setObjectName("controlButton")
+        nav_backward_btn.setFixedHeight(28)
+        nav_backward_btn.setMinimumWidth(40)
+        nav_backward_btn.clicked.connect(self.navigate_backward)
+        nav_layout.addWidget(nav_backward_btn)
+
+        # Time position label
+        self.time_position_label = QLabel("0:00")
+        self.time_position_label.setObjectName("timePositionLabel")
+        self.time_position_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #1e293b; min-width: 40px;")
+        self.time_position_label.setAlignment(Qt.AlignCenter)
+        nav_layout.addWidget(self.time_position_label)
+
+        # Forward navigation button
+        nav_forward_btn = QPushButton(">")
+        nav_forward_btn.setObjectName("controlButton")
+        nav_forward_btn.setFixedHeight(28)
+        nav_forward_btn.setMinimumWidth(40)
+        nav_forward_btn.clicked.connect(self.navigate_forward)
+        nav_layout.addWidget(nav_forward_btn)
+
+        layout.addWidget(nav_container)
 
         # --- Hidden Graphs Dropdown ---
         hidden_graphs_label = QLabel("Hidden Graphs:")
@@ -343,10 +420,70 @@ class SleepMonitorChart(QWidget):
         seconds = self.time_window_dropdown.itemData(index)
         self.current_time_window = seconds
         
+        # Reset time offset when changing window size
+        self.current_time_offset = 0
+        
         # Update charts with new time window
         self.update_charts_for_time_window(seconds)
         self.restore_all_selections()
+        self.update_time_position_label()
         print(f"Time window changed to: {self.time_window_dropdown.itemText(index)} ({seconds} seconds)")
+    
+    def navigate_backward(self):
+        """Navigate backward in time"""
+        if self.spo2_full_data and len(self.spo2_full_data[0]) > 0:
+            # Move back by the current time window
+            self.current_time_offset = max(0, self.current_time_offset - self.current_time_window)
+            self.refresh_charts()
+            self.update_time_position_label()
+            print(f"Navigated backward to: {self.current_time_offset}s")
+    
+    def navigate_forward(self):
+        """Navigate forward in time"""
+        if self.spo2_full_data and len(self.spo2_full_data[0]) > 0:
+            max_time = self.spo2_full_data[0][-1]
+            # Move forward by the current time window
+            new_offset = self.current_time_offset + self.current_time_window
+            if new_offset < max_time:
+                self.current_time_offset = new_offset
+                self.refresh_charts()
+                self.update_time_position_label()
+                print(f"Navigated forward to: {self.current_time_offset}s")
+    
+    def update_time_position_label(self):
+        """Update the time position label"""
+        minutes = int(self.current_time_offset // 60)
+        seconds = int(self.current_time_offset % 60)
+        self.time_position_label.setText(f"{minutes}:{seconds:02d}")
+    
+    def refresh_charts(self):
+        """Refresh all charts with current time window and offset"""
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if container and hasattr(container, 'plot_widget'):
+                plot_widget = container.plot_widget
+                chart_name = plot_widget.chart_name
+                
+                # Update data for each chart
+                if chart_name.strip() == "SpO2":
+                    x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
+                    if len(x) > 0 and len(y) > 0:
+                        # Update step ladder plot
+                        step_x = np.zeros(len(y) + 1)
+                        step_x[:-1] = x
+                        step_x[-1] = x[-1] if len(x) > 0 else 0
+                        plot_widget.plot_curve.setData(step_x, y)
+                else:
+                    # Update simulated data for ALL other signals
+                    time_points = int(self.current_time_window * 10)
+                    x = np.linspace(0, self.current_time_window, time_points)
+                    freq = plot_widget.graph_frequency
+                    amp = plot_widget.graph_amplitude
+                    offset = plot_widget.graph_offset
+                    y = np.sin(x * freq * 2 * np.pi) * amp + offset + (np.random.rand(time_points) - 0.5) * amp * 0.1
+                    plot_widget.plot_curve.setData(x, y)
+                    
+                    print(f"Updated {chart_name} with {time_points} points for {self.current_time_window}s window")
     
     def set_time_window(self, seconds):
         """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
@@ -437,6 +574,55 @@ class SleepMonitorChart(QWidget):
             # Track the original order
             self.graph_order.append(name)
     
+    def load_spo2_data(self, csv_path):
+        """Load SpO2 data from CSV file and store full data for time window filtering"""
+        try:
+            # Read CSV file
+            df = pd.read_csv(csv_path)
+            
+            # Convert timestamp to datetime and calculate relative time in seconds
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            start_time = df['timestamp'].iloc[0]
+            df['time_seconds'] = (df['timestamp'] - start_time).dt.total_seconds()
+            
+            # Extract time and SpO2 values
+            time_data = df['time_seconds'].values
+            spo2_data = df['spo2'].values
+            
+            # Store full data for time window filtering
+            self.spo2_full_data = (time_data, spo2_data)
+            
+            print(f"Loaded SpO2 data: {len(time_data)} data points from {csv_path}")
+            return time_data, spo2_data
+            
+        except Exception as e:
+            print(f"Error loading SpO2 data: {e}")
+            # Return empty arrays if loading fails
+            self.spo2_full_data = (np.array([]), np.array([]))
+            return np.array([]), np.array([])
+    
+    def get_spo2_data_for_window(self, time_window_seconds, time_offset=0):
+        """Get SpO2 data filtered for specific time window"""
+        if self.spo2_full_data is None or len(self.spo2_full_data[0]) == 0:
+            return np.array([]), np.array([])
+        
+        full_time, full_spo2 = self.spo2_full_data
+        
+        # Filter data for the current time window
+        start_time = time_offset
+        end_time = time_offset + time_window_seconds
+        
+        # Find indices within the time window
+        mask = (full_time >= start_time) & (full_time <= end_time)
+        window_time = full_time[mask] - time_offset  # Normalize to start from 0
+        window_spo2 = full_spo2[mask]
+        
+        # If no data in window, return empty arrays
+        if len(window_time) == 0:
+            return np.array([0, time_window_seconds]), np.array([full_spo2[0], full_spo2[0]])
+        
+        return window_time, window_spo2
+    
     def create_signal_chart(self, name, color, frequency, amplitude, offset):
         """Create a single signal trace chart with side label"""
         
@@ -498,21 +684,36 @@ class SleepMonitorChart(QWidget):
         zoom_in_btn = QPushButton("+")
         zoom_in_btn.setObjectName("zoomButton")
         zoom_in_btn.setFixedSize(24, 20)
-        zoom_in_btn.clicked.connect(lambda: self.zoom_vertical(plot_widget, 0.8))
+        
+        def on_zoom_in():
+            print(f"ZOOM IN BUTTON CLICKED for {name}")
+            self.zoom_vertical(plot_widget, 0.8)
+        
+        zoom_in_btn.clicked.connect(on_zoom_in)
         zoom_layout.addWidget(zoom_in_btn)
         
         # Zoom Out button
         zoom_out_btn = QPushButton("-")
         zoom_out_btn.setObjectName("zoomButton")
         zoom_out_btn.setFixedSize(24, 20)
-        zoom_out_btn.clicked.connect(lambda: self.zoom_vertical(plot_widget, 1.2))
+        
+        def on_zoom_out():
+            print(f"ZOOM OUT BUTTON CLICKED for {name}")
+            self.zoom_vertical(plot_widget, 1.2)
+        
+        zoom_out_btn.clicked.connect(on_zoom_out)
         zoom_layout.addWidget(zoom_out_btn)
         
         # Reset button
         reset_btn = QPushButton("R")
         reset_btn.setObjectName("zoomButton")
         reset_btn.setFixedSize(24, 20)
-        reset_btn.clicked.connect(lambda: self.reset_zoom(plot_widget))
+        
+        def on_reset():
+            print(f"RESET BUTTON CLICKED for {name}")
+            self.reset_zoom(plot_widget)
+        
+        reset_btn.clicked.connect(on_reset)
         zoom_layout.addWidget(reset_btn)
         
         zoom_layout.addStretch()
@@ -548,21 +749,71 @@ class SleepMonitorChart(QWidget):
         # Plot Widget with custom ViewBox
         plot_widget = pg.PlotWidget(viewBox=CustomViewBox())
         plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        plot_widget.setAlignment(Qt.AlignCenter)
         plot_widget.showGrid(x=True, y=True, alpha=0.1)
-        plot_widget.setYRange(0, 100)
-        plot_widget.getAxis('bottom').setStyle(showValues=False)
-        plot_widget.getAxis('left').setStyle(showValues=False)
+        
+        # Set Y-axis range based on graph type
+        if name.strip() == "SpO2":
+            plot_widget.setYRange(90, 100)  # SpO2 specific range 90-100
+        else:
+            plot_widget.setYRange(0, 100)  # Other graphs 0-100
+            
+        # Set X-axis to show time values based on current time window
+        plot_widget.getAxis('bottom').setStyle(showValues=True)  # Show time values
+        plot_widget.getAxis('left').setStyle(showValues=True)   # Show Y-axis values
+        
+        # Set X-axis range to match time window
+        plot_widget.setXRange(0, self.current_time_window)
+        
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.hideButtons()  # Hide the 'A' button
         
+        # Center the plot widget in its container
+        plot_container_layout.setAlignment(plot_widget, Qt.AlignCenter)
+        
         # Generate signal data
-        time_points = 1000
-        x = np.linspace(0, 10, time_points)
-        y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
+        if name.strip() == "SpO2":
+            # Get SpO2 data for current time window
+            if self.spo2_full_data is None:
+                # Load data if not already loaded
+                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                csv_path = os.path.join(base_dir, "extracted data", "spo2_6hr_10Hz_data (1).csv")
+                print(f"Loading SpO2 data from: {csv_path}")
+                self.load_spo2_data(csv_path)
+            
+            # Get filtered data for current time window
+            x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
+            
+            # If no data available, fallback to simulated data
+            if len(x) == 0:
+                print("Falling back to simulated SpO2 data")
+                time_points = 1000
+                x = np.linspace(0, self.current_time_window, time_points)
+                y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
+        else:
+            # Generate simulated data for other signals based on time window
+            time_points = int(self.current_time_window * 10)  # 10 Hz sampling rate
+            x = np.linspace(0, self.current_time_window, time_points)
+            y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
         
         # Plot the signal and store reference for line visibility control
         pen = pg.mkPen(color=color, width=1.5)
-        plot_curve = plot_widget.plot(x, y, pen=pen)
+        
+        # Use step ladder style for SpO2 data
+        if name.strip() == "SpO2":
+            # Create step ladder plot using pyqtgraph's stepMode
+            if len(x) > 0 and len(y) > 0:
+                # For stepMode=True, we need x array with len(y)+1 elements
+                # Create extended x array for proper step rendering
+                step_x = np.zeros(len(y) + 1)
+                step_x[:-1] = x  # All original x values except last
+                step_x[-1] = x[-1] if len(x) > 0 else 0  # Last x value repeated
+                
+                plot_curve = plot_widget.plot(step_x, y, pen=pen, stepMode=True)
+            else:
+                plot_curve = plot_widget.plot(x, y, pen=pen)
+        else:
+            plot_curve = plot_widget.plot(x, y, pen=pen)
         
         # Store graph data
         plot_widget.graph_name = name
