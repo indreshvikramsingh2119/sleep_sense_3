@@ -91,7 +91,7 @@ class SleepMonitorChart(QWidget):
     def scroll_down(self):
         """Scroll down by a fixed amount"""
         if hasattr(self, 'scroll_area'):
-            scrollbar = self.scroll_area.verticalScrollBar()
+            scrollbar = self.scroll_area.verticalScrollBar() 
             current_value = scrollbar.value()
             max_value = scrollbar.maximum()
             new_value = min(max_value, current_value + 100)  # Scroll down by 100 pixels
@@ -1008,6 +1008,7 @@ class SleepMonitorChart(QWidget):
                 base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 csv_path = os.path.join(base_dir, "extracted_data", "spo2_6hr_10Hz_data (1).csv")
                 print(f"Loading SpO2 data from: {csv_path}")
+                
                 self.load_spo2_data(csv_path)
             
             # Get filtered data for current time window
@@ -1772,7 +1773,17 @@ class SleepMonitorChart(QWidget):
                         else:
                             start_prop = 0
                             end_prop = 1
+                            
+                        if start_prop > 1: 
+                            end_prop = 2
                         
+                        if total_range < 100:
+                            end_prop = start_prop + 100 / total_range
+                             
+                        if total_range > 1000:
+                            end_prop = start_prop + 1000 / tatal_
+                    
+                         
                         # Convert to widget coordinates
                         widget_width = plot_widget.width()
                         x_min = max(0, min(start_prop, end_prop) * widget_width)
@@ -1863,7 +1874,7 @@ class SleepMonitorChart(QWidget):
                 mouse_point = vb.mapSceneToView(self.selection_end_scene)
                 self.selection_end = mouse_point
 
-                #  FORCE MENU OPEN
+                # FORCE MENU OPEN
                 self.show_selection_menu()
 
             else:
@@ -1988,7 +1999,7 @@ class SleepMonitorChart(QWidget):
             overlay.setText("Choose Label...")
             overlay.setStyleSheet("""
                 QLabel#selectionOverlay {
-                    background-color: rgba(251, 146, 60, 0.4);
+                    background-color: rgba(251, 146, 60, 0.4);₹
                     border: 2px solid #f97316;
                     border-radius: 6px;
                     color: white;

@@ -35,13 +35,13 @@ QLabel#headerSubtitle {
 
 /* Logo Container */
 QFrame#logoContainer {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                stop:0 #34d399, stop:1 #10b981);
-    border-radius: 12px;
-    min-width: 120px;
-    max-width: 120px;
-    min-height: 44px;
-    max-height: 44px;
+    background: transparent;
+    border: none;
+    border-radius: 0px;
+    min-width: 64px;
+    max-width: 64px;
+    min-height: 64px;
+    max-height: 64px;
 }
 
 /* Status Badges */
