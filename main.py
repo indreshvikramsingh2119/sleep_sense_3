@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QFont
 
 from src.components.dashboard import SleepSenseDashboard
-
+   
 
 def main():
     """Main function to run the Sleep Sense Dashboard application"""
@@ -26,7 +26,24 @@ def main():
     # Start the application event loop
     sys.exit(app.exec_())
 
-
+ 
 if __name__ == '__main__':
     main()        
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   

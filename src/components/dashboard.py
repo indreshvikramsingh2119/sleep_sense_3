@@ -5,7 +5,8 @@ Sleep Sense Dashboard - Main Dashboard Component
 import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea
+    QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea,
+    QSlider, QPushButton
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
@@ -20,6 +21,13 @@ class SleepSenseDashboard(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        
+        # Time slider navigation variables
+        self.time_slider = None
+        self.slider_left_btn = None
+        self.slider_right_btn = None
+        self.slider_time_label = None
+        
         self.init_ui()
         self.load_stylesheet()
         
@@ -83,6 +91,9 @@ class SleepSenseDashboard(QMainWindow):
         # Connect monitor chart reference to patient info for save functionality
         self.patient_info.monitor_chart = self.monitor_chart
         
+        # Connect dashboard slider to chart navigation updates
+        self.monitor_chart.time_position_updated.connect(self.update_slider_position)
+        
         chart_layout.addWidget(self.monitor_chart)
         
         splitter.addWidget(chart_panel)
@@ -95,6 +106,13 @@ class SleepSenseDashboard(QMainWindow):
         # Set content widget to scroll area
         scroll_area.setWidget(content_widget)
         main_layout.addWidget(scroll_area)
+        
+        # Time Slider Navigation Bar at Bottom
+        time_slider_bar = self.create_time_slider_bar()
+        main_layout.addWidget(time_slider_bar)
+        
+        # Remove margins from main layout to allow full width
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
     def create_header(self):
         """Create application header"""
@@ -185,6 +203,148 @@ class SleepSenseDashboard(QMainWindow):
         layout.addWidget(status_badge)
         
         return header
+    
+    def create_time_slider_bar(self):
+        """Create time slider navigation bar with professional styling"""
+        slider_container = QFrame()
+        slider_container.setObjectName("timeSliderContainer")
+        slider_container.setMinimumHeight(60)
+        slider_container.setMaximumHeight(70)
+        slider_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        
+        layout = QHBoxLayout(slider_container)
+        layout.setContentsMargins(8, 8, 8, 8)  # Reduced margins for more width
+        layout.setSpacing(12)
+        
+        # Time Position Label
+        time_label = QLabel("Time Navigation:")
+        time_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #1e293b;")
+        layout.addWidget(time_label)
+        
+        # Left navigation button
+        self.slider_left_btn = QPushButton("◀")
+        self.slider_left_btn.setObjectName("sliderNavButton")
+        self.slider_left_btn.setFixedHeight(32)
+        self.slider_left_btn.setFixedWidth(40)
+        self.slider_left_btn.clicked.connect(self.slider_navigate_backward)
+        layout.addWidget(self.slider_left_btn)
+        
+        # Time slider - make it expand to fill available space
+        self.time_slider = QSlider(Qt.Horizontal)
+        self.time_slider.setObjectName("timeSlider")
+        self.time_slider.setMinimum(0)
+        self.time_slider.setMaximum(100)
+        self.time_slider.setValue(0)
+        self.time_slider.setFixedHeight(28)
+        self.time_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.time_slider.valueChanged.connect(self.on_slider_changed)
+        layout.addWidget(self.time_slider, stretch=1)  # Add stretch factor
+        
+        # Right navigation button
+        self.slider_right_btn = QPushButton("▶")
+        self.slider_right_btn.setObjectName("sliderNavButton")
+        self.slider_right_btn.setFixedHeight(32)
+        self.slider_right_btn.setFixedWidth(40)
+        self.slider_right_btn.clicked.connect(self.slider_navigate_forward)
+        layout.addWidget(self.slider_right_btn)
+        
+        # Current time display
+        self.slider_time_label = QLabel("0:00")
+        self.slider_time_label.setObjectName("sliderTimeLabel")
+        self.slider_time_label.setStyleSheet("""
+            QLabel#sliderTimeLabel {
+                background-color: #eff6ff;
+                color: #1e40af;
+                border: 1px solid #3b82f6;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+                font-size: 13px;
+                min-width: 60px;
+            }
+        """)
+        self.slider_time_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.slider_time_label)
+        
+        # Add stretch to push everything to the left
+        layout.addStretch()
+        
+        return slider_container
+    
+    def slider_navigate_backward(self):
+        """Navigate backward using slider buttons"""
+        if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+            # Step size equals the current time window size
+            step_size = self.monitor_chart.current_time_window  # Move by exact time window size
+            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  # 10 samples per second
+            
+            # Move backward by step size
+            self.monitor_chart.current_time_offset = max(0, self.monitor_chart.current_time_offset - step_size)
+            self.monitor_chart.refresh_charts()
+            self.update_slider_position()
+            
+            print(f"Dashboard slider backward to: {self.monitor_chart.current_time_offset:.1f}s (step: {step_size:.1f}s)")
+    
+    def slider_navigate_forward(self):
+        """Navigate forward using slider buttons"""
+        if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+            # Step size equals the current time window size
+            step_size = self.monitor_chart.current_time_window  # Move by exact time window size
+            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  # 10 samples per second
+            max_offset = max_duration - self.monitor_chart.current_time_window
+            
+            # Move forward by step size
+            self.monitor_chart.current_time_offset = min(max_offset, self.monitor_chart.current_time_offset + step_size)
+            self.monitor_chart.refresh_charts()
+            self.update_slider_position()
+            
+            print(f"Dashboard slider forward to: {self.monitor_chart.current_time_offset:.1f}s (step: {step_size:.1f}s)")
+    
+    def on_slider_changed(self, value):
+        """Handle slider value change"""
+        if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+            # Calculate maximum possible time based on data length
+            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  # 10 samples per second
+            
+            if max_duration > self.monitor_chart.current_time_window:
+                # Calculate time offset from slider value (0-100)
+                slider_progress = value / 100.0
+                max_offset = max_duration - self.monitor_chart.current_time_window
+                self.monitor_chart.current_time_offset = slider_progress * max_offset
+                
+                # Refresh charts and update labels
+                self.monitor_chart.refresh_charts()
+                self.update_slider_position()
+                
+                print(f"Dashboard slider changed to: {value}% (time: {self.monitor_chart.current_time_offset:.1f}s)")
+    
+    def update_slider_position(self):
+        """Update slider position based on current time offset"""
+        if self.time_slider and hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+            # Calculate maximum possible time based on data length
+            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  # 10 samples per second
+            
+            # Calculate slider value (0-100) based on current position
+            if max_duration > self.monitor_chart.current_time_window:
+                max_offset = max_duration - self.monitor_chart.current_time_window
+                slider_progress = self.monitor_chart.current_time_offset / max_offset
+                slider_value = int(slider_progress * 100)
+                slider_value = max(0, min(100, slider_value))  # Clamp between 0-100
+                
+                print(f"Debug: time_offset={self.monitor_chart.current_time_offset:.1f}s, max_duration={max_duration:.1f}s, max_offset={max_offset:.1f}s, progress={slider_progress:.3f}, slider_value={slider_value}")
+                
+                # Block signals to prevent recursive calls
+                self.time_slider.blockSignals(True)
+                self.time_slider.setValue(slider_value)
+                self.time_slider.blockSignals(False)
+                
+                print(f"Slider position updated: {slider_value}% (time: {self.monitor_chart.current_time_offset:.1f}s)")
+            
+            # Update slider time label with HH:MM:SS format
+            hours = int(self.monitor_chart.current_time_offset // 3600)
+            minutes = int((self.monitor_chart.current_time_offset % 3600) // 60)
+            seconds = int(self.monitor_chart.current_time_offset % 60)
+            self.slider_time_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
     
     def load_stylesheet(self):
         """Load QSS stylesheet"""

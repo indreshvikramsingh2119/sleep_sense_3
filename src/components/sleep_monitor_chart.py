@@ -12,7 +12,7 @@ import pandas as pd
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy
+    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider
 )
 from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QPoint, QRect, QMimeData
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen
@@ -23,6 +23,7 @@ from .custom_viewbox import CustomViewBox
 class SleepMonitorChart(QWidget):
     """Sleep Monitoring Chart Widget"""
     raw_data_saved = pyqtSignal(str, str)  # file_path, timestamp_iso
+    time_position_updated = pyqtSignal()  # Signal when time position changes
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -44,6 +45,18 @@ class SleepMonitorChart(QWidget):
         # Time window data management
         self.spo2_full_data = None  # Store full SpO2 data (time, spo2)
         self.current_time_offset = 0  # Current starting time for window
+        
+        # Expanded states management
+        self.expanded_states = {}  # Store expanded states of charts
+        
+        # SpO2 specific medical thresholds and statistics
+        self.spo2_thresholds = {
+            'normal': 95,    # Normal SpO2 level
+            'mild': 90,      # Mild hypoxemia
+            'moderate': 85,  # Moderate hypoxemia
+            'severe': 80     # Severe hypoxemia
+        }
+        self.spo2_statistics = {}  # Store calculated statistics
         
         # Area selection variables
         self.selection_start = None
@@ -206,6 +219,15 @@ class SleepMonitorChart(QWidget):
         self.charts_layout = QVBoxLayout(self.charts_widget)
         self.charts_layout.setContentsMargins(0, 0, 0, 0)
         self.charts_layout.setSpacing(8)
+        
+        # Add resize event handler to update overlays when window is resized
+        original_charts_resize = self.charts_widget.resizeEvent
+        def charts_resize_event(event):
+            if original_charts_resize:
+                original_charts_resize(event)
+            # Update all overlays when charts widget is resized
+            self.update_all_overlays_on_resize()
+        self.charts_widget.resizeEvent = charts_resize_event
         
         # Add stretch items to help with centering
         self.top_spacer = QWidget()
@@ -418,12 +440,14 @@ class SleepMonitorChart(QWidget):
         """Handle time window dropdown change"""
         # Get the value from dropdown item data
         seconds = self.time_window_dropdown.itemData(index)
+        print(f"Debug: on_time_window_changed called with index {index}, seconds {seconds}")
         self.current_time_window = seconds
         
         # Reset time offset when changing window size
         self.current_time_offset = 0
         
         # Update charts with new time window
+        print(f"Debug: About to call update_charts_for_time_window with {seconds} seconds")
         self.update_charts_for_time_window(seconds)
         self.restore_all_selections()
         self.update_time_position_label()
@@ -431,52 +455,88 @@ class SleepMonitorChart(QWidget):
     
     def navigate_backward(self):
         """Navigate backward in time"""
-        if self.spo2_full_data and len(self.spo2_full_data[0]) > 0:
+        if self.spo2_full_data and len(self.spo2_full_data[1]) > 0:
+            # Calculate maximum possible time based on data length
+            max_duration = len(self.spo2_full_data[1]) / 10.0  # 10 samples per second
             # Move back by the current time window
             self.current_time_offset = max(0, self.current_time_offset - self.current_time_window)
             self.refresh_charts()
             self.update_time_position_label()
-            print(f"Navigated backward to: {self.current_time_offset}s")
+            print(f"Navigated backward to: {self.current_time_offset}s (max: {max_duration:.1f}s)")
     
     def navigate_forward(self):
         """Navigate forward in time"""
-        if self.spo2_full_data and len(self.spo2_full_data[0]) > 0:
-            max_time = self.spo2_full_data[0][-1]
+        if self.spo2_full_data and len(self.spo2_full_data[1]) > 0:
+            # Calculate maximum possible time based on data length
+            max_duration = len(self.spo2_full_data[1]) / 10.0  # 10 samples per second
             # Move forward by the current time window
             new_offset = self.current_time_offset + self.current_time_window
-            if new_offset < max_time:
+            if new_offset < max_duration:
                 self.current_time_offset = new_offset
                 self.refresh_charts()
                 self.update_time_position_label()
-                print(f"Navigated forward to: {self.current_time_offset}s")
+                print(f"Navigated forward to: {self.current_time_offset}s (max: {max_duration:.1f}s)")
     
     def update_time_position_label(self):
         """Update the time position label"""
-        minutes = int(self.current_time_offset // 60)
+        hours = int(self.current_time_offset // 3600)
+        minutes = int((self.current_time_offset % 3600) // 60)
         seconds = int(self.current_time_offset % 60)
-        self.time_position_label.setText(f"{minutes}:{seconds:02d}")
+        self.time_position_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        
+        # Emit signal to update dashboard slider
+        self.time_position_updated.emit()
     
     def refresh_charts(self):
         """Refresh all charts with current time window and offset"""
+        print(f"Debug: refresh_charts called with time_window={self.current_time_window}s, offset={self.current_time_offset}s")
+        
+        # Save expanded states before refreshing
+        self.expanded_states = {}
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if container and hasattr(container, 'plot_widget'):
+                chart_name = container.plot_widget.chart_name
+                current_height = container.height()
+                max_height = container.maximumHeight()
+                print(f"Debug: Chart '{chart_name}' - Height: {current_height}, MaxHeight: {max_height}")
+                # Check if container is expanded (height > 120 or max_height is very large)
+                if current_height > 120 or max_height > 1000:
+                    self.expanded_states[chart_name] = current_height
+                    print(f"Debug: Saved expanded state for '{chart_name}' with height {current_height}")
+        
         for i in range(self.charts_layout.count()):
             container = self.charts_layout.itemAt(i).widget()
             if container and hasattr(container, 'plot_widget'):
                 plot_widget = container.plot_widget
                 chart_name = plot_widget.chart_name
                 
+                # Update time window limits on CustomViewBox with offset
+                vb = plot_widget.getViewBox()
+                if hasattr(vb, 'set_time_window_limits'):
+                    vb.set_time_window_limits(self.current_time_offset, self.current_time_offset + self.current_time_window)
+                
                 # Update data for each chart
                 if chart_name.strip() == "SpO2":
                     x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
                     if len(x) > 0 and len(y) > 0:
-                        # Update step ladder plot
+                        # Update step ladder plot with proper centering
                         step_x = np.zeros(len(y) + 1)
                         step_x[:-1] = x
                         step_x[-1] = x[-1] if len(x) > 0 else 0
-                        plot_widget.plot_curve.setData(step_x, y)
+                        
+                        # Apply centering if this is SpO2 data
+                        if chart_name.strip() == "SpO2" and len(y) > 0:
+                            # Center around 90% baseline
+                            y_mean = np.mean(y)
+                            y_centered = y - y_mean + 90
+                            plot_widget.plot_curve.setData(step_x, y_centered)
+                        else:
+                            plot_widget.plot_curve.setData(step_x, y)
                 else:
                     # Update simulated data for ALL other signals
                     time_points = int(self.current_time_window * 10)
-                    x = np.linspace(0, self.current_time_window, time_points)
+                    x = np.linspace(self.current_time_offset, self.current_time_offset + self.current_time_window, time_points)
                     freq = plot_widget.graph_frequency
                     amp = plot_widget.graph_amplitude
                     offset = plot_widget.graph_offset
@@ -484,6 +544,19 @@ class SleepMonitorChart(QWidget):
                     plot_widget.plot_curve.setData(x, y)
                     
                     print(f"Updated {chart_name} with {time_points} points for {self.current_time_window}s window")
+        
+        # Restore expanded states after refreshing
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if container and hasattr(container, 'plot_widget'):
+                chart_name = container.plot_widget.chart_name
+                if chart_name in self.expanded_states:
+                    # Restore expanded state
+                    saved_height = self.expanded_states[chart_name]
+                    container.setMinimumHeight(saved_height)
+                    container.setMaximumHeight(16777215)  # Very large number (effectively no limit)
+                    container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                    print(f"Debug: Restored expanded state for '{chart_name}' with height {saved_height}")
     
     def set_time_window(self, seconds):
         """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
@@ -500,6 +573,21 @@ class SleepMonitorChart(QWidget):
     
     def update_charts_for_time_window(self, seconds):
         """Update chart data based on time window selection"""
+        print(f"Debug: update_charts_for_time_window called with {seconds} seconds")
+        # Save expanded states before clearing
+        self.expanded_states = {}
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if container and hasattr(container, 'plot_widget'):
+                chart_name = container.plot_widget.chart_name
+                current_height = container.height()
+                max_height = container.maximumHeight()
+                print(f"Debug: Chart '{chart_name}' - Height: {current_height}, MaxHeight: {max_height}")
+                # Check if container is expanded (height > 120 or max_height is very large)
+                if current_height > 120 or max_height > 1000:
+                    self.expanded_states[chart_name] = current_height
+                    print(f"Debug: Saved expanded state for '{chart_name}' with height {current_height}")
+        
         # Clear existing charts
         for i in reversed(range(self.charts_layout.count())):
             child = self.charts_layout.itemAt(i).widget()
@@ -538,6 +626,9 @@ class SleepMonitorChart(QWidget):
             self.charts_layout.addWidget(chart, stretch=1)
             # Track the original order
             self.graph_order.append(name)
+        
+        # Restore expanded states immediately after charts are created
+        self._delayed_restore_expanded_states()
     
     def create_status_bar(self):
         """Create bottom status bar"""
@@ -552,7 +643,8 @@ class SleepMonitorChart(QWidget):
         return frame
     
     def init_charts(self):
-        """Initialize signal trace charts"""
+        """Initialize the charts with generated signal data"""
+        print("Debug: init_charts called - this will recreate all charts!")
         pg.setConfigOption('background', 'w')
         pg.setConfigOption('foreground', 'k')
         
@@ -573,58 +665,173 @@ class SleepMonitorChart(QWidget):
             self.charts_layout.addWidget(chart, stretch=1)
             # Track the original order
             self.graph_order.append(name)
+        
+        # Restore expanded states after charts are created with a delay
+        QTimer.singleShot(100, self._delayed_restore_expanded_states)
     
-    def load_spo2_data(self, csv_path):
-        """Load SpO2 data from CSV file and store full data for time window filtering"""
+    def _delayed_restore_expanded_states(self):
+        """Restore expanded states after all other resize events complete"""
+        print(f"Debug: Attempting to restore expanded states for {len(self.expanded_states)} charts")
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if container and hasattr(container, 'plot_widget'):
+                chart_name = container.plot_widget.chart_name
+                if chart_name in self.expanded_states:
+                    # Restore expanded state
+                    saved_height = self.expanded_states[chart_name]
+                    container.setMinimumHeight(saved_height)
+                    container.setMaximumHeight(16777215)  # Very large number (effectively no limit)
+                    container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                    print(f"Debug: Restored expanded state for '{chart_name}' with height {saved_height}")
+                    # Force a resize to the saved height
+                    container.resize(container.width(), saved_height)
+    
+    def load_spo2_data(self, csv_path=None):
+        """Load SpO2 data from CSV file with file dialog and improved error handling"""
+        if csv_path is None:
+            # Open file dialog for SpO2 data selection
+            csv_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select SpO2 Data File",
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "extracted_data"),
+                "CSV Files (*.csv);;All Files (*)"
+            )
+            
+            if not csv_path:
+                print("No file selected for SpO2 data")
+                return np.array([]), np.array([])
+        
         try:
-            # Read CSV file
-            df = pd.read_csv(csv_path)
+            # Validate file exists
+            if not os.path.exists(csv_path):
+                QMessageBox.warning(self, "File Error", f"SpO2 data file not found:\n{csv_path}")
+                return np.array([]), np.array([])
+            
+            # Read CSV file with error handling
+            try:
+                df = pd.read_csv(csv_path)
+            except pd.errors.EmptyDataError:
+                QMessageBox.warning(self, "File Error", "The selected CSV file is empty")
+                return np.array([]), np.array([])
+            except pd.errors.ParserError:
+                QMessageBox.warning(self, "File Error", "Error parsing CSV file. Please check the file format.")
+                return np.array([]), np.array([])
+            
+            # Validate required columns
+            required_columns = ['timestamp', 'spo2']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                QMessageBox.warning(self, "File Error", 
+                    f"Missing required columns: {', '.join(missing_columns)}\n"
+                    f"Required columns: {', '.join(required_columns)}")
+                return np.array([]), np.array([])
+            
+            # Validate data is not empty
+            if df.empty:
+                QMessageBox.warning(self, "File Error", "The CSV file contains no data")
+                return np.array([]), np.array([])
             
             # Convert timestamp to datetime and calculate relative time in seconds
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            start_time = df['timestamp'].iloc[0]
-            df['time_seconds'] = (df['timestamp'] - start_time).dt.total_seconds()
+            try:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                start_time = df['timestamp'].iloc[0]
+                df['time_seconds'] = (df['timestamp'] - start_time).dt.total_seconds()
+            except Exception as e:
+                QMessageBox.warning(self, "Data Error", f"Error processing timestamps:\n{str(e)}")
+                return np.array([]), np.array([])
             
             # Extract time and SpO2 values
             time_data = df['time_seconds'].values
             spo2_data = df['spo2'].values
             
+            # Validate SpO2 data range (should be reasonable values)
+            invalid_spo2 = np.sum((spo2_data < 0) | (spo2_data > 100))
+            if invalid_spo2 > 0:
+                QMessageBox.warning(self, "Data Warning", 
+                    f"Found {invalid_spo2} invalid SpO2 values (outside 0-100% range)")
+            
             # Store full data for time window filtering
             self.spo2_full_data = (time_data, spo2_data)
             
-            print(f"Loaded SpO2 data: {len(time_data)} data points from {csv_path}")
+            print(f"Successfully loaded SpO2 data: {len(time_data)} data points from {csv_path}")
+            print(f"Time range: {time_data[0]:.1f}s to {time_data[-1]:.1f}s ({time_data[-1]/3600:.1f} hours)")
+            print(f"SpO2 range: {np.min(spo2_data):.1f}% to {np.max(spo2_data):.1f}%")
+            
             return time_data, spo2_data
             
         except Exception as e:
-            print(f"Error loading SpO2 data: {e}")
+            error_msg = f"Unexpected error loading SpO2 data:\n{str(e)}"
+            print(error_msg)
+            QMessageBox.critical(self, "Loading Error", error_msg)
             # Return empty arrays if loading fails
             self.spo2_full_data = (np.array([]), np.array([]))
             return np.array([]), np.array([])
     
+    def load_spo2_data_from_file(self):
+        """Load SpO2 data using file dialog - can be called from UI"""
+        time_data, spo2_data = self.load_spo2_data()
+        if len(time_data) > 0:
+            # Refresh charts to display new data
+            self.refresh_charts()
+            QMessageBox.information(self, "Success", 
+                f"SpO2 data loaded successfully!\n"
+                f"Data points: {len(time_data)}\n"
+                f"Duration: {time_data[-1]/3600:.1f} hours")
+    
     def get_spo2_data_for_window(self, time_window_seconds, time_offset=0):
-        """Get SpO2 data filtered for specific time window"""
+        """Get SpO2 data filtered for specific time window with proper 10Hz sampling"""
         if self.spo2_full_data is None or len(self.spo2_full_data[0]) == 0:
             return np.array([]), np.array([])
         
         full_time, full_spo2 = self.spo2_full_data
         
-        # Filter data for the current time window
-        start_time = time_offset
-        end_time = time_offset + time_window_seconds
+        # Calculate sample indices based on 10Hz sampling rate (10 samples per second)
+        samples_per_second = 10
+        start_sample = int(time_offset * samples_per_second)
+        end_sample = int((time_offset + time_window_seconds) * samples_per_second)
         
-        # Find indices within the time window
-        mask = (full_time >= start_time) & (full_time <= end_time)
-        window_time = full_time[mask] - time_offset  # Normalize to start from 0
-        window_spo2 = full_spo2[mask]
+        # Ensure we don't exceed data bounds
+        start_sample = max(0, start_sample)
+        end_sample = min(len(full_spo2), end_sample)
         
-        # If no data in window, return empty arrays
-        if len(window_time) == 0:
-            return np.array([0, time_window_seconds]), np.array([full_spo2[0], full_spo2[0]])
+        # Extract the data for this window
+        window_spo2 = full_spo2[start_sample:end_sample]
+        
+        # Create proper time axis based on 10Hz sampling (0, 0.1, 0.2, 0.3...)
+        num_samples = len(window_spo2)
+        if num_samples == 0:
+            return np.array([]), np.array([])
+        
+        # Generate time points: 0, 0.1, 0.2, ... up to time_window_seconds
+        window_time = np.arange(num_samples) / samples_per_second
+        
+        # Calculate SpO2 statistics for this window
+        self.calculate_spo2_statistics(window_spo2)
+        
+        print(f"SpO2 window: {time_window_seconds}s, Samples: {num_samples}, Expected: {time_window_seconds * samples_per_second}")
         
         return window_time, window_spo2
     
+    def calculate_spo2_statistics(self, spo2_data):
+        """Calculate medical-grade SpO2 statistics"""
+        if len(spo2_data) == 0:
+            return
+        
+        self.spo2_statistics = {
+            'mean': np.mean(spo2_data),
+            'min': np.min(spo2_data),
+            'max': np.max(spo2_data),
+            'std': np.std(spo2_data),
+            'desaturation_events': np.sum(spo2_data < self.spo2_thresholds['normal']),
+            'mild_events': np.sum(spo2_data < self.spo2_thresholds['mild']),
+            'moderate_events': np.sum(spo2_data < self.spo2_thresholds['moderate']),
+            'severe_events': np.sum(spo2_data < self.spo2_thresholds['severe']),
+            'total_points': len(spo2_data)
+        }
+    
     def create_signal_chart(self, name, color, frequency, amplitude, offset):
         """Create a single signal trace chart with side label"""
+        print(f"Debug: create_signal_chart called for '{name}' - creating new container with 120px height")
         
         container = QWidget()
         container.setObjectName("signalChartContainer")
@@ -741,6 +948,7 @@ class SleepMonitorChart(QWidget):
                 background-color: #93c5fd;
                 border-color: #1d4ed8;
                 color: #1e3a8a;
+                
             }
         """)
         drag_btn.clicked.connect(lambda: self.start_manual_drag(name, container))
@@ -750,20 +958,55 @@ class SleepMonitorChart(QWidget):
         plot_widget = pg.PlotWidget(viewBox=CustomViewBox())
         plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         plot_widget.setAlignment(Qt.AlignCenter)
-        plot_widget.showGrid(x=True, y=True, alpha=0.1)
+        # Remove all grid lines for clean white background
+        plot_widget.showGrid(x=False, y=False)
         
-        # Set Y-axis range based on graph type
-        if name.strip() == "SpO2":
-            plot_widget.setYRange(90, 100)  # SpO2 specific range 90-100
-        else:
-            plot_widget.setYRange(0, 100)  # Other graphs 0-100
+        # Define medical standard Y-axis ranges for each signal type
+        y_axis_ranges = {
+            "Body Position": (-100, 100),
+            "Airflow": (-100, 100),
+            "Snoring": (0, 100),
+            "Thorex": (-100, 100),
+            "Abdomen": (-100, 100),
+            "SpO2": (85, 100),  # Medical SpO2 range (85-100%)
+            "Pulse": (40, 200),   # Pulse rate in BPM
+            "Body Movement": (-100, 100),
+            "PR/HR": (40, 200)   # Pulse/Heart Rate in BPM
+        }
+        
+        # Get the appropriate Y-axis range for this signal
+        signal_name = name.strip()
+        y_min, y_max = y_axis_ranges.get(signal_name, (0, 100))  # Default to 0-100 if not found
+        
+        # Set fixed Y-axis range based on medical standards
+        try:
+            plot_widget.setYRange(y_min, y_max)
+        except TypeError:
+            # Try alternative method for older pyqtgraph versions
+            plot_widget.setRange(yRange=[y_min, y_max])
+        
+        # Restrict zoom to X-axis only (time-based zoom)
+        plot_widget.setMouseEnabled(x=True, y=False)
+        
+        # Disable auto-range and set fixed limits
+        plot_widget.enableAutoRange(axis='y', enable=False)
+        try:
+            plot_widget.setLimits(yMin=y_min, yMax=y_max)
+        except TypeError:
+            # Try alternative method for older pyqtgraph versions
+            plot_widget.setLimits(yMin=y_min, yMax=y_max)
             
         # Set X-axis to show time values based on current time window
         plot_widget.getAxis('bottom').setStyle(showValues=True)  # Show time values
         plot_widget.getAxis('left').setStyle(showValues=True)   # Show Y-axis values
         
-        # Set X-axis range to match time window
-        plot_widget.setXRange(0, self.current_time_window)
+        # Set X-axis range to match time window with offset
+        plot_widget.setXRange(self.current_time_offset, self.current_time_offset + self.current_time_window)
+        
+        # Set time window limits on CustomViewBox to enforce zoom constraints
+        vb = plot_widget.getViewBox()
+        if hasattr(vb, 'set_time_window_limits'):
+            vb.set_time_window_limits(self.current_time_offset, self.current_time_offset + self.current_time_window)
         
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.hideButtons()  # Hide the 'A' button
@@ -777,7 +1020,7 @@ class SleepMonitorChart(QWidget):
             if self.spo2_full_data is None:
                 # Load data if not already loaded
                 base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                csv_path = os.path.join(base_dir, "extracted data", "spo2_6hr_10Hz_data (1).csv")
+                csv_path = os.path.join(base_dir, "extracted_data", "spo2_6hr_10Hz_data (1).csv")
                 print(f"Loading SpO2 data from: {csv_path}")
                 self.load_spo2_data(csv_path)
             
@@ -788,12 +1031,17 @@ class SleepMonitorChart(QWidget):
             if len(x) == 0:
                 print("Falling back to simulated SpO2 data")
                 time_points = 1000
-                x = np.linspace(0, self.current_time_window, time_points)
+                x = np.linspace(self.current_time_offset, self.current_time_offset + self.current_time_window, time_points)
                 y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
+            else:
+                # Center the SpO2 data around mean (baseline correction)
+                y_mean = np.mean(y)
+                y_centered = y - y_mean
+                y = y_centered + 90  # Center around 90% (medical baseline)
         else:
             # Generate simulated data for other signals based on time window
             time_points = int(self.current_time_window * 10)  # 10 Hz sampling rate
-            x = np.linspace(0, self.current_time_window, time_points)
+            x = np.linspace(self.current_time_offset, self.current_time_offset + self.current_time_window, time_points)
             y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
         
         # Plot the signal and store reference for line visibility control
@@ -851,7 +1099,24 @@ class SleepMonitorChart(QWidget):
         # Override container resize event
         original_resize = container.resizeEvent
         def container_resize_event(event):
-            # Call original resize event if it exists
+            if hasattr(container, 'plot_widget'):
+                chart_name = container.plot_widget.chart_name
+                new_height = event.size().height()
+                print(f"Debug: Container resize event for {chart_name} - New size: {new_height}px")
+                
+                # Completely prevent any resize attempts on expanded containers
+                current_max_height = container.maximumHeight()
+                current_min_height = container.minimumHeight()
+                current_height = container.height()
+                
+                # Check if this is an expanded container (max height is very large or min height > 120)
+                is_expanded = current_max_height > 1000 or current_min_height > 120 or current_height > 120
+                
+                if is_expanded:
+                    print(f"Debug: Blocking resize of expanded container '{chart_name}' (current: {current_height}px, attempted: {new_height}px)")
+                    # Completely block the resize event for expanded containers
+                    return
+                
             if original_resize:
                 original_resize(event)
             # Update overlays when container resizes
@@ -1233,11 +1498,36 @@ class SleepMonitorChart(QWidget):
             new_y_max = 100
             new_y_min = 100 - new_range_size
             
-        plot_widget.setYRange(new_y_min, new_y_max)
+        try:
+            plot_widget.setYRange(new_y_min, new_y_max)
+        except TypeError:
+            # Try alternative method for older pyqtgraph versions
+            plot_widget.setRange(yRange=[new_y_min, new_y_max])
     
     def reset_zoom(self, plot_widget):
-        """Reset zoom to original range"""
-        plot_widget.setYRange(0, 100)
+        """Reset zoom to original medical standard range"""
+        # Define medical standard Y-axis ranges
+        y_axis_ranges = {
+            "Body Position": (-100, 100),
+            "Airflow": (-100, 100),
+            "Snoring": (0, 100),
+            "Thorex": (-100, 100),
+            "Abdomen": (-100, 100),
+            "SpO2": (85, 100),
+            "Pulse": (40, 200),
+            "Body Movement": (-100, 100),
+            "PR/HR": (40, 200)
+        }
+        
+        # Get the chart name from the plot widget
+        chart_name = getattr(plot_widget, 'chart_name', '')
+        y_min, y_max = y_axis_ranges.get(chart_name.strip(), (0, 100))
+        
+        try:
+            plot_widget.setYRange(y_min, y_max)
+        except TypeError:
+            # Try alternative method for older pyqtgraph versions
+            plot_widget.setRange(yRange=[y_min, y_max])
     
     def toggle_playback(self):
         """Toggle between play and pause"""
@@ -1340,6 +1630,10 @@ class SleepMonitorChart(QWidget):
     
     def custom_mouse_press(self, event, plot_widget):
         """Custom mouse press handler for better selection handling"""
+        # Only handle left mouse button for area selection
+        if event.button() != Qt.LeftButton:
+            return
+            
         # Handle left click directly without converting to scene event
         widget_pos = event.pos()
         widget_rect = plot_widget.rect()
@@ -1454,7 +1748,7 @@ class SleepMonitorChart(QWidget):
                 """)
     
     def on_plot_resized(self, plot_widget):
-        """Handle plot widget resize to update overlay positions"""
+        """Handle plot widget resize/pan/zoom to update overlay positions"""
         # Update persistent overlays for this chart
         if hasattr(plot_widget, 'selection_overlays'):
             chart_name = plot_widget.chart_name
@@ -1466,20 +1760,8 @@ class SleepMonitorChart(QWidget):
                 for i, overlay in enumerate(overlays):
                     if i < len(labels_data):
                         selection_data = labels_data[i]
-                        vb = plot_widget.getViewBox()
-                        p1 = vb.mapViewToScene(selection_data['start'])
-                        p2 = vb.mapViewToScene(selection_data['end'])
-                        w1 = plot_widget.mapFromScene(p1)
-                        w2 = plot_widget.mapFromScene(p2)
-                        
-                        x_min = min(w1.x(), w2.x())
-                        x_max = max(w1.x(), w2.x())
-                        
-                        print(f"Overlay {i} - original start: {selection_data['start']}, end: {selection_data['end']}")
-                        print(f"Overlay {i} - w1: {w1}, w2: {w2}")
-                        print(f"Overlay {i} - x_min: {x_min}, x_max: {x_max}, width: {int(x_max - x_min)}, height: {plot_widget.height()}")
-                        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
-                        print(f"Overlay {i} - new geometry: {overlay.geometry()}")
+                        # Update overlay position using the new method
+                        self.update_overlay_position(plot_widget, overlay, selection_data['start'], selection_data['end'])
         
         # Update current selection overlay if active
         if (self.current_selection_chart == plot_widget and 
@@ -1500,12 +1782,12 @@ class SleepMonitorChart(QWidget):
             if distance > 10:
                 print("Selection finished properly")
 
-                # 🔥 IMPORTANT: ensure end point set
+                #  IMPORTANT: ensure end point set
                 vb = plot_widget.getViewBox()
                 mouse_point = vb.mapSceneToView(self.selection_end_scene)
                 self.selection_end = mouse_point
 
-                # 🔥 FORCE MENU OPEN
+                #  FORCE MENU OPEN
                 self.show_selection_menu()
 
             else:
@@ -1590,7 +1872,7 @@ class SleepMonitorChart(QWidget):
         
         # Ensure minimum width
         if width < 30:
-            width = 30
+            width = 30.0
         
         print(f"update_selection_overlay - Chart: {self.current_selection_chart.chart_name}")
         print(f"update_selection_overlay - Data coords: start={start_x}, end={end_x}")
@@ -1598,7 +1880,12 @@ class SleepMonitorChart(QWidget):
         print(f"update_selection_overlay - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
         print(f"update_selection_overlay - Widget coords: x_min={x_min:.1f}, x_max={x_max:.1f}, width={width:.1f}")
         
-        overlay.setGeometry(int(x_min), 0, int(width), self.current_selection_chart.height())
+        # Use full chart height for selection overlay to make it large
+        chart_height = self.current_selection_chart.height()
+        # Ensure overlay is always large (minimum 60px or full chart height)
+        overlay_height = max(60, chart_height)
+        overlay_y = 0  # Start from top
+        overlay.setGeometry(int(x_min), overlay_y, int(width), int(overlay_height))
         overlay.setVisible(True)
         overlay.setText("Selecting...")
         overlay.raise_()
@@ -1702,31 +1989,32 @@ class SleepMonitorChart(QWidget):
         # CREATE NEW OVERLAY (instead of reusing one)
         overlay = QLabel(plot_widget)
         overlay.setAlignment(Qt.AlignCenter)
-        overlay.setText(label_type)
+        # Calculate timestamp information
+        start_time = self.selection_start.x()
+        end_time = self.selection_end.x()
+        duration = end_time - start_time
+        
+        # Format timestamp display
+        start_str = self.format_timestamp(start_time)
+        duration_str = self.format_duration(duration)
+        
+        overlay.setText(f"{label_type}\n{start_str}\n{duration_str}")
         overlay.setStyleSheet(f"""
             background-color: {selection_data['color']};
             border: 2px solid {selection_data['color'].replace('0.2', '0.8')};
             border-radius: 6px;
             color: white;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: bold;
+            padding: 4px;
         """)
         
         # Make overlay clickable
         overlay.mousePressEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_click(event, ov, cn)
         overlay.mouseDoubleClickEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_double_click(event, ov, cn)
 
-        # Position overlay
-        vb = plot_widget.getViewBox()
-        p1 = vb.mapViewToScene(selection_data['start'])
-        p2 = vb.mapViewToScene(selection_data['end'])
-        w1 = plot_widget.mapFromScene(p1)
-        w2 = plot_widget.mapFromScene(p2)
-
-        x_min = min(w1.x(), w2.x())
-        x_max = max(w1.x(), w2.x())
-
-        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
+        # Position overlay using new method
+        self.update_overlay_position(plot_widget, overlay, selection_data['start'], selection_data['end'])
         overlay.show()
 
         # Hide the temporary "Choose Label" overlay
@@ -1918,31 +2206,171 @@ class SleepMonitorChart(QWidget):
             if chart_name not in self.selection_labels:
                 continue
 
+            # Clear existing overlays
+            if hasattr(plot_widget, 'selection_overlays'):
+                plot_widget.selection_overlays.clear()
+
             for selection in self.selection_labels[chart_name]:
                 overlay = QLabel(plot_widget)
-                overlay.setText(selection['label'])
+                
+                # Calculate timestamp information
+                start_time = selection['start'].x()
+                end_time = selection['end'].x()
+                duration = end_time - start_time
+                
+                # Format timestamp display
+                start_str = self.format_timestamp(start_time)
+                duration_str = self.format_duration(duration)
+                
+                overlay.setText(f"{selection['label']}\n{start_str}\n{duration_str}")
                 overlay.setStyleSheet(f"""
                     background-color: {selection['color']};
                     border: 2px solid {selection['color'].replace('0.2', '0.8')};
                     border-radius: 6px;
                     color: white;
-                    font-size: 12px;
+                    font-size: 11px;
                     font-weight: bold;
+                    padding: 4px;
                 """)
 
-                vb = plot_widget.getViewBox()
-                p1 = vb.mapViewToScene(selection['start'])
-                p2 = vb.mapViewToScene(selection['end'])
-                w1 = plot_widget.mapFromScene(p1)
-                w2 = plot_widget.mapFromScene(p2)
+                # Make overlay clickable
+                overlay.mousePressEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_click(event, ov, cn)
+                overlay.mouseDoubleClickEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_double_click(event, ov, cn)
 
-                x_min = min(w1.x(), w2.x())
-                x_max = max(w1.x(), w2.x())
-
-                overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
+                # Position overlay correctly
+                self.update_overlay_position(plot_widget, overlay, selection['start'], selection['end'])
                 overlay.show()
-
+                
+                # Store overlay
+                if not hasattr(plot_widget, 'selection_overlays'):
+                    plot_widget.selection_overlays = []
                 plot_widget.selection_overlays.append(overlay)
+    
+    def format_timestamp(self, time_seconds):
+        """Format time in seconds to readable timestamp"""
+        hours = int(time_seconds // 3600)
+        minutes = int((time_seconds % 3600) // 60)
+        seconds = int(time_seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    
+    def format_duration(self, duration_seconds):
+        """Format duration to readable string"""
+        if duration_seconds < 60:
+            return f"{duration_seconds:.1f}s"
+        else:
+            minutes = int(duration_seconds // 60)
+            seconds = int(duration_seconds % 60)
+            return f"{minutes}m {seconds}s"
+    
+    def update_overlay_position(self, plot_widget, overlay, start_pos, end_pos):
+        """Update overlay position based on current view"""
+        vb = plot_widget.getViewBox()
+        p1 = vb.mapViewToScene(start_pos)
+        p2 = vb.mapViewToScene(end_pos)
+        w1 = plot_widget.mapFromScene(p1)
+        w2 = plot_widget.mapFromScene(p2)
+
+        x_min = min(w1.x(), w2.x())
+        x_max = max(w1.x(), w2.x())
+        
+        # Use large overlay height for persistent selections
+        plot_height = plot_widget.height()
+        overlay_height = max(60, plot_height)  # Minimum 60px or full plot height
+        y_position = 0  # Start from top for large appearance
+
+        overlay.setGeometry(int(x_min), y_position, int(x_max - x_min), int(overlay_height))
+    
+    def update_all_overlays_on_resize(self):
+        """Update all overlay positions when window is resized"""
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if hasattr(container, 'findChildren'):
+                plots = container.findChildren(pg.PlotWidget)
+                if plots and hasattr(plots[0], 'selection_overlays'):
+                    plot_widget = plots[0]
+                    chart_name = plot_widget.chart_name
+                    
+                    if chart_name in self.selection_labels:
+                        for j, overlay in enumerate(plot_widget.selection_overlays):
+                            if j < len(self.selection_labels[chart_name]):
+                                selection_data = self.selection_labels[chart_name][j]
+                                self.update_overlay_position(plot_widget, overlay, selection_data['start'], selection_data['end'])
+    
+    def add_spo2_threshold_lines(self, plot_widget):
+        """Add medical threshold lines for SpO2 monitoring"""
+        thresholds = self.spo2_thresholds
+        
+        # Define threshold colors and styles
+        threshold_configs = [
+            (thresholds['severe'], '#ef4444', 'Severe (<80%)', 2, Qt.DashLine),    # Red - Severe
+            (thresholds['moderate'], '#f59e0b', 'Moderate (<85%)', 1.5, Qt.DashLine), # Orange - Moderate  
+            (thresholds['mild'], '#eab308', 'Mild (<90%)', 1, Qt.DashLine),          # Yellow - Mild
+            (thresholds['normal'], '#22c55e', 'Normal (≥95%)', 1, Qt.DotLine),       # Green - Normal
+        ]
+        
+        for threshold, color, label, width, style in threshold_configs:
+            # Create infinite horizontal line at threshold level
+            line = pg.InfiniteLine(pos=threshold, angle=0, pen=pg.mkPen(color=color, width=width, style=style))
+            plot_widget.addItem(line)
+            
+            # Add label for the threshold
+            label_text = pg.TextItem(text=label, color=color, anchor=(0, 1))
+            label_text.setPos(0, threshold)
+            plot_widget.addItem(label_text)
+    
+    def add_spo2_statistics_overlay(self, plot_widget, container):
+        """Add SpO2 statistics overlay to the plot container"""
+        if not self.spo2_statistics:
+            return
+        
+        # Create statistics label
+        stats_text = f"""
+SpO2 Statistics:
+Mean: {self.spo2_statistics['mean']:.1f}%
+Min: {self.spo2_statistics['min']:.1f}%
+Max: {self.spo2_statistics['max']:.1f}%
+Desaturations: {self.spo2_statistics['desaturation_events']}
+Mild Events: {self.spo2_statistics['mild_events']}
+Moderate Events: {self.spo2_statistics['moderate_events']}
+Severe Events: {self.spo2_statistics['severe_events']}
+        """.strip()
+        
+        stats_label = QLabel(container)
+        stats_label.setText(stats_text)
+        stats_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 0.8);
+                color: white;
+                font-size: 10px;
+                font-family: 'Courier New', monospace;
+                padding: 8px;
+                border-radius: 6px;
+                border: 1px solid #06b6d4;
+            }
+        """)
+        stats_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        stats_label.setObjectName("spo2StatisticsLabel")
+        
+        # Position the overlay in top-right corner
+        stats_label.move(container.width() - 200, 10)
+        stats_label.resize(190, 120)
+        stats_label.show()
+        
+        # Store reference for updates
+        plot_widget.stats_label = stats_label
+        
+        # Update position when container resizes
+        def update_stats_position():
+            if hasattr(plot_widget, 'stats_label') and plot_widget.stats_label:
+                plot_widget.stats_label.move(container.width() - 200, 10)
+        
+        # Connect resize event
+        container.stats_update_func = update_stats_position
+    
+    def update_spo2_statistics_overlay(self, plot_widget, container):
+        """Update SpO2 statistics overlay with current data - DISABLED"""
+        # Statistics overlay disabled - no longer creating overlay
+        pass
     
     def resizeEvent(self, event):
         """Handle resize for watermark centering"""
