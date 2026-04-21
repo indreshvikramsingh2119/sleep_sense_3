@@ -333,10 +333,28 @@ class SleepMonitorChart(QWidget):
         nav_layout.setSpacing(4)
 
         # Backward navigation button
-        nav_backward_btn = QPushButton("")
+        nav_backward_btn = QPushButton("<")
         nav_backward_btn.setObjectName("controlButton")
-        nav_backward_btn.setFixedHeight(28)
-        nav_backward_btn.setMinimumWidth(40)
+        nav_backward_btn.setFixedSize(50, 28)  # Fixed size for better visibility
+        nav_backward_btn.setStyleSheet("""
+            QPushButton#controlButton {
+                background-color: #3b82f6;
+                color: white;
+                border: 1px solid #2563eb;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 2px 8px;
+            }
+            QPushButton#controlButton:hover {
+                background-color: #2563eb;
+                border-color: #1d4ed8;
+            }
+            QPushButton#controlButton:pressed {
+                background-color: #1d4ed8;
+                border-color: #1e3a8a;
+            }
+        """)
         nav_backward_btn.clicked.connect(self.navigate_backward)
         nav_layout.addWidget(nav_backward_btn)
 
@@ -350,8 +368,26 @@ class SleepMonitorChart(QWidget):
         # Forward navigation button
         nav_forward_btn = QPushButton(">")
         nav_forward_btn.setObjectName("controlButton")
-        nav_forward_btn.setFixedHeight(28)
-        nav_forward_btn.setMinimumWidth(40)
+        nav_forward_btn.setFixedSize(50, 28)  # Fixed size for better visibility
+        nav_forward_btn.setStyleSheet("""
+            QPushButton#controlButton {
+                background-color: #3b82f6;
+                color: white;
+                border: 1px solid #2563eb;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 2px 8px;
+            }
+            QPushButton#controlButton:hover {
+                background-color: #2563eb;
+                border-color: #1d4ed8;
+            }
+            QPushButton#controlButton:pressed {
+                background-color: #1d4ed8;
+                border-color: #1e3a8a;
+            }
+        """)
         nav_forward_btn.clicked.connect(self.navigate_forward)
         nav_layout.addWidget(nav_forward_btn)
 
@@ -520,23 +556,24 @@ class SleepMonitorChart(QWidget):
                 if chart_name.strip() == "SpO2":
                     x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
                     if len(x) > 0 and len(y) > 0:
-                        # Update step ladder plot with proper centering
-                        step_x = np.zeros(len(y) + 1)
-                        step_x[:-1] = x
-                        step_x[-1] = x[-1] if len(x) > 0 else 0
+                        # Update normal line plot
+                        plot_widget.plot_curve.setData(x, y)
                         
-                        # Apply centering if this is SpO2 data
-                        if chart_name.strip() == "SpO2" and len(y) > 0:
-                            # Center around 90% baseline
-                            y_mean = np.mean(y)
-                            y_centered = y - y_mean + 90
-                            plot_widget.plot_curve.setData(step_x, y_centered)
-                        else:
-                            plot_widget.plot_curve.setData(step_x, y)
+                        # Update scatter plot markers if they exist (only in 10s-30s time window)
+                        if (hasattr(plot_widget, 'scatter_item') and 
+                            plot_widget.scatter_item is not None and
+                            10 <= self.current_time_window <= 30):
+                            # Update scatter plot with new data
+                            plot_widget.scatter_item.setData(x, y)
+                            
+                            # Update hover data with new values
+                            plot_widget.hover_data = {'x': x, 'y': y}
+                             
+                            print(f"Updated SpO2 markers with {len(x)} points for time offset {self.current_time_offset}s")
                 else:
                     # Update simulated data for ALL other signals
                     time_points = int(self.current_time_window * 10)
-                    x = np.linspace(self.current_time_offset, self.current_time_offset + self.current_time_window, time_points)
+                    x = np.linspace(0, self.current_time_window, time_points)
                     freq = plot_widget.graph_frequency
                     amp = plot_widget.graph_amplitude
                     offset = plot_widget.graph_offset
@@ -643,8 +680,7 @@ class SleepMonitorChart(QWidget):
         return frame
     
     def init_charts(self):
-        """Initialize the charts with generated signal data"""
-        print("Debug: init_charts called - this will recreate all charts!")
+        """Initialize signal trace charts"""
         pg.setConfigOption('background', 'w')
         pg.setConfigOption('foreground', 'k')
         
@@ -670,8 +706,8 @@ class SleepMonitorChart(QWidget):
         QTimer.singleShot(100, self._delayed_restore_expanded_states)
     
     def _delayed_restore_expanded_states(self):
-        """Restore expanded states after all other resize events complete"""
-        print(f"Debug: Attempting to restore expanded states for {len(self.expanded_states)} charts")
+        """Restore expanded states for charts after they are created"""
+        print("Debug: _delayed_restore_expanded_states called")
         for i in range(self.charts_layout.count()):
             container = self.charts_layout.itemAt(i).widget()
             if container and hasattr(container, 'plot_widget'):
@@ -683,62 +719,17 @@ class SleepMonitorChart(QWidget):
                     container.setMaximumHeight(16777215)  # Very large number (effectively no limit)
                     container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
                     print(f"Debug: Restored expanded state for '{chart_name}' with height {saved_height}")
-                    # Force a resize to the saved height
-                    container.resize(container.width(), saved_height)
     
-    def load_spo2_data(self, csv_path=None):
-        """Load SpO2 data from CSV file with file dialog and improved error handling"""
-        if csv_path is None:
-            # Open file dialog for SpO2 data selection
-            csv_path, _ = QFileDialog.getOpenFileName(
-                self,
-                "Select SpO2 Data File",
-                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "extracted_data"),
-                "CSV Files (*.csv);;All Files (*)"
-            )
-            
-            if not csv_path:
-                print("No file selected for SpO2 data")
-                return np.array([]), np.array([])
-        
+    def load_spo2_data(self, csv_path):
+        """Load SpO2 data from CSV file and store full data for time window filtering"""
         try:
-            # Validate file exists
-            if not os.path.exists(csv_path):
-                QMessageBox.warning(self, "File Error", f"SpO2 data file not found:\n{csv_path}")
-                return np.array([]), np.array([])
-            
-            # Read CSV file with error handling
-            try:
-                df = pd.read_csv(csv_path)
-            except pd.errors.EmptyDataError:
-                QMessageBox.warning(self, "File Error", "The selected CSV file is empty")
-                return np.array([]), np.array([])
-            except pd.errors.ParserError:
-                QMessageBox.warning(self, "File Error", "Error parsing CSV file. Please check the file format.")
-                return np.array([]), np.array([])
-            
-            # Validate required columns
-            required_columns = ['timestamp', 'spo2']
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            if missing_columns:
-                QMessageBox.warning(self, "File Error", 
-                    f"Missing required columns: {', '.join(missing_columns)}\n"
-                    f"Required columns: {', '.join(required_columns)}")
-                return np.array([]), np.array([])
-            
-            # Validate data is not empty
-            if df.empty:
-                QMessageBox.warning(self, "File Error", "The CSV file contains no data")
-                return np.array([]), np.array([])
+            # Read CSV file directly using pandas
+            df = pd.read_csv(csv_path)
             
             # Convert timestamp to datetime and calculate relative time in seconds
-            try:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                start_time = df['timestamp'].iloc[0]
-                df['time_seconds'] = (df['timestamp'] - start_time).dt.total_seconds()
-            except Exception as e:
-                QMessageBox.warning(self, "Data Error", f"Error processing timestamps:\n{str(e)}")
-                return np.array([]), np.array([])
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            start_time = df['timestamp'].iloc[0]
+            df['time_seconds'] = (df['timestamp'] - start_time).dt.total_seconds()
             
             # Extract time and SpO2 values
             time_data = df['time_seconds'].values
@@ -753,16 +744,11 @@ class SleepMonitorChart(QWidget):
             # Store full data for time window filtering
             self.spo2_full_data = (time_data, spo2_data)
             
-            print(f"Successfully loaded SpO2 data: {len(time_data)} data points from {csv_path}")
-            print(f"Time range: {time_data[0]:.1f}s to {time_data[-1]:.1f}s ({time_data[-1]/3600:.1f} hours)")
-            print(f"SpO2 range: {np.min(spo2_data):.1f}% to {np.max(spo2_data):.1f}%")
-            
+            print(f"Loaded SpO2 data: {len(time_data)} data points from {csv_path}")
             return time_data, spo2_data
             
         except Exception as e:
-            error_msg = f"Unexpected error loading SpO2 data:\n{str(e)}"
-            print(error_msg)
-            QMessageBox.critical(self, "Loading Error", error_msg)
+            print(f"Error loading SpO2 data: {e}")
             # Return empty arrays if loading fails
             self.spo2_full_data = (np.array([]), np.array([]))
             return np.array([]), np.array([])
@@ -779,7 +765,7 @@ class SleepMonitorChart(QWidget):
                 f"Duration: {time_data[-1]/3600:.1f} hours")
     
     def get_spo2_data_for_window(self, time_window_seconds, time_offset=0):
-        """Get SpO2 data filtered for specific time window with proper 10Hz sampling"""
+        """Get SpO2 data filtered for specific time window"""
         if self.spo2_full_data is None or len(self.spo2_full_data[0]) == 0:
             return np.array([]), np.array([])
         
@@ -1047,23 +1033,49 @@ class SleepMonitorChart(QWidget):
         # Plot the signal and store reference for line visibility control
         pen = pg.mkPen(color=color, width=1.5)
         
-        # Use step ladder style for SpO2 data
-        if name.strip() == "SpO2":
-            # Create step ladder plot using pyqtgraph's stepMode
-            if len(x) > 0 and len(y) > 0:
-                # For stepMode=True, we need x array with len(y)+1 elements
-                # Create extended x array for proper step rendering
-                step_x = np.zeros(len(y) + 1)
-                step_x[:-1] = x  # All original x values except last
-                step_x[-1] = x[-1] if len(x) > 0 else 0  # Last x value repeated
+        # Plot all graphs as normal line plots (no step ladder)
+        plot_curve = plot_widget.plot(x, y, pen=pen)
+
+        # Add hover functionality for SpO2 graph - only in 10s-30s time window
+        if name.strip() == "SpO2" and len(x) > 0 and len(y) > 0:
+            # Check if current time window is between 10s and 30s
+            if 10 <= self.current_time_window <= 30:
+                # Create scatter plot for data points
+                scatter = pg.ScatterPlotItem(
+                    x=x, y=y, 
+                    size=8,  # Size of the dots
+                    brush=pg.mkBrush(color=color),  # Same color as the line
+                    pen=pg.mkPen(color=color, width=1)
+                )
+                plot_widget.addItem(scatter)
                 
-                plot_curve = plot_widget.plot(step_x, y, pen=pen, stepMode=True)
+                # Store scatter item for hover detection
+                plot_widget.scatter_item = scatter
+                
+                # Create tooltip label for hover display
+                tooltip_label = pg.TextItem(
+                    text="", 
+                    color='white',
+                    fill=(0, 0, 0, 180)  # Semi-transparent black background
+                )
+                plot_widget.addItem(tooltip_label)
+                tooltip_label.setVisible(False)
+                plot_widget.tooltip_label = tooltip_label
+                
+                # Store data for hover calculations
+                plot_widget.hover_data = {'x': x, 'y': y}
+                
+                # Connect hover event
+                plot_widget.scene().sigMouseMoved.connect(lambda pos, pw=plot_widget: self.on_sp02_hover(pos, pw))
+                
+                print(f"SpO2 markers enabled for {self.current_time_window}s time window")
             else:
-                plot_curve = plot_widget.plot(x, y, pen=pen)
-        else:
-            plot_curve = plot_widget.plot(x, y, pen=pen)
-        
-        # Store graph data
+                # Time window is outside 10s-30s range, no markers
+                plot_widget.scatter_item = None
+                plot_widget.tooltip_label = None
+                plot_widget.hover_data = None
+                print(f"SpO2 markers disabled for {self.current_time_window}s time window")
+
         plot_widget.graph_name = name
         plot_widget.graph_color = color
         plot_widget.graph_frequency = frequency
@@ -1595,6 +1607,58 @@ class SleepMonitorChart(QWidget):
         self.selection_end_scene = scene_pos
         self.update_selection_overlay(self.selection_start, self.selection_end)
     
+    def on_sp02_hover(self, scene_pos, plot_widget):
+        """Handle hover over SpO2 data points to show values"""
+        # Check if hover data exists (markers are enabled)
+        if not hasattr(plot_widget, 'hover_data') or plot_widget.hover_data is None:
+            return
+            
+        # Convert scene position to view coordinates
+        vb = plot_widget.getViewBox()
+        mouse_point = vb.mapSceneToView(scene_pos)
+        mouse_x = mouse_point.x()
+        mouse_y = mouse_point.y()
+        
+        # Find the nearest data point
+        hover_data = plot_widget.hover_data
+        x_data = hover_data['x']
+        y_data = hover_data['y']
+        
+        # Calculate distance to each point and find the closest one
+        min_distance = float('inf')
+        closest_index = -1
+        closest_x = 0
+        closest_y = 0
+        
+        for i in range(len(x_data)):
+            distance = np.sqrt((x_data[i] - mouse_x)**2 + (y_data[i] - mouse_y)**2)
+            if distance < min_distance:
+                min_distance = distance
+                closest_index = i
+                closest_x = x_data[i]
+                closest_y = y_data[i]
+        
+        # Show tooltip if mouse is close enough to a data point (within 0.5 units)
+        hover_threshold = 0.5
+        if min_distance < hover_threshold and closest_index >= 0:
+            # Update tooltip position and text
+            plot_widget.tooltip_label.setText(f"SpO2: {int(y_data[closest_index])}%")
+            plot_widget.tooltip_label.setPos(closest_x, closest_y + 2)  # Position above the point
+            plot_widget.tooltip_label.setVisible(True)
+            
+            # Highlight the data point by making it slightly larger
+            if hasattr(plot_widget, 'scatter_item'):
+                sizes = [8] * len(x_data)
+                sizes[closest_index] = 12  # Make the hovered point larger
+                plot_widget.scatter_item.setSize(sizes)
+        else:
+            # Hide tooltip when not hovering over a point
+            plot_widget.tooltip_label.setVisible(False)
+            
+            # Reset all points to normal size
+            if hasattr(plot_widget, 'scatter_item'):
+                plot_widget.scatter_item.setSize([8] * len(x_data))
+    
     
     def on_mouse_clicked(self, event, plot_widget):
         """Handle mouse click for area selection and label removal"""
@@ -1760,8 +1824,20 @@ class SleepMonitorChart(QWidget):
                 for i, overlay in enumerate(overlays):
                     if i < len(labels_data):
                         selection_data = labels_data[i]
-                        # Update overlay position using the new method
-                        self.update_overlay_position(plot_widget, overlay, selection_data['start'], selection_data['end'])
+                        vb = plot_widget.getViewBox()
+                        p1 = vb.mapViewToScene(selection_data['start'])
+                        p2 = vb.mapViewToScene(selection_data['end'])
+                        w1 = plot_widget.mapFromScene(p1)
+                        w2 = plot_widget.mapFromScene(p2)
+                        
+                        x_min = min(w1.x(), w2.x())
+                        x_max = max(w1.x(), w2.x())
+                        
+                        print(f"Overlay {i} - original start: {selection_data['start']}, end: {selection_data['end']}")
+                        print(f"Overlay {i} - w1: {w1}, w2: {w2}")
+                        print(f"Overlay {i} - x_min: {x_min}, x_max: {x_max}, width: {int(x_max - x_min)}, height: {plot_widget.height()}")
+                        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
+                        print(f"Overlay {i} - new geometry: {overlay.geometry()}")
         
         # Update current selection overlay if active
         if (self.current_selection_chart == plot_widget and 
@@ -1872,7 +1948,7 @@ class SleepMonitorChart(QWidget):
         
         # Ensure minimum width
         if width < 30:
-            width = 30.0
+            width = 30
         
         print(f"update_selection_overlay - Chart: {self.current_selection_chart.chart_name}")
         print(f"update_selection_overlay - Data coords: start={start_x}, end={end_x}")
@@ -1880,12 +1956,7 @@ class SleepMonitorChart(QWidget):
         print(f"update_selection_overlay - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
         print(f"update_selection_overlay - Widget coords: x_min={x_min:.1f}, x_max={x_max:.1f}, width={width:.1f}")
         
-        # Use full chart height for selection overlay to make it large
-        chart_height = self.current_selection_chart.height()
-        # Ensure overlay is always large (minimum 60px or full chart height)
-        overlay_height = max(60, chart_height)
-        overlay_y = 0  # Start from top
-        overlay.setGeometry(int(x_min), overlay_y, int(width), int(overlay_height))
+        overlay.setGeometry(int(x_min), 0, int(width), self.current_selection_chart.height())
         overlay.setVisible(True)
         overlay.setText("Selecting...")
         overlay.raise_()
@@ -1950,6 +2021,8 @@ class SleepMonitorChart(QWidget):
         hsa_action = QAction("HSA - Hypopnea Sleep Apnea", self)
         hsa_action.triggered.connect(lambda: self.apply_selection_label("HSA"))
         menu.addAction(hsa_action)
+
+        
         
         # Add separator and clear option
         menu.addSeparator()
@@ -2013,8 +2086,17 @@ class SleepMonitorChart(QWidget):
         overlay.mousePressEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_click(event, ov, cn)
         overlay.mouseDoubleClickEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_double_click(event, ov, cn)
 
-        # Position overlay using new method
-        self.update_overlay_position(plot_widget, overlay, selection_data['start'], selection_data['end'])
+        # Position overlay
+        vb = plot_widget.getViewBox()
+        p1 = vb.mapViewToScene(selection_data['start'])
+        p2 = vb.mapViewToScene(selection_data['end'])
+        w1 = plot_widget.mapFromScene(p1)
+        w2 = plot_widget.mapFromScene(p2)
+
+        x_min = min(w1.x(), w2.x())
+        x_max = max(w1.x(), w2.x())
+
+        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
         overlay.show()
 
         # Hide the temporary "Choose Label" overlay

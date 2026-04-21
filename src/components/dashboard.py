@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QSlider, QPushButton
 )
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QPixmap
 
 from .patient_info_widget import PatientInfoWidget
 from .sleep_monitor_chart import SleepMonitorChart
@@ -21,13 +21,8 @@ class SleepSenseDashboard(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        
-        # Time slider navigation variables
-        self.time_slider = None
-        self.slider_left_btn = None
-        self.slider_right_btn = None
-        self.slider_time_label = None
-        
+        self.logo_frame = None
+        self.logo_label = None
         self.init_ui()
         self.load_stylesheet()
         
@@ -131,16 +126,28 @@ class SleepSenseDashboard(QMainWindow):
         logo_layout.setSpacing(12)
         
         # Logo
-        logo_frame = QFrame()
-        logo_frame.setObjectName("logoContainer")
-        logo_frame.setFixedSize(44, 44)
-        logo_label = QLabel("...")
-        logo_label.setAlignment(Qt.AlignCenter)
-        logo_label.setStyleSheet("font-size: 22px; color: white;")
-        logo_layout_inner = QVBoxLayout(logo_frame)
+        self.logo_frame = QFrame()
+        self.logo_frame.setObjectName("logoContainer")
+        self.update_logo_size()  # Set initial size based on current window
+        
+        # Load DECK MOUNT logo image
+        self.logo_label = QLabel()
+        self.logo_label.setAlignment(Qt.AlignCenter)
+        
+        # Get the directory where this script is located
+        script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        logo_path = os.path.join(script_dir, "assets", "images", "deck_mount_logo.png")
+        
+        # Store logo path for dynamic updates
+        self.logo_path = logo_path
+        
+        # Load logo with current size
+        self.update_logo_content()
+        
+        logo_layout_inner = QVBoxLayout(self.logo_frame)
         logo_layout_inner.setContentsMargins(0, 0, 0, 0)
-        logo_layout_inner.addWidget(logo_label)
-        logo_layout.addWidget(logo_frame)
+        logo_layout_inner.addWidget(self.logo_label)
+        logo_layout.addWidget(self.logo_frame)
         
         # Title and subtitle
         title_layout = QVBoxLayout()
@@ -195,7 +202,7 @@ class SleepSenseDashboard(QMainWindow):
         status_label.setAlignment(Qt.AlignCenter)
         status_layout.addWidget(status_label)
         
-        status_value = QLabel("... Active")
+        status_value = QLabel("...")
         status_value.setObjectName("statusValue")
         status_value.setAlignment(Qt.AlignCenter)
         status_layout.addWidget(status_value)
@@ -356,3 +363,69 @@ class SleepSenseDashboard(QMainWindow):
                 self.setStyleSheet(f.read())
         else:
             print(f"Warning: Stylesheet file '{qss_file}' not found!")
+    
+    def update_logo_size(self):
+        """Update logo size based on window dimensions"""
+        if not self.logo_frame:
+            return
+            
+        # Calculate logo size based on window width (adaptive scaling)
+        window_width = self.width()
+        base_size = 64  # Base size for 1200px window
+        
+        # Scale factor: larger windows get larger logos
+        if window_width >= 1600:
+            scale_factor = 1.5  # 50% larger for wide screens
+        elif window_width >= 1400:
+            scale_factor = 1.3  # 30% larger
+        elif window_width >= 1200:
+            scale_factor = 1.1  # 10% larger
+        elif window_width >= 1000:
+            scale_factor = 1.0  # Base size
+        else:
+            scale_factor = 0.8  # Smaller for compact windows
+        
+        
+        # Calculate new size
+        new_size = int(base_size * scale_factor)
+        new_size = max(40, min(new_size, 100))  # Clamp between 40px and 100px
+        
+        # Apply new size
+        self.logo_frame.setFixedSize(new_size, new_size)
+        
+        # Update font size for text fallback
+        font_size = int(new_size * 0.8)  # Font size 80% of container size
+        self.current_font_size = font_size
+        
+        print(f"Logo size updated to: {new_size}x{new_size}px (font: {font_size}px)")
+    
+    def update_logo_content(self):
+        """Update logo content (image or text) with current size"""
+        if not self.logo_label or not hasattr(self, 'current_font_size'):
+            return
+            
+        # Try to load the logo image
+        if os.path.exists(self.logo_path):
+            pixmap = QPixmap(self.logo_path)
+            if not pixmap.isNull():
+                # Scale image to fit current logo frame size
+                frame_size = self.logo_frame.width()
+                image_size = int(frame_size * 0.9)  # 90% of frame size
+                scaled_pixmap = pixmap.scaled(image_size, image_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.logo_label.setPixmap(scaled_pixmap)
+                self.logo_label.setText("")  # Clear any text
+                return
+        
+        # Fallback to text if image doesn't exist or fails to load
+        self.logo_label.setText("SS")
+        font_size = getattr(self, 'current_font_size', 52)
+        self.logo_label.setStyleSheet(f"font-size: {font_size}px; font-weight: bold; color: #111827;")
+    
+    def resizeEvent(self, event):
+        """Handle window resize event to update logo size"""
+        super().resizeEvent(event)
+        
+        # Update logo size on window resize
+        if self.logo_frame:
+            self.update_logo_size()
+            self.update_logo_content()
