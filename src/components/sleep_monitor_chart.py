@@ -49,13 +49,7 @@ class SleepMonitorChart(QWidget):
         # Expanded states management
         self.expanded_states = {}  # Store expanded states of charts
         
-        # SpO2 specific medical thresholds and statistics
-        self.spo2_thresholds = {
-            'normal': 95,    # Normal SpO2 level
-            'mild': 90,      # Mild hypoxemia
-            'moderate': 85,  # Moderate hypoxemia
-            'severe': 80     # Severe hypoxemia
-        }
+        # SpO2 specific statistics
         self.spo2_statistics = {}  # Store calculated statistics
         
         # Area selection variables
@@ -66,7 +60,13 @@ class SleepMonitorChart(QWidget):
         self.is_selecting = False
         self.current_selection_chart = None
         self.selection_labels = {}  # Store selection labels for each chart
+        # Dynamic selections storage - store selections in absolute time coordinates
+        self.dynamic_selections = {}  # {chart_name: [{'label': 'OSA', 'start_time': 123.5, 'end_time': 125.2, 'color': '#red'}]}
         self.last_click_time = 0  # Debounce duplicate clicks
+        
+        # Apnea events storage
+        self.apnea_events = []  # Store apnea event data
+        self.event_plot_items = {}  # Store plot items for apnea events
         
         # Timer for detecting selection completion
         self.selection_timer = QTimer(self)
@@ -133,15 +133,12 @@ class SleepMonitorChart(QWidget):
         time_layout = QHBoxLayout(time_overlay)
         time_layout.setContentsMargins(16, 8, 16, 8)
         
-        self.start_time_label = QLabel("Start: ----")
-        self.start_time_label.setObjectName("timeLabelStart")
-        time_layout.addWidget(self.start_time_label)
-        time_layout.addStretch()
+        # self.start_time_label = QLabel("Start: ----")
+        # self.start_time_label.setObjectName("timeLabelStart")
+        # time_layout.addWidget(self.start_time_label)
+        # time_layout.addStretch()
         
-        self.current_time_label = QLabel("Current: 23:04:00")
-        self.current_time_label.setObjectName("timeLabelCurrent")
-        time_layout.addWidget(self.current_time_label)
-        
+                
         chart_layout.addWidget(time_overlay)
         
         # Charts container with functional scrollbar only
@@ -254,55 +251,35 @@ class SleepMonitorChart(QWidget):
         layout.setContentsMargins(16, 4, 16, 4)
         layout.setSpacing(12)
 
-        # --- Playback Controls ---
-        controls_container = QFrame()
-        controls_container.setObjectName("playbackControls")
-        controls_layout = QHBoxLayout(controls_container)
-        controls_layout.setSpacing(6)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch()
 
-        backward_btn = QPushButton("◀◀")
-        backward_btn.setObjectName("controlButton")
-        backward_btn.setFixedHeight(28) 
-        backward_btn.setMinimumWidth(60)
-        backward_btn.clicked.connect(self.backward_playback)
-        controls_layout.addWidget(backward_btn)
+        # --- Right Side Container ---
+        right_container = QFrame()
+        right_container.setObjectName("rightSideContainer")
+        right_container.setStyleSheet("""
+            QFrame#rightSideContainer {
+                background-color: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                padding: 2px;  # Reduced padding
+                max-height: 80px;  # Make container smaller
+            }
+        """)
+        right_layout = QHBoxLayout(right_container)
+        right_layout.setContentsMargins(4, 2, 4, 2)  # Smaller margins
+        right_layout.setSpacing(4)  # Smaller spacing
 
-        # Start/Pause button (toggles between play and pause)
-        self.play_pause_btn = QPushButton("▶")
-        self.play_pause_btn.setObjectName("controlButton")
-        self.play_pause_btn.setFixedHeight(28)
-        self.play_pause_btn.setMinimumWidth(60)
-        self.play_pause_btn.clicked.connect(self.toggle_playback)
-        controls_layout.addWidget(self.play_pause_btn)
-
-    
-        forward_btn = QPushButton("▶▶")
-        forward_btn.setObjectName("controlButton")
-        forward_btn.setFixedHeight(28)
-        forward_btn.setMinimumWidth(60)
-        forward_btn.clicked.connect(self.forward_playback)
-        controls_layout.addWidget(forward_btn)
-
-        controls_container.setLayout(controls_layout)
-        layout.addWidget(controls_container)
-
-        # --- Report Selector ---
-        report_label = QLabel("Sleep Monitoring Report")
-        report_label.setObjectName("reportLabel")
-        report_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #1e293b; margin-left: 12px; margin-right: 12px;")
-        layout.addWidget(report_label)
-
+        
         # --- Time Window Dropdown ---
         time_window_label = QLabel("Time Window:")
-        time_window_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #1e293b;")
-        layout.addWidget(time_window_label)
+        time_window_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        right_layout.addWidget(time_window_label)
         
         # Create dropdown for time window selection
         self.time_window_dropdown = QComboBox()
         self.time_window_dropdown.setObjectName("timeWindowDropdown")
-        self.time_window_dropdown.setFixedHeight(30)
-        self.time_window_dropdown.setMinimumWidth(80)
+        self.time_window_dropdown.setFixedHeight(22)  # Smaller height
+        self.time_window_dropdown.setMinimumWidth(60)  # Smaller width
         
         # Add time window options (in seconds)
         time_windows = [
@@ -324,94 +301,29 @@ class SleepMonitorChart(QWidget):
         # Connect dropdown to time window function
         self.time_window_dropdown.currentIndexChanged.connect(self.on_time_window_changed)
         
-        layout.addWidget(self.time_window_dropdown)
+        right_layout.addWidget(self.time_window_dropdown)
 
-        # --- Time Navigation Controls ---
-        nav_container = QFrame()
-        nav_layout = QHBoxLayout(nav_container)
-        nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(4)
-
-        # Backward navigation button
-        nav_backward_btn = QPushButton("<")
-        nav_backward_btn.setObjectName("controlButton")
-        nav_backward_btn.setFixedSize(50, 28)  # Fixed size for better visibility
-        nav_backward_btn.setStyleSheet("""
-            QPushButton#controlButton {
-                background-color: #3b82f6;
-                color: white;
-                border: 1px solid #2563eb;
-                border-radius: 4px;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 2px 8px;
-            }
-            QPushButton#controlButton:hover {
-                background-color: #2563eb;
-                border-color: #1d4ed8;
-            }
-            QPushButton#controlButton:pressed {
-                background-color: #1d4ed8;
-                border-color: #1e3a8a;
-            }
-        """)
-        nav_backward_btn.clicked.connect(self.navigate_backward)
-        nav_layout.addWidget(nav_backward_btn)
-
-        # Time position label
-        self.time_position_label = QLabel("0:00")
-        self.time_position_label.setObjectName("timePositionLabel")
-        self.time_position_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #1e293b; min-width: 40px;")
-        self.time_position_label.setAlignment(Qt.AlignCenter)
-        nav_layout.addWidget(self.time_position_label)
-
-        # Forward navigation button
-        nav_forward_btn = QPushButton(">")
-        nav_forward_btn.setObjectName("controlButton")
-        nav_forward_btn.setFixedSize(50, 28)  # Fixed size for better visibility
-        nav_forward_btn.setStyleSheet("""
-            QPushButton#controlButton {
-                background-color: #3b82f6;
-                color: white;
-                border: 1px solid #2563eb;
-                border-radius: 4px;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 2px 8px;
-            }
-            QPushButton#controlButton:hover {
-                background-color: #2563eb;
-                border-color: #1d4ed8;
-            }
-            QPushButton#controlButton:pressed {
-                background-color: #1d4ed8;
-                border-color: #1e3a8a;
-            }
-        """)
-        nav_forward_btn.clicked.connect(self.navigate_forward)
-        nav_layout.addWidget(nav_forward_btn)
-
-        layout.addWidget(nav_container)
-
+        
         # --- Hidden Graphs Dropdown ---
         hidden_graphs_label = QLabel("Hidden Graphs:")
-        hidden_graphs_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #1e293b;")
-        layout.addWidget(hidden_graphs_label)
+        hidden_graphs_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        right_layout.addWidget(hidden_graphs_label)
         
         # Create dropdown for hidden graphs
         self.hidden_graphs_dropdown = QComboBox()
         self.hidden_graphs_dropdown.setObjectName("hiddenGraphsDropdown")
-        self.hidden_graphs_dropdown.setFixedHeight(30)
-        self.hidden_graphs_dropdown.setMinimumWidth(120)
+        self.hidden_graphs_dropdown.setFixedHeight(22)  # Smaller height
+        self.hidden_graphs_dropdown.setMinimumWidth(90)  # Smaller width
         self.hidden_graphs_dropdown.addItem("Select to restore...")  # Placeholder item
         self.hidden_graphs_dropdown.setEnabled(False)  # Disable until graphs are hidden
         
         # Connect dropdown to restore function
         self.hidden_graphs_dropdown.currentIndexChanged.connect(self.restore_hidden_graph)
         
-        layout.addWidget(self.hidden_graphs_dropdown)
+        right_layout.addWidget(self.hidden_graphs_dropdown)
 
-        layout.addStretch()
+        right_container.setLayout(right_layout)
+        layout.addWidget(right_container)
 
         return frame
 
@@ -594,6 +506,12 @@ class SleepMonitorChart(QWidget):
                     container.setMaximumHeight(16777215)  # Very large number (effectively no limit)
                     container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
                     print(f"Debug: Restored expanded state for '{chart_name}' with height {saved_height}")
+        
+        # Render dynamic selections for current time window
+        self.render_dynamic_selections()
+        
+        # Update apnea events display for current time window
+        self.update_apnea_events_display()
     
     def set_time_window(self, seconds):
         """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
@@ -607,6 +525,7 @@ class SleepMonitorChart(QWidget):
         self.update_charts_for_time_window(seconds)
         self.restore_all_selections()
         print(f"Time window set to: {seconds} seconds")
+
     
     def update_charts_for_time_window(self, seconds):
         """Update chart data based on time window selection"""
@@ -697,11 +616,13 @@ class SleepMonitorChart(QWidget):
         ]
         
         for position, (name, color, freq, amp, offset) in enumerate(signals):
+            print(f"DEBUG: Creating chart for {name}")
             chart = self.create_signal_chart(name, color, freq, amp, offset)
             self.charts_layout.addWidget(chart, stretch=1)
             # Track the original order
             self.graph_order.append(name)
         
+        print("DEBUG: All charts created in init_charts")
         # Restore expanded states after charts are created with a delay
         QTimer.singleShot(100, self._delayed_restore_expanded_states)
     
@@ -808,10 +729,7 @@ class SleepMonitorChart(QWidget):
             'min': np.min(spo2_data),
             'max': np.max(spo2_data),
             'std': np.std(spo2_data),
-            'desaturation_events': np.sum(spo2_data < self.spo2_thresholds['normal']),
-            'mild_events': np.sum(spo2_data < self.spo2_thresholds['mild']),
-            'moderate_events': np.sum(spo2_data < self.spo2_thresholds['moderate']),
-            'severe_events': np.sum(spo2_data < self.spo2_thresholds['severe']),
+            'desaturation_events': np.sum(spo2_data < 95),  # Normal SpO2 threshold
             'total_points': len(spo2_data)
         }
     
@@ -824,31 +742,89 @@ class SleepMonitorChart(QWidget):
         container.setMinimumHeight(120)  # Set default minimum height
         container.setMaximumHeight(120)  # Set default maximum height to maintain exact size
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        
+        # Apply professional double-shaded medical styling to container
+        container.setStyleSheet("""
+            QWidget#signalChartContainer {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.45 #f8fafc,
+                    stop: 0.55 #f1f5f9,
+                    stop: 1 #e2e8f0
+                );
+                border: 2px solid #cbd5e1;
+                border-radius: 8px;
+                margin: 2px;
+            }
+            QWidget#signalChartContainer:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.45 #f0f9ff,
+                    stop: 0.55 #e0f2fe,
+                    stop: 1 #bae6fd
+                );
+                border: 2px solid #3b82f6;
+                box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
+            }
+        """)
         container_layout = QHBoxLayout(container)
-        container_layout.setContentsMargins(4, 4, 4, 4)  # Add padding for border visibility
-        container_layout.setSpacing(8) # Added spacing between label and plot
+        container_layout.setContentsMargins(2, 2, 2, 2)  # Reduced padding to increase graph area
+        container_layout.setSpacing(4) # Reduced spacing between label and plot
         
         # Side Label
         label_frame = QFrame()
-        label_frame.setFixedWidth(140) # Further increased width for better label visibility
+        label_frame.setFixedWidth(120) # Increased width to accommodate longer text
+        label_frame.setObjectName("labelFrame")
+        # Apply professional styling to label frame
+        label_frame.setStyleSheet("""
+            QFrame#labelFrame {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 1, y2: 0,
+                    stop: 0 #f8fafc,
+                    stop: 0.5 #ffffff,
+                    stop: 1 #f1f5f9
+                );
+                border: 1px solid #e2e8f0;
+                border-radius: 6px;
+                margin: 2px;
+            }
+        """)
         label_layout = QVBoxLayout(label_frame)
-        label_layout.setContentsMargins(8, 4, 8, 4)
+        label_layout.setContentsMargins(4, 2, 4, 2)
         label_layout.setAlignment(Qt.AlignCenter)
         
         label = QLabel(name)
         label.setObjectName("chartSideLabel")
         label.setWordWrap(True)
         label.setAlignment(Qt.AlignCenter)
-        label.setStyleSheet(f"""
-            QLabel#chartSideLabel {{
-                font-size: 12px; /* Increased font size */
-                font-weight: bold;
-                color: #4b5563;
-                background-color: #f9fafb;
-                border: 1px solid #e5e7eb;
-                border-radius: 4px;
-                padding: 6px; /* Increased padding */
-            }}
+        label.setStyleSheet("""
+            QLabel#chartSideLabel {
+                font-size: 11px;
+                font-weight: 700;
+                color: #1e293b;
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f8fafc,
+                    stop: 1 #f1f5f9
+                );
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                padding: 6px 4px;
+                text-align: center;
+            }
+            QLabel#chartSideLabel:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #dbeafe,
+                    stop: 1 #bfdbfe
+                );
+                border: 1px solid #3b82f6;
+                color: #1e40af;
+            }
         """)
         label_layout.addWidget(label)
         
@@ -857,15 +833,45 @@ class SleepMonitorChart(QWidget):
         # Plot Container with Zoom Controls
         plot_container = QWidget()
         plot_container.setObjectName("plotContainer")
+        # Apply professional double-shaded styling to plot container
+        plot_container.setStyleSheet("""
+            QWidget#plotContainer {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.3 #fafbfc,
+                    stop: 0.7 #f8fafc,
+                    stop: 1 #f1f5f9
+                );
+                border: 1px solid #e2e8f0;
+                border-radius: 6px;
+                margin: 1px;
+            }
+        """)
         plot_container_layout = QVBoxLayout(plot_container)
         plot_container_layout.setContentsMargins(0, 0, 0, 0)
-        plot_container_layout.setSpacing(2)
+        plot_container_layout.setSpacing(1)
         
         # Zoom Controls
         zoom_frame = QFrame()
+        zoom_frame.setObjectName("zoomControlsFrame")
+        # Apply professional styling to zoom controls frame
+        zoom_frame.setStyleSheet("""
+            QFrame#zoomControlsFrame {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #f8fafc,
+                    stop: 0.5 #ffffff,
+                    stop: 1 #f1f5f9
+                );
+                border: 1px solid #e2e8f0;
+                border-radius: 4px;
+                margin: 1px;
+            }
+        """)
         zoom_layout = QHBoxLayout(zoom_frame)
-        zoom_layout.setContentsMargins(0, 0, 0, 0)
-        zoom_layout.setSpacing(4)
+        zoom_layout.setContentsMargins(2, 1, 2, 1)
+        zoom_layout.setSpacing(3)
         
         # Store original Y range for zoom calculations
         self.original_y_min = 0
@@ -876,7 +882,45 @@ class SleepMonitorChart(QWidget):
         # Zoom In button
         zoom_in_btn = QPushButton("+")
         zoom_in_btn.setObjectName("zoomButton")
-        zoom_in_btn.setFixedSize(24, 20)
+        zoom_in_btn.setFixedSize(28, 20)
+        # Apply professional styling to zoom buttons
+        zoom_in_btn.setStyleSheet("""
+            QPushButton#zoomButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f1f5f9,
+                    stop: 1 #e2e8f0
+                );
+                border: 1px solid #cbd5e1;
+                border-radius: 3px;
+                color: #475569;
+                font-size: 12px;
+                font-weight: 700;
+                text-align: center;
+            }
+            QPushButton#zoomButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #dbeafe,
+                    stop: 1 #bfdbfe
+                );
+                border: 1px solid #3b82f6;
+                color: #1e40af;
+            }
+            QPushButton#zoomButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #dbeafe,
+                    stop: 0.5 #93c5fd,
+                    stop: 1 #60a5fa
+                );
+                border: 1px solid #1d4ed8;
+                color: #1e3a8a;
+            }
+        """)
+        print(f"DEBUG: Created zoom in button for {name} with objectName 'zoomButton'")
         
         def on_zoom_in():
             print(f"ZOOM IN BUTTON CLICKED for {name}")
@@ -884,11 +928,50 @@ class SleepMonitorChart(QWidget):
         
         zoom_in_btn.clicked.connect(on_zoom_in)
         zoom_layout.addWidget(zoom_in_btn)
+        print(f"DEBUG: Added zoom in button to layout for {name}")
         
         # Zoom Out button
         zoom_out_btn = QPushButton("-")
         zoom_out_btn.setObjectName("zoomButton")
-        zoom_out_btn.setFixedSize(24, 20)
+        zoom_out_btn.setFixedSize(28, 20)
+        # Apply professional styling to zoom buttons
+        zoom_out_btn.setStyleSheet("""
+            QPushButton#zoomButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f1f5f9,
+                    stop: 1 #e2e8f0
+                );
+                border: 1px solid #cbd5e1;
+                border-radius: 3px;
+                color: #475569;
+                font-size: 12px;
+                font-weight: 700;
+                text-align: center;
+            }
+            QPushButton#zoomButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #dbeafe,
+                    stop: 1 #bfdbfe
+                );
+                border: 1px solid #3b82f6;
+                color: #1e40af;
+            }
+            QPushButton#zoomButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #dbeafe,
+                    stop: 0.5 #93c5fd,
+                    stop: 1 #60a5fa
+                );
+                border: 1px solid #1d4ed8;
+                color: #1e3a8a;
+            }
+        """)
+        print(f"DEBUG: Created zoom out button for {name} with objectName 'zoomButton'")
         
         def on_zoom_out():
             print(f"ZOOM OUT BUTTON CLICKED for {name}")
@@ -896,11 +979,50 @@ class SleepMonitorChart(QWidget):
         
         zoom_out_btn.clicked.connect(on_zoom_out)
         zoom_layout.addWidget(zoom_out_btn)
+        print(f"DEBUG: Added zoom out button to layout for {name}")
         
         # Reset button
         reset_btn = QPushButton("R")
         reset_btn.setObjectName("zoomButton")
-        reset_btn.setFixedSize(24, 20)
+        reset_btn.setFixedSize(28, 20)
+        # Apply professional styling to zoom buttons
+        reset_btn.setStyleSheet("""
+            QPushButton#zoomButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f1f5f9,
+                    stop: 1 #e2e8f0
+                );
+                border: 1px solid #cbd5e1;
+                border-radius: 3px;
+                color: #475569;
+                font-size: 12px;
+                font-weight: 700;
+                text-align: center;
+            }
+            QPushButton#zoomButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #dbeafe,
+                    stop: 1 #bfdbfe
+                );
+                border: 1px solid #3b82f6;
+                color: #1e40af;
+            }
+            QPushButton#zoomButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #dbeafe,
+                    stop: 0.5 #93c5fd,
+                    stop: 1 #60a5fa
+                );
+                border: 1px solid #1d4ed8;
+                color: #1e3a8a;
+            }
+        """)
+        print(f"DEBUG: Created reset button for {name} with objectName 'zoomButton'")
         
         def on_reset():
             print(f"RESET BUTTON CLICKED for {name}")
@@ -908,37 +1030,83 @@ class SleepMonitorChart(QWidget):
         
         reset_btn.clicked.connect(on_reset)
         zoom_layout.addWidget(reset_btn)
+        print(f"DEBUG: Added reset button to layout for {name}")
         
         zoom_layout.addStretch()
         plot_container_layout.addWidget(zoom_frame)
         
+        # Create horizontal layout for buttons
+        buttons_container = QFrame()
+        buttons_container.setObjectName("buttonsContainer")
+        # Apply professional styling to buttons container
+        buttons_container.setStyleSheet("""
+            QFrame#buttonsContainer {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.7 #fafbfc,
+                    stop: 1 #f8fafc
+                );
+                border: none;
+                border-radius: 4px;
+                margin: 0px;
+            }
+        """)
+        buttons_layout = QHBoxLayout(buttons_container)
+        buttons_layout.setContentsMargins(0, 0, 0, 0)
+        buttons_layout.setSpacing(4)
+        
+        # Add expand button first
         drag_btn = QPushButton("Expand")
         drag_btn.setObjectName("dragButton")
-        drag_btn.setFixedSize(48, 22)  # Increased size for better visibility
+        drag_btn.setFixedSize(50, 18)  # Increased width to show full text
         drag_btn.setStyleSheet("""
             QPushButton#dragButton {
-                background-color: #dbeafe;
-                border: 2px solid #3b82f6;
-                border-radius: 6px;
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #dbeafe,
+                    stop: 1 #bfdbfe
+                );
+                border: 1px solid #3b82f6;
+                border-radius: 4px;
                 color: #1d4ed8;
-                font-size: 11px;
-                font-weight: bold;
-                padding: 2px;
+                font-size: 10px;
+                font-weight: 700;
+                padding: 1px;
+                text-align: center;
             }
             QPushButton#dragButton:hover {
-                background-color: #bfdbfe;
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #bfdbfe,
+                    stop: 1 #93c5fd
+                );
                 border-color: #2563eb;
                 color: #1e40af;
             }
             QPushButton#dragButton:pressed {
-                background-color: #93c5fd;
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #dbeafe,
+                    stop: 0.5 #93c5fd,
+                    stop: 1 #60a5fa
+                );
                 border-color: #1d4ed8;
                 color: #1e3a8a;
-                
             }
         """)
         drag_btn.clicked.connect(lambda: self.start_manual_drag(name, container))
-        plot_container_layout.addWidget(drag_btn)
+        buttons_layout.addWidget(drag_btn)
+        
+        # Add zoom frame to the right of expand button
+        buttons_layout.addWidget(zoom_frame)
+        
+        # Add the buttons container to plot layout
+        plot_container_layout.addWidget(buttons_container)
+        print(f"DEBUG: Added zoom frame to buttons container for {name}")
+        print(f"DEBUG: Zoom frame size: {zoom_frame.size()}, visible: {zoom_frame.isVisible()}")
         
         # Plot Widget with custom ViewBox
         plot_widget = pg.PlotWidget(viewBox=CustomViewBox())
@@ -947,17 +1115,32 @@ class SleepMonitorChart(QWidget):
         # Remove all grid lines for clean white background
         plot_widget.showGrid(x=False, y=False)
         
+        # Apply professional medical styling to plot widget
+        plot_widget.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.95 #ffffff,
+                    stop: 1 #f8fafc
+                );
+                border: 1px solid #e2e8f0;
+                border-radius: 4px;
+                margin: 2px;
+            }
+        """)
+        
         # Define medical standard Y-axis ranges for each signal type
         y_axis_ranges = {
-            "Body Position": (-100, 100),
-            "Airflow": (-100, 100),
-            "Snoring": (0, 100),
-            "Thorex": (-100, 100),
-            "Abdomen": (-100, 100),
-            "SpO2": (85, 100),  # Medical SpO2 range (85-100%)
-            "Pulse": (40, 200),   # Pulse rate in BPM
-            "Body Movement": (-100, 100),
-            "PR/HR": (40, 200)   # Pulse/Heart Rate in BPM
+            "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
+            "Airflow": (-2, 2),         # Respiratory airflow in normalized units
+            "Snoring": (0, 100),        # Snoring intensity percentage
+            "Thorax": (-100, 100),      # Chest respiratory effort movement
+            "Abdomen": (-100, 100),     # Abdominal respiratory effort movement
+            "SpO2": (70, 100),          # Medical SpO2 range (70-100%) - extended for hypoxia
+            "Pulse": (30, 250),         # Pulse rate in BPM - extended range
+            "Body Movement": (0, 100),   # Movement intensity percentage
+            "PR/HR": (30, 250)          # Pulse/Heart Rate in BPM - extended range
         }
         
         # Get the appropriate Y-axis range for this signal
@@ -983,16 +1166,34 @@ class SleepMonitorChart(QWidget):
             plot_widget.setLimits(yMin=y_min, yMax=y_max)
             
         # Set X-axis to show time values based on current time window
-        plot_widget.getAxis('bottom').setStyle(showValues=True)  # Show time values
-        plot_widget.getAxis('left').setStyle(showValues=True)   # Show Y-axis values
+        bottom_axis = plot_widget.getAxis('bottom')
+        bottom_axis.setStyle(showValues=True)  # Show time values
+        bottom_axis.setLabel('Time (s)', units='s')  # Add axis label
+        bottom_axis.setHeight(30)  # Ensure enough space for labels
         
-        # Set X-axis range to match time window with offset
-        plot_widget.setXRange(self.current_time_offset, self.current_time_offset + self.current_time_window)
+        left_axis = plot_widget.getAxis('left')
+        left_axis.setStyle(showValues=True)   # Show Y-axis values
+        
+        # Reduce font size of axis tick labels
+        from PyQt5.QtGui import QFont
+        small_font = QFont()
+        small_font.setPointSize(8)  # Smaller font size for axis numbers
+        bottom_axis.setTickFont(small_font)  # X-axis numbers
+        left_axis.setTickFont(small_font)    # Y-axis numbers
+        
+        # Ensure axis ticks are visible
+        bottom_axis.setPen('k')  # Black color for visibility
+        left_axis.setPen('k')    # Black color for visibility
+        bottom_axis.setTextPen('k')  # Black text for visibility
+        left_axis.setTextPen('k')    # Black text for visibility
+        
+        # Set X-axis range to show time window from 0 to current_time_window
+        plot_widget.setXRange(0, self.current_time_window)
         
         # Set time window limits on CustomViewBox to enforce zoom constraints
         vb = plot_widget.getViewBox()
         if hasattr(vb, 'set_time_window_limits'):
-            vb.set_time_window_limits(self.current_time_offset, self.current_time_offset + self.current_time_window)
+            vb.set_time_window_limits(0, self.current_time_window)
         
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.hideButtons()  # Hide the 'A' button
@@ -1521,15 +1722,15 @@ class SleepMonitorChart(QWidget):
         """Reset zoom to original medical standard range"""
         # Define medical standard Y-axis ranges
         y_axis_ranges = {
-            "Body Position": (-100, 100),
-            "Airflow": (-100, 100),
-            "Snoring": (0, 100),
-            "Thorex": (-100, 100),
-            "Abdomen": (-100, 100),
-            "SpO2": (85, 100),
-            "Pulse": (40, 200),
-            "Body Movement": (-100, 100),
-            "PR/HR": (40, 200)
+            "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
+            "Airflow": (-2, 2),         # Respiratory airflow in normalized units
+            "Snoring": (0, 100),        # Snoring intensity percentage
+            "Thorax": (-100, 100),      # Chest respiratory effort movement
+            "Abdomen": (-100, 100),     # Abdominal respiratory effort movement
+            "SpO2": (70, 100),          # Medical SpO2 range (70-100%) - extended for hypoxia
+            "Pulse": (30, 250),         # Pulse rate in BPM - extended range
+            "Body Movement": (0, 100),   # Movement intensity percentage
+            "PR/HR": (30, 250)          # Pulse/Heart Rate in BPM - extended range
         }
         
         # Get the chart name from the plot widget
@@ -1750,23 +1951,26 @@ class SleepMonitorChart(QWidget):
             if chart_name in self.selection_labels:
                 overlays = plot_widget.selection_overlays
                 labels_data = self.selection_labels[chart_name]
+                vb = plot_widget.getViewBox()
                 
-                # Update each overlay position based on stored data
-                for i, overlay in enumerate(overlays):
-                    if i < len(labels_data):
-                        selection_data = labels_data[i]
-                        vb = plot_widget.getViewBox()
-                        
+                # Get the actual plot area bounds from the ViewBox
+                view_rect = vb.sceneBoundingRect()
+                if not view_rect.isEmpty():
+                    # Convert view bounds to widget coordinates
+                    widget_top_left = plot_widget.mapFromScene(view_rect.topLeft())
+                    widget_bottom_right = plot_widget.mapFromScene(view_rect.bottomRight())
+                    
+                    # Get the actual plot area boundaries
+                    plot_left = widget_top_left.x()
+                    plot_right = widget_bottom_right.x()
+                    plot_width = plot_right - plot_left
+                    
+                    if plot_width > 0:
                         # Get current view range to calculate proportional position
                         view_range = vb.viewRange()
                         x_min_range, x_max_range = view_range[0]
-                        
-                        # Calculate proportional positions based on data coordinates
-                        start_x = selection_data['start'].x()
-                        end_x = selection_data['end'].x()
-                        
-                        # Map data coordinates to view coordinates proportionally
                         total_range = x_max_range - x_min_range
+<<<<<<< HEAD
                         if total_range > 0:
                             start_prop = (start_x - x_min_range) / total_range
                             end_prop = (end_x - x_min_range) / total_range
@@ -1797,6 +2001,47 @@ class SleepMonitorChart(QWidget):
                         
                         overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
                         print(f"Overlay {i} - Final geometry: {overlay.geometry()}")
+=======
+                        
+                        # Update each overlay position based on stored data
+                        for i, overlay in enumerate(overlays):
+                            if i < len(labels_data):
+                                selection_data = labels_data[i]
+                                
+                                # Calculate proportional positions based on stored data coordinates
+                                start_x = selection_data['start'].x()
+                                end_x = selection_data['end'].x()
+                                
+                                # Map data coordinates to view coordinates proportionally
+                                if total_range > 0:
+                                    start_prop = (start_x - x_min_range) / total_range
+                                    end_prop = (end_x - x_min_range) / total_range
+                                else:
+                                    start_prop = 0
+                                    end_prop = 1
+                                
+                                # Clamp proportions to [0, 1]
+                                start_prop = max(0, min(1, start_prop))
+                                end_prop = max(0, min(1, end_prop))
+                                
+                                # Convert to widget coordinates within the actual plot area
+                                x_min = plot_left + min(start_prop, end_prop) * plot_width
+                                x_max = plot_left + max(start_prop, end_prop) * plot_width
+                                width = x_max - x_min
+                                
+                                # Ensure minimum width
+                                if width < 30:
+                                    width = 30
+                                
+                                print(f"Overlay {i} - Chart: {chart_name}")
+                                print(f"Overlay {i} - Data coords: start={start_x}, end={end_x}")
+                                print(f"Overlay {i} - Plot bounds: left={plot_left:.1f}, right={plot_right:.1f}, width={plot_width:.1f}")
+                                print(f"Overlay {i} - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
+                                print(f"Overlay {i} - Widget coords: x_min={x_min:.1f}, x_max={x_max:.1f}, width={width:.1f}")
+                                
+                                overlay.setGeometry(int(x_min), 0, int(width), plot_widget.height())
+                                print(f"Overlay {i} - Final geometry: {overlay.geometry()}")
+>>>>>>> 4a5ad819d2ee3032bf2287a1db7629d244387163
         
         # Update current selection overlay if active
         if (self.current_selection_chart == plot_widget and 
@@ -1830,25 +2075,62 @@ class SleepMonitorChart(QWidget):
             if chart_name in self.selection_labels:
                 overlays = plot_widget.selection_overlays
                 labels_data = self.selection_labels[chart_name]
+                vb = plot_widget.getViewBox()
                 
-                # Update each overlay position based on stored data
-                for i, overlay in enumerate(overlays):
-                    if i < len(labels_data):
-                        selection_data = labels_data[i]
-                        vb = plot_widget.getViewBox()
-                        p1 = vb.mapViewToScene(selection_data['start'])
-                        p2 = vb.mapViewToScene(selection_data['end'])
-                        w1 = plot_widget.mapFromScene(p1)
-                        w2 = plot_widget.mapFromScene(p2)
+                # Get the actual plot area bounds from the ViewBox
+                view_rect = vb.sceneBoundingRect()
+                if not view_rect.isEmpty():
+                    # Convert view bounds to widget coordinates
+                    widget_top_left = plot_widget.mapFromScene(view_rect.topLeft())
+                    widget_bottom_right = plot_widget.mapFromScene(view_rect.bottomRight())
+                    
+                    # Get the actual plot area boundaries
+                    plot_left = widget_top_left.x()
+                    plot_right = widget_bottom_right.x()
+                    plot_width = plot_right - plot_left
+                    
+                    if plot_width > 0:
+                        # Get current view range to calculate proportional position
+                        view_range = vb.viewRange()
+                        x_min_range, x_max_range = view_range[0]
+                        total_range = x_max_range - x_min_range
                         
-                        x_min = min(w1.x(), w2.x())
-                        x_max = max(w1.x(), w2.x())
-                        
-                        print(f"Overlay {i} - original start: {selection_data['start']}, end: {selection_data['end']}")
-                        print(f"Overlay {i} - w1: {w1}, w2: {w2}")
-                        print(f"Overlay {i} - x_min: {x_min}, x_max: {x_max}, width: {int(x_max - x_min)}, height: {plot_widget.height()}")
-                        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
-                        print(f"Overlay {i} - new geometry: {overlay.geometry()}")
+                        # Update each overlay position based on stored data
+                        for i, overlay in enumerate(overlays):
+                            if i < len(labels_data):
+                                selection_data = labels_data[i]
+                                
+                                # Calculate proportional positions based on stored data coordinates
+                                start_x = selection_data['start'].x()
+                                end_x = selection_data['end'].x()
+                                
+                                # Map data coordinates to view coordinates proportionally
+                                if total_range > 0:
+                                    start_prop = (start_x - x_min_range) / total_range
+                                    end_prop = (end_x - x_min_range) / total_range
+                                else:
+                                    start_prop = 0
+                                    end_prop = 1
+                                
+                                # Clamp proportions to [0, 1]
+                                start_prop = max(0, min(1, start_prop))
+                                end_prop = max(0, min(1, end_prop))
+                                
+                                # Convert to widget coordinates within the actual plot area
+                                x_min = plot_left + min(start_prop, end_prop) * plot_width
+                                x_max = plot_left + max(start_prop, end_prop) * plot_width
+                                width = x_max - x_min
+                                
+                                # Ensure minimum width
+                                if width < 30:
+                                    width = 30
+                                
+                                print(f"Overlay {i} - original start: {selection_data['start']}, end: {selection_data['end']}")
+                                print(f"Overlay {i} - Plot bounds: left={plot_left:.1f}, right={plot_right:.1f}, width={plot_width:.1f}")
+                                print(f"Overlay {i} - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
+                                print(f"Overlay {i} - x_min: {x_min:.1f}, x_max: {x_max:.1f}, width: {width:.1f}, height: {plot_widget.height()}")
+                                overlay.setGeometry(int(x_min), 0, int(width), plot_widget.height())
+                                print(f"Overlay {i} - new geometry: {overlay.geometry()}")
         
         # Update current selection overlay if active
         if (self.current_selection_chart == plot_widget and 
@@ -1934,6 +2216,23 @@ class SleepMonitorChart(QWidget):
             return
         vb = self.current_selection_chart.getViewBox()
         
+        # Get the actual plot area bounds from the ViewBox
+        view_rect = vb.sceneBoundingRect()
+        if view_rect.isEmpty():
+            return
+            
+        # Convert view bounds to widget coordinates
+        widget_top_left = self.current_selection_chart.mapFromScene(view_rect.topLeft())
+        widget_bottom_right = self.current_selection_chart.mapFromScene(view_rect.bottomRight())
+        
+        # Get the actual plot area boundaries
+        plot_left = widget_top_left.x()
+        plot_right = widget_bottom_right.x()
+        plot_width = plot_right - plot_left
+        
+        if plot_width <= 0:
+            return
+        
         # Get current view range to calculate proportional position
         view_range = vb.viewRange()
         x_min_range, x_max_range = view_range[0]
@@ -1951,10 +2250,13 @@ class SleepMonitorChart(QWidget):
             start_prop = 0
             end_prop = 1
         
-        # Convert to widget coordinates
-        widget_width = self.current_selection_chart.width()
-        x_min = max(0, min(start_prop, end_prop) * widget_width)
-        x_max = min(widget_width, max(start_prop, end_prop) * widget_width)
+        # Clamp proportions to [0, 1]
+        start_prop = max(0, min(1, start_prop))
+        end_prop = max(0, min(1, end_prop))
+        
+        # Convert to widget coordinates within the actual plot area
+        x_min = plot_left + min(start_prop, end_prop) * plot_width
+        x_max = plot_left + max(start_prop, end_prop) * plot_width
         width = x_max - x_min
         
         # Ensure minimum width
@@ -1964,11 +2266,13 @@ class SleepMonitorChart(QWidget):
         print(f"update_selection_overlay - Chart: {self.current_selection_chart.chart_name}")
         print(f"update_selection_overlay - Data coords: start={start_x}, end={end_x}")
         print(f"update_selection_overlay - View range: {x_min_range} to {x_max_range}")
+        print(f"update_selection_overlay - Plot bounds: left={plot_left:.1f}, right={plot_right:.1f}, width={plot_width:.1f}")
         print(f"update_selection_overlay - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
         print(f"update_selection_overlay - Widget coords: x_min={x_min:.1f}, x_max={x_max:.1f}, width={width:.1f}")
         
         overlay.setGeometry(int(x_min), 0, int(width), self.current_selection_chart.height())
         overlay.setVisible(True)
+        overlay.raise_()  # Ensure overlay is on top
         overlay.setText("Selecting...")
         overlay.raise_()
         overlay.setStyleSheet("""
@@ -1985,7 +2289,7 @@ class SleepMonitorChart(QWidget):
         """)
     
     def show_selection_menu(self):
-        """Show dropdown menu with OSA, CSA, MSA, HSA options"""
+        """Show dropdown menu with different options based on chart type"""
         print("show_selection_menu called!")
         if not self.current_selection_chart:
             print("No current_selection_chart, returning")
@@ -2016,24 +2320,35 @@ class SleepMonitorChart(QWidget):
         menu = QMenu(self)
         menu.setTitle("Select Sleep Event Type")
         
-        # Add actions for each sleep event type
-        osa_action = QAction("OSA - Obstructive Sleep Apnea", self)
-        osa_action.triggered.connect(lambda: self.apply_selection_label("OSA"))
-        menu.addAction(osa_action)
-        
-        csa_action = QAction("CSA - Central Sleep Apnea", self)
-        csa_action.triggered.connect(lambda: self.apply_selection_label("CSA"))
-        menu.addAction(csa_action)
-        
-        msa_action = QAction("MSA - Mixed Sleep Apnea", self)
-        msa_action.triggered.connect(lambda: self.apply_selection_label("MSA"))
-        menu.addAction(msa_action)
-        
-        hsa_action = QAction("HSA - Hypopnea Sleep Apnea", self)
-        hsa_action.triggered.connect(lambda: self.apply_selection_label("HSA"))
-        menu.addAction(hsa_action)
-
-        
+        # Check if this is SpO2 chart
+        chart_name = self.current_selection_chart.chart_name.strip()
+        if "SpO2" in chart_name:
+            menu.setTitle("Select Event")
+            
+            # Add simple desaturation option for SpO2
+            saturation_action = QAction("Desaturation", self)
+            saturation_action.triggered.connect(lambda: self.apply_selection_label("DE-SATURATION"))
+            menu.addAction(saturation_action)
+        else:
+            # For other charts, show sleep apnea options
+            menu.setTitle("Select Sleep Event Type")
+            
+            # Add actions for each sleep event type
+            osa_action = QAction("OSA - Obstructive Sleep Apnea", self)
+            osa_action.triggered.connect(lambda: self.apply_selection_label("OSA"))
+            menu.addAction(osa_action)
+            
+            csa_action = QAction("CSA - Central Sleep Apnea", self)
+            csa_action.triggered.connect(lambda: self.apply_selection_label("CSA"))
+            menu.addAction(csa_action)
+            
+            msa_action = QAction("MSA - Mixed Sleep Apnea", self)
+            msa_action.triggered.connect(lambda: self.apply_selection_label("MSA"))
+            menu.addAction(msa_action)
+            
+            hsa_action = QAction("HSA - Hypopnea Sleep Apnea", self)
+            hsa_action.triggered.connect(lambda: self.apply_selection_label("HSA"))
+            menu.addAction(hsa_action)
         
         # Add separator and clear option
         menu.addSeparator()
@@ -2060,6 +2375,14 @@ class SleepMonitorChart(QWidget):
 
         if chart_name not in self.selection_labels:
             self.selection_labels[chart_name] = []
+        
+        # Initialize dynamic selections for this chart if needed
+        if chart_name not in self.dynamic_selections:
+            self.dynamic_selections[chart_name] = []
+
+        # Convert pixel coordinates to absolute time coordinates
+        start_time = self.selection_start.x() + self.current_time_offset
+        end_time = self.selection_end.x() + self.current_time_offset
 
         selection_data = {
             'label': label_type,
@@ -2068,7 +2391,16 @@ class SleepMonitorChart(QWidget):
             'color': self.get_label_color(label_type)
         }
 
+        # Store in dynamic selections with absolute time coordinates
+        dynamic_selection_data = {
+            'label': label_type,
+            'start_time': start_time,
+            'end_time': end_time,
+            'color': self.get_label_color(label_type)
+        }
+
         self.selection_labels[chart_name].append(selection_data)
+        self.dynamic_selections[chart_name].append(dynamic_selection_data)
 
         # CREATE NEW OVERLAY (instead of reusing one)
         overlay = QLabel(plot_widget)
@@ -2109,6 +2441,7 @@ class SleepMonitorChart(QWidget):
 
         overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
         overlay.show()
+        overlay.raise_()  # Ensure overlay is on top
 
         # Hide the temporary "Choose Label" overlay
         if hasattr(plot_widget, 'selection_overlay'):
@@ -2174,7 +2507,8 @@ class SleepMonitorChart(QWidget):
             'OSA': 'rgba(239, 68, 68, 0.2)',    # Red
             'CSA': 'rgba(59, 130, 246, 0.2)',   # Blue
             'MSA': 'rgba(245, 158, 11, 0.2)',   # Yellow
-            'HSA': 'rgba(16, 185, 129, 0.2)'   # Green
+            'HSA': 'rgba(16, 185, 129, 0.2)',   # Green
+            'SATURATION': 'rgba(239, 68, 68, 0.2)'   # Red
         }
         return colors.get(label_type, 'rgba(107, 114, 128, 0.2)')
     
@@ -2389,64 +2723,39 @@ class SleepMonitorChart(QWidget):
                                 selection_data = self.selection_labels[chart_name][j]
                                 self.update_overlay_position(plot_widget, overlay, selection_data['start'], selection_data['end'])
     
-    def add_spo2_threshold_lines(self, plot_widget):
-        """Add medical threshold lines for SpO2 monitoring"""
-        thresholds = self.spo2_thresholds
         
-        # Define threshold colors and styles
-        threshold_configs = [
-            (thresholds['severe'], '#ef4444', 'Severe (<80%)', 2, Qt.DashLine),    # Red - Severe
-            (thresholds['moderate'], '#f59e0b', 'Moderate (<85%)', 1.5, Qt.DashLine), # Orange - Moderate  
-            (thresholds['mild'], '#eab308', 'Mild (<90%)', 1, Qt.DashLine),          # Yellow - Mild
-            (thresholds['normal'], '#22c55e', 'Normal (≥95%)', 1, Qt.DotLine),       # Green - Normal
-        ]
-        
-        for threshold, color, label, width, style in threshold_configs:
-            # Create infinite horizontal line at threshold level
-            line = pg.InfiniteLine(pos=threshold, angle=0, pen=pg.mkPen(color=color, width=width, style=style))
-            plot_widget.addItem(line)
-            
-            # Add label for the threshold
-            label_text = pg.TextItem(text=label, color=color, anchor=(0, 1))
-            label_text.setPos(0, threshold)
-            plot_widget.addItem(label_text)
-    
     def add_spo2_statistics_overlay(self, plot_widget, container):
         """Add SpO2 statistics overlay to the plot container"""
         if not self.spo2_statistics:
             return
         
-        # Create statistics label
+        # Create statistics label - only show desaturation events for SpO2
         stats_text = f"""
 SpO2 Statistics:
 Mean: {self.spo2_statistics['mean']:.1f}%
 Min: {self.spo2_statistics['min']:.1f}%
 Max: {self.spo2_statistics['max']:.1f}%
 Desaturations: {self.spo2_statistics['desaturation_events']}
-Mild Events: {self.spo2_statistics['mild_events']}
-Moderate Events: {self.spo2_statistics['moderate_events']}
-Severe Events: {self.spo2_statistics['severe_events']}
         """.strip()
         
         stats_label = QLabel(container)
         stats_label.setText(stats_text)
-        stats_label.setStyleSheet("""
-            QLabel {
+        stats_label.setStyleSheet(f"""
+            QLabel#signalLabel {{
                 background-color: rgba(0, 0, 0, 0.8);
                 color: white;
-                font-size: 10px;
-                font-family: 'Courier New', monospace;
-                padding: 8px;
-                border-radius: 6px;
-                border: 1px solid #06b6d4;
-            }
+                font-size: 9px;
+                font-weight: 700;
+                padding: 4px;
+                border-radius: 3px;
+            }}
         """)
         stats_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         stats_label.setObjectName("spo2StatisticsLabel")
         
         # Position the overlay in top-right corner
         stats_label.move(container.width() - 200, 10)
-        stats_label.resize(190, 120)
+        stats_label.resize(190, 90)  # Reduced height due to fewer lines
         stats_label.show()
         
         # Store reference for updates
