@@ -3,6 +3,7 @@ Sleep Sense Dashboard - Main Dashboard Component
 """
 
 import os
+from datetime import datetime
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea,
@@ -13,6 +14,7 @@ from PyQt5.QtGui import QFont, QPixmap
 
 from .patient_info_widget import PatientInfoWidget
 from .sleep_monitor_chart import SleepMonitorChart
+from .button_functions import ButtonFunctions
 
 
 class SleepSenseDashboard(QMainWindow):
@@ -23,6 +25,8 @@ class SleepSenseDashboard(QMainWindow):
         super().__init__()
         self.logo_frame = None
         self.logo_label = None
+        # Initialize button functions
+        self.button_functions = ButtonFunctions(self)
         self.init_ui()
         self.load_stylesheet()
         
@@ -272,49 +276,86 @@ class SleepSenseDashboard(QMainWindow):
     
     def show_menu_popup(self, button, menu_type):
         """Show popup menu for custom menu buttons"""
-        from PyQt5.QtWidgets import QMenu
+        from PyQt5.QtWidgets import QMenu, QApplication
         
         menu = QMenu(self)
         
         if menu_type == 'file':
-            menu.addAction('New', self.file_new, 'Ctrl+N')
-            menu.addAction('Open', self.file_open, 'Ctrl+O')
-            menu.addAction('Save', self.file_save, 'Ctrl+S')
+            menu.addAction('Database', self.button_functions.file_database)
+            menu.addAction('Archive', self.button_functions.file_archive)
             menu.addSeparator()
-            menu.addAction('Export Data', self.file_export, 'Ctrl+E')
+            menu.addAction('Save report locally', self.button_functions.file_save_report_locally, 'Ctrl+S')
+            menu.addAction('Print report', self.button_functions.file_print_report, 'Ctrl+P')
+            menu.addAction('Print patient instructions', self.button_functions.file_print_patient_instructions)
+            menu.addSeparator()
+            menu.addAction('View external data', self.button_functions.file_view_external_data)
+            menu.addAction('Duplicate', self.button_functions.file_duplicate, 'Ctrl+D')
+            menu.addSeparator()
+            menu.addAction('Export', self.button_functions.file_export, 'Ctrl+E')
+            menu.addAction('Import recording', self.button_functions.file_import_recording, 'Ctrl+I')
+            menu.addSeparator()
+            menu.addAction('Send report by email', self.button_functions.file_send_report_by_email)
             menu.addSeparator()
             menu.addAction('Exit', self.close, 'Ctrl+Q')
             
         elif menu_type == 'edit':
-            menu.addAction('Undo', self.edit_undo, 'Ctrl+Z')
-            menu.addAction('Redo', self.edit_redo, 'Ctrl+Y')
-            menu.addSeparator()
-            menu.addAction('Copy', self.edit_copy, 'Ctrl+C')
-            menu.addAction('Paste', self.edit_paste, 'Ctrl+V')
+            menu.addAction('Undo', self.button_functions.edit_undo, 'Ctrl+Z')
             
         elif menu_type == 'view':
-            fullscreen_action = menu.addAction('Fullscreen', self.view_fullscreen, 'F11')
+            menu.addAction('Report view', self.button_functions.view_report_view)
+            menu.addAction('Signal view', self.button_functions.view_signal_view)
+            menu.addAction('Event list', self.button_functions.view_event_list)
+            menu.addAction('Quick start', self.button_functions.view_quick_start)
+            menu.addSeparator()
+            fullscreen_action = menu.addAction('Fullscreen', self.button_functions.view_fullscreen, 'F11')
             fullscreen_action.setCheckable(True)
             fullscreen_action.setChecked(self.isFullScreen())
             menu.addSeparator()
-            menu.addAction('Zoom In', self.view_zoom_in, 'Ctrl++')
-            menu.addAction('Zoom Out', self.view_zoom_out, 'Ctrl+-')
-            menu.addAction('Reset Zoom', self.view_reset_zoom, 'Ctrl+0')
+            menu.addAction('Zoom In', self.button_functions.view_zoom_in, 'Ctrl++')
+            menu.addAction('Zoom Out', self.button_functions.view_zoom_out, 'Ctrl+-')
+            menu.addAction('Reset Zoom', self.button_functions.view_reset_zoom, 'Ctrl+0')
             
         elif menu_type == 'tools':
-            menu.addAction('Settings', self.tools_settings, 'Ctrl+,')
+            menu.addAction('Re-analyze', self.button_functions.tools_reanalyze)
+            menu.addAction('New event group', self.button_functions.tools_new_event_group)
+            menu.addAction('Delete event group', self.button_functions.tools_delete_event_group)
+            menu.addAction('Edit event group', self.button_functions.tools_edit_event_group)
             menu.addSeparator()
-            menu.addAction('Import Data', self.tools_import_data)
-            menu.addAction('Data Analysis', self.tools_data_analysis)
-            menu.addAction('Generate Report', self.tools_generate_report)
+            menu.addAction('Settings', self.button_functions.tools_settings, 'Ctrl+,')
+            menu.addAction('Send Event Log by email', self.button_functions.tools_send_event_log_by_email)
+            menu.addAction('Database Transfer', self.button_functions.tools_database_transfer)
+            menu.addSeparator()
+            menu.addAction('Import Data', self.button_functions.tools_import_data)
+            menu.addAction('Data Analysis', self.button_functions.tools_data_analysis)
+            menu.addAction('Generate Report', self.button_functions.tools_generate_report)
             
         elif menu_type == 'help':
-            menu.addAction('Documentation', self.help_documentation, 'F1')
-            menu.addAction('About', self.help_about)
+            menu.addAction('Clinical Guide', self.button_functions.help_clinical_guide)
+            menu.addAction('Patient instructions', self.button_functions.help_patient_instructions)
+            menu.addAction('Program info', self.button_functions.help_program_info)
+            menu.addAction('Recording info', self.button_functions.help_recording_info)
+            menu.addAction('Device info', self.button_functions.help_device_info)
+            menu.addSeparator()
+            menu.addAction('Documentation', self.button_functions.help_documentation, 'F1')
+            menu.addAction('About', self.button_functions.help_about)
         
-        # Show menu below the button
+        # Show menu below the button with proper positioning
         button_rect = button.geometry()
         menu_pos = button.mapToGlobal(button_rect.bottomLeft())
+        
+        # Adjust position to ensure menu is fully visible
+        screen_geometry = QApplication.desktop().screenGeometry()
+        menu_size = menu.sizeHint()
+        
+        # Check if menu goes below screen and adjust if needed
+        if menu_pos.y() + menu_size.height() > screen_geometry.bottom():
+            menu_pos = button.mapToGlobal(button_rect.topLeft())
+            menu_pos.setY(menu_pos.y() - menu_size.height())
+        
+        # Check if menu goes right of screen and adjust if needed
+        if menu_pos.x() + menu_size.width() > screen_geometry.right():
+            menu_pos.setX(screen_geometry.right() - menu_size.width())
+        
         menu.exec_(menu_pos)
     
     def create_menu_bar(self):
@@ -457,86 +498,7 @@ class SleepSenseDashboard(QMainWindow):
         about_action.triggered.connect(self.help_about)
         help_menu.addAction(about_action)
     
-    # File Menu Actions
-    def file_new(self):
-        print("File -> New clicked")
-        # TODO: Implement new session functionality
-    
-    def file_open(self):
-        print("File -> Open clicked")
-        # TODO: Implement file open functionality
-    
-    def file_save(self):
-        print("File -> Save clicked")
-        # TODO: Implement file save functionality
-    
-    def file_export(self):
-        print("File -> Export Data clicked")
-        # TODO: Implement data export functionality
-    
-    # Edit Menu Actions
-    def edit_undo(self):
-        print("Edit -> Undo clicked")
-        # TODO: Implement undo functionality
-    
-    def edit_redo(self):
-        print("Edit -> Redo clicked")
-        # TODO: Implement redo functionality
-    
-    def edit_copy(self):
-        print("Edit -> Copy clicked")
-        # TODO: Implement copy functionality
-    
-    def edit_paste(self):
-        print("Edit -> Paste clicked")
-        # TODO: Implement paste functionality
-    
-    # View Menu Actions
-    def view_fullscreen(self, checked):
-        if checked:
-            self.showFullScreen()
-        else:
-            self.showNormal()
-        print(f"View -> Fullscreen {'enabled' if checked else 'disabled'}")
-    
-    def view_zoom_in(self):
-        print("View -> Zoom In clicked")
-        # TODO: Implement zoom in functionality
-    
-    def view_zoom_out(self):
-        print("View -> Zoom Out clicked")
-        # TODO: Implement zoom out functionality
-    
-    def view_reset_zoom(self):
-        print("View -> Reset Zoom clicked")
-        # TODO: Implement reset zoom functionality
-    
-    # Tools Menu Actions
-    def tools_settings(self):
-        print("Tools -> Settings clicked")
-        # TODO: Implement settings dialog
-    
-    def tools_import_data(self):
-        print("Tools -> Import Data clicked")
-        # TODO: Implement data import functionality
-    
-    def tools_data_analysis(self):
-        print("Tools -> Data Analysis clicked")
-        # TODO: Implement data analysis tools
-    
-    def tools_generate_report(self):
-        print("Tools -> Generate Report clicked")
-        # TODO: Implement report generation
-    
-    # Help Menu Actions
-    def help_documentation(self):
-        print("Help -> Documentation clicked")
-        # TODO: Open documentation
-    
-    def help_about(self):
-        print("Help -> About clicked")
-        # TODO: Show about dialog
-    
+        
     def create_time_slider_bar(self):
         """Create time slider navigation bar with professional styling - same size as graph containers"""
         # Main container with same styling as graph containers
@@ -797,7 +759,6 @@ class SleepSenseDashboard(QMainWindow):
                 # Refresh charts and update labels
                 self.monitor_chart.refresh_charts()
                 self.update_slider_position()
-                
                 print(f"Dashboard slider changed to: {value}% (time: {self.monitor_chart.current_time_offset:.1f}s)")
     
     def update_slider_position(self):

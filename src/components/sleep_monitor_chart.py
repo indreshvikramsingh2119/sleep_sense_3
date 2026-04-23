@@ -1193,14 +1193,10 @@ class SleepMonitorChart(QWidget):
         # Set time window limits on CustomViewBox to enforce zoom constraints
         vb = plot_widget.getViewBox()
         if hasattr(vb, 'set_time_window_limits'):
-<<<<<<< Updated upstream
-            vb.set_time_window_limits(0, self.current_time_window)
-=======
             vb.set_time_window_limits(self.current_time_offset, self.current_time_offset + self.current_time_window)
             
         # Connect view change signal to update dynamic overlays
         vb.sigRangeChanged.connect(lambda: self.update_dynamic_overlay_positions(plot_widget))
->>>>>>> Stashed changes
         
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.hideButtons()  # Hide the 'A' button
@@ -1959,7 +1955,6 @@ class SleepMonitorChart(QWidget):
                 labels_data = self.selection_labels[chart_name]
                 vb = plot_widget.getViewBox()
                 
-<<<<<<< Updated upstream
                 # Get the actual plot area bounds from the ViewBox
                 view_rect = vb.sceneBoundingRect()
                 if not view_rect.isEmpty():
@@ -1977,7 +1972,6 @@ class SleepMonitorChart(QWidget):
                         view_range = vb.viewRange()
                         x_min_range, x_max_range = view_range[0]
                         total_range = x_max_range - x_min_range
-<<<<<<< HEAD
                         if total_range > 0:
                             start_prop = (start_x - x_min_range) / total_range
                             end_prop = (end_x - x_min_range) / total_range
@@ -1987,7 +1981,6 @@ class SleepMonitorChart(QWidget):
                             
                         if start_prop > 1: 
                             end_prop = 2
-=======
                 # Update each overlay position based on stored data
                 for i, overlay in enumerate(overlays):
                     if i < len(labels_data):
@@ -2001,19 +1994,18 @@ class SleepMonitorChart(QWidget):
                         # Convert scene coordinates to widget coordinates
                         start_widget = plot_widget.mapFromScene(start_scene)
                         end_widget = plot_widget.mapFromScene(end_scene)
-                        
+                      
                         # Calculate overlay dimensions and position
                         x_min = min(start_widget.x(), end_widget.x())
                         x_max = max(start_widget.x(), end_widget.x())
->>>>>>> Stashed changes
                         
+                        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
                         # Position overlay on the graph (overlay on plot area)
                         overlay_y = 10  # Position near top of plot area
                         
                         overlay.setGeometry(int(x_min), overlay_y, int(x_max - x_min), 25)
                         print(f"Overlay {i} - new geometry: {overlay.geometry()}")
                         print(f"Overlay {i} - Final geometry: {overlay.geometry()}")
-=======
                         
                         # Update each overlay position based on stored data
                         for i, overlay in enumerate(overlays):
@@ -2053,7 +2045,6 @@ class SleepMonitorChart(QWidget):
                                 
                                 overlay.setGeometry(int(x_min), 0, int(width), plot_widget.height())
                                 print(f"Overlay {i} - Final geometry: {overlay.geometry()}")
->>>>>>> 4a5ad819d2ee3032bf2287a1db7629d244387163
         
         # Update current selection overlay if active
         if (self.current_selection_chart == plot_widget and 
@@ -2089,62 +2080,6 @@ class SleepMonitorChart(QWidget):
                 labels_data = self.selection_labels[chart_name]
                 vb = plot_widget.getViewBox()
                 
-<<<<<<< Updated upstream
-                # Get the actual plot area bounds from the ViewBox
-                view_rect = vb.sceneBoundingRect()
-                if not view_rect.isEmpty():
-                    # Convert view bounds to widget coordinates
-                    widget_top_left = plot_widget.mapFromScene(view_rect.topLeft())
-                    widget_bottom_right = plot_widget.mapFromScene(view_rect.bottomRight())
-                    
-                    # Get the actual plot area boundaries
-                    plot_left = widget_top_left.x()
-                    plot_right = widget_bottom_right.x()
-                    plot_width = plot_right - plot_left
-                    
-                    if plot_width > 0:
-                        # Get current view range to calculate proportional position
-                        view_range = vb.viewRange()
-                        x_min_range, x_max_range = view_range[0]
-                        total_range = x_max_range - x_min_range
-                        
-                        # Update each overlay position based on stored data
-                        for i, overlay in enumerate(overlays):
-                            if i < len(labels_data):
-                                selection_data = labels_data[i]
-                                
-                                # Calculate proportional positions based on stored data coordinates
-                                start_x = selection_data['start'].x()
-                                end_x = selection_data['end'].x()
-                                
-                                # Map data coordinates to view coordinates proportionally
-                                if total_range > 0:
-                                    start_prop = (start_x - x_min_range) / total_range
-                                    end_prop = (end_x - x_min_range) / total_range
-                                else:
-                                    start_prop = 0
-                                    end_prop = 1
-                                
-                                # Clamp proportions to [0, 1]
-                                start_prop = max(0, min(1, start_prop))
-                                end_prop = max(0, min(1, end_prop))
-                                
-                                # Convert to widget coordinates within the actual plot area
-                                x_min = plot_left + min(start_prop, end_prop) * plot_width
-                                x_max = plot_left + max(start_prop, end_prop) * plot_width
-                                width = x_max - x_min
-                                
-                                # Ensure minimum width
-                                if width < 30:
-                                    width = 30
-                                
-                                print(f"Overlay {i} - original start: {selection_data['start']}, end: {selection_data['end']}")
-                                print(f"Overlay {i} - Plot bounds: left={plot_left:.1f}, right={plot_right:.1f}, width={plot_width:.1f}")
-                                print(f"Overlay {i} - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
-                                print(f"Overlay {i} - x_min: {x_min:.1f}, x_max: {x_max:.1f}, width: {width:.1f}, height: {plot_widget.height()}")
-                                overlay.setGeometry(int(x_min), 0, int(width), plot_widget.height())
-                                print(f"Overlay {i} - new geometry: {overlay.geometry()}")
-=======
                 # Update each overlay position based on stored data
                 for i, overlay in enumerate(overlays):
                     if i < len(labels_data):
@@ -2168,7 +2103,6 @@ class SleepMonitorChart(QWidget):
                         print(f"Overlay {i} - x_min: {x_min}, x_max: {x_max}, width: {int(x_max - x_min)}, height: {plot_widget.height()}")
                         overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
                         print(f"Overlay {i} - new geometry: {overlay.geometry()}")
->>>>>>> Stashed changes
         
         # Update current selection overlay if active
         if (self.current_selection_chart == plot_widget and 
@@ -2254,59 +2188,17 @@ class SleepMonitorChart(QWidget):
             return
         vb = self.current_selection_chart.getViewBox()
         
-<<<<<<< Updated upstream
-        # Get the actual plot area bounds from the ViewBox
-        view_rect = vb.sceneBoundingRect()
-        if view_rect.isEmpty():
-            return
-            
-        # Convert view bounds to widget coordinates
-        widget_top_left = self.current_selection_chart.mapFromScene(view_rect.topLeft())
-        widget_bottom_right = self.current_selection_chart.mapFromScene(view_rect.bottomRight())
-        
-        # Get the actual plot area boundaries
-        plot_left = widget_top_left.x()
-        plot_right = widget_bottom_right.x()
-        plot_width = plot_right - plot_left
-        
-        if plot_width <= 0:
-            return
-        
-        # Get current view range to calculate proportional position
-        view_range = vb.viewRange()
-        x_min_range, x_max_range = view_range[0]
-=======
-        # Convert data coordinates to scene coordinates, then to widget coordinates
+# Convert data coordinates to scene coordinates, then to widget coordinates
         start_scene = vb.mapViewToScene(start_pos)
         end_scene = vb.mapViewToScene(end_pos)
->>>>>>> Stashed changes
         
         # Convert scene coordinates to widget coordinates
         start_widget = self.current_selection_chart.mapFromScene(start_scene)
         end_widget = self.current_selection_chart.mapFromScene(end_scene)
         
-<<<<<<< Updated upstream
-        # Map data coordinates to view coordinates proportionally
-        total_range = x_max_range - x_min_range
-        if total_range > 0:
-            start_prop = (start_x - x_min_range) / total_range
-            end_prop = (end_x - x_min_range) / total_range
-        else:
-            start_prop = 0
-            end_prop = 1
-        
-        # Clamp proportions to [0, 1]
-        start_prop = max(0, min(1, start_prop))
-        end_prop = max(0, min(1, end_prop))
-        
-        # Convert to widget coordinates within the actual plot area
-        x_min = plot_left + min(start_prop, end_prop) * plot_width
-        x_max = plot_left + max(start_prop, end_prop) * plot_width
-=======
-        # Calculate overlay dimensions and position
+# Calculate overlay dimensions and position
         x_min = min(start_widget.x(), end_widget.x())
         x_max = max(start_widget.x(), end_widget.x())
->>>>>>> Stashed changes
         width = x_max - x_min
         
         # Ensure minimum width
@@ -2314,14 +2206,7 @@ class SleepMonitorChart(QWidget):
             width = 30
         
         print(f"update_selection_overlay - Chart: {self.current_selection_chart.chart_name}")
-<<<<<<< Updated upstream
-        print(f"update_selection_overlay - Data coords: start={start_x}, end={end_x}")
-        print(f"update_selection_overlay - View range: {x_min_range} to {x_max_range}")
-        print(f"update_selection_overlay - Plot bounds: left={plot_left:.1f}, right={plot_right:.1f}, width={plot_width:.1f}")
-        print(f"update_selection_overlay - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
-=======
         print(f"update_selection_overlay - Data coords: start={start_pos.x()}, end={end_pos.x()}")
->>>>>>> Stashed changes
         print(f"update_selection_overlay - Widget coords: x_min={x_min:.1f}, x_max={x_max:.1f}, width={width:.1f}")
         
         # Position overlay on the graph (overlay on plot area)
