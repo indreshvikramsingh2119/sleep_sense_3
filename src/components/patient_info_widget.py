@@ -62,7 +62,7 @@ class PatientInfoWidget(QWidget):
         details_layout.setSpacing(10) # Adjusted spacing between info cards
         
         # Age/Gender Card
-        age_card = self.create_info_card("", "Age / Gender", "-- / ---", "light green")
+        age_card = self.create_info_card("", "Age / Gender", "-- / ---", "light blue")
         details_layout.addWidget(age_card)
         
         # Action Buttons (Save and Upload)
@@ -184,7 +184,7 @@ class PatientInfoWidget(QWidget):
     def create_avatar_section(self):
         """Create patient avatar and name section"""
         frame = QFrame()
-        frame.setObjectName("avatarSection")
+        frame.setObjectName("")
         layout = QVBoxLayout(frame)
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(8)
@@ -203,7 +203,7 @@ class PatientInfoWidget(QWidget):
         avatar_layout.setContentsMargins(0, 0, 0, 0)
         
         # Avatar label (SJ for Sarah Johnson)
-        avatar_label = QLabel("")
+        avatar_label = QLabel("👤")
         avatar_label.setAlignment(Qt.AlignCenter)
         avatar_label.setStyleSheet("""
             QLabel {
