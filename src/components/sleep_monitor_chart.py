@@ -114,11 +114,7 @@ class SleepMonitorChart(QWidget):
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(8) # Increased spacing between control bar and chart container
-        
-        # Control Bar
-        control_bar = self.create_control_bar()
-        main_layout.addWidget(control_bar)
+        main_layout.setSpacing(8) # Increased spacing between chart containers
         
         # Chart Area
         chart_container = QWidget()
@@ -241,94 +237,14 @@ class SleepMonitorChart(QWidget):
         
         main_layout.addWidget(chart_container)
         
-    def create_control_bar(self):
-        """Create control bar with playback controls"""
-        frame = QFrame()
-        frame.setObjectName("chartControlBar")
-        frame.setMinimumHeight(80)
-        
-        layout = QHBoxLayout(frame)
-        layout.setContentsMargins(16, 4, 16, 4)
-        layout.setSpacing(12)
-
-        layout.addStretch()
-
-        # --- Right Side Container ---
-        right_container = QFrame()
-        right_container.setObjectName("rightSideContainer")
-        right_container.setStyleSheet("""
-            QFrame#rightSideContainer {
-                background-color: #ffffff;
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                padding: 2px;  # Reduced padding
-                max-height: 80px;  # Make container smaller
-            }
-        """)
-        right_layout = QHBoxLayout(right_container)
-        right_layout.setContentsMargins(4, 2, 4, 2)  # Smaller margins
-        right_layout.setSpacing(4)  # Smaller spacing
-
-        
-        # --- Time Window Dropdown ---
-        time_window_label = QLabel("Time Window:")
-        time_window_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
-        right_layout.addWidget(time_window_label)
-        
-        # Create dropdown for time window selection
-        self.time_window_dropdown = QComboBox()
-        self.time_window_dropdown.setObjectName("timeWindowDropdown")
-        self.time_window_dropdown.setFixedHeight(22)  # Smaller height
-        self.time_window_dropdown.setMinimumWidth(60)  # Smaller width
-        
-        # Add time window options (in seconds)
-        time_windows = [
-            ("10s", 10),
-            ("30s", 30), 
-            ("1m", 60),
-            ("2m", 120),
-            ("5m", 300),
-            ("10m", 600),
-        ]
-        
-        for label, value in time_windows:
-            self.time_window_dropdown.addItem(label, value)
-        
-        # Set default selection to 2m (index 2)
-        self.time_window_dropdown.setCurrentIndex(2)
-        self.current_time_window = 60 
-
-        # Connect dropdown to time window function
-        self.time_window_dropdown.currentIndexChanged.connect(self.on_time_window_changed)
-        
-        right_layout.addWidget(self.time_window_dropdown)
-
-        
-        # --- Hidden Graphs Dropdown ---
-        hidden_graphs_label = QLabel("Hidden Graphs:")
-        hidden_graphs_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
-        right_layout.addWidget(hidden_graphs_label)
-        
-        # Create dropdown for hidden graphs
-        self.hidden_graphs_dropdown = QComboBox()
-        self.hidden_graphs_dropdown.setObjectName("hiddenGraphsDropdown")
-        self.hidden_graphs_dropdown.setFixedHeight(22)  # Smaller height
-        self.hidden_graphs_dropdown.setMinimumWidth(90)  # Smaller width
-        self.hidden_graphs_dropdown.addItem("Select to restore...")  # Placeholder item
-        self.hidden_graphs_dropdown.setEnabled(False)  # Disable until graphs are hidden
-        
-        # Connect dropdown to restore function
-        self.hidden_graphs_dropdown.currentIndexChanged.connect(self.restore_hidden_graph)
-        
-        right_layout.addWidget(self.hidden_graphs_dropdown)
-
-        right_container.setLayout(right_layout)
-        layout.addWidget(right_container)
-
-        return frame
-
+    
     def set_patient_id(self, patient_id: str):
         self.patient_id = patient_id or "--------"
+    
+    def set_dashboard_controls(self, time_window_dropdown, hidden_graphs_dropdown):
+        """Set reference to dashboard controls for synchronization"""
+        self.dashboard_time_window_dropdown = time_window_dropdown
+        self.dashboard_hidden_graphs_dropdown = hidden_graphs_dropdown
 
     def confirm_and_save_raw_data(self):
         reply = QMessageBox.question(
@@ -386,20 +302,23 @@ class SleepMonitorChart(QWidget):
 
     def on_time_window_changed(self, index):
         """Handle time window dropdown change"""
-        # Get the value from dropdown item data
-        seconds = self.time_window_dropdown.itemData(index)
-        print(f"Debug: on_time_window_changed called with index {index}, seconds {seconds}")
-        self.current_time_window = seconds
-        
-        # Reset time offset when changing window size
-        self.current_time_offset = 0
-        
-        # Update charts with new time window
-        print(f"Debug: About to call update_charts_for_time_window with {seconds} seconds")
-        self.update_charts_for_time_window(seconds)
-        self.restore_all_selections()
-        self.update_time_position_label()
-        print(f"Time window changed to: {self.time_window_dropdown.itemText(index)} ({seconds} seconds)")
+        # Use dashboard controls if available, otherwise use local controls
+        dropdown = getattr(self, 'dashboard_time_window_dropdown', None) or getattr(self, 'time_window_dropdown', None)
+        if dropdown:
+            # Get the value from dropdown item data
+            seconds = dropdown.itemData(index)
+            print(f"Debug: on_time_window_changed called with index {index}, seconds {seconds}")
+            self.current_time_window = seconds
+            
+            # Reset time offset when changing window size
+            self.current_time_offset = 0
+            
+            # Update charts with new time window
+            print(f"Debug: About to call update_charts_for_time_window with {seconds} seconds")
+            self.update_charts_for_time_window(seconds)
+            self.restore_all_selections()
+            self.update_time_position_label()
+            print(f"Time window changed to: {dropdown.itemText(index)} ({seconds} seconds)")
     
     def navigate_backward(self):
         """Navigate backward in time"""
@@ -464,6 +383,13 @@ class SleepMonitorChart(QWidget):
                 if hasattr(vb, 'set_time_window_limits'):
                     vb.set_time_window_limits(self.current_time_offset, self.current_time_offset + self.current_time_window)
                 
+                # Update X-axis range to show current time window
+                plot_widget.setXRange(0, self.current_time_window)
+                
+                # Update bottom axis to show correct time ticks for new window
+                bottom_axis = plot_widget.getAxis('bottom')
+                bottom_axis.setRange(0, self.current_time_window)
+                
                 # Update data for each chart
                 if chart_name.strip() == "SpO2":
                     x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
@@ -515,16 +441,22 @@ class SleepMonitorChart(QWidget):
     
     def set_time_window(self, seconds):
         """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
-        # Find matching dropdown item and set it
-        for i in range(self.time_window_dropdown.count()):
-            if self.time_window_dropdown.itemData(i) == seconds:
-                self.time_window_dropdown.setCurrentIndex(i)
-                break
+        # Update current_time_window variable
+        self.current_time_window = seconds
         
-        # Update charts with new time window
-        self.update_charts_for_time_window(seconds)
-        self.restore_all_selections()
-        print(f"Time window set to: {seconds} seconds")
+        # Use dashboard controls if available, otherwise use local controls
+        dropdown = getattr(self, 'dashboard_time_window_dropdown', None) or getattr(self, 'time_window_dropdown', None)
+        if dropdown:
+            # Find matching dropdown item and set it
+            for i in range(dropdown.count()):
+                if dropdown.itemData(i) == seconds:
+                    dropdown.setCurrentIndex(i)
+                    break
+            
+            # Update charts with new time window
+            self.update_charts_for_time_window(seconds)
+            self.restore_all_selections()
+            print(f"Time window set to: {seconds} seconds")
 
     
     def update_charts_for_time_window(self, seconds):
@@ -552,9 +484,11 @@ class SleepMonitorChart(QWidget):
         
         # Clear hidden graphs and dropdown when time window changes
         self.hidden_graphs.clear()
-        self.hidden_graphs_dropdown.clear()
-        self.hidden_graphs_dropdown.addItem("Select to restore...")
-        self.hidden_graphs_dropdown.setEnabled(False)
+        hidden_dropdown = getattr(self, 'dashboard_hidden_graphs_dropdown', None) or getattr(self, 'hidden_graphs_dropdown', None)
+        if hidden_dropdown:
+            hidden_dropdown.clear()
+            hidden_dropdown.addItem("Select to restore...")
+            hidden_dropdown.setEnabled(False)
         
         # Reset graph order
         self.graph_order.clear()
@@ -1193,14 +1127,10 @@ class SleepMonitorChart(QWidget):
         # Set time window limits on CustomViewBox to enforce zoom constraints
         vb = plot_widget.getViewBox()
         if hasattr(vb, 'set_time_window_limits'):
-<<<<<<< Updated upstream
-            vb.set_time_window_limits(0, self.current_time_window)
-=======
             vb.set_time_window_limits(self.current_time_offset, self.current_time_offset + self.current_time_window)
             
         # Connect view change signal to update dynamic overlays
         vb.sigRangeChanged.connect(lambda: self.update_dynamic_overlay_positions(plot_widget))
->>>>>>> Stashed changes
         
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.hideButtons()  # Hide the 'A' button
@@ -1239,7 +1169,7 @@ class SleepMonitorChart(QWidget):
             x = np.linspace(self.current_time_offset, self.current_time_offset + self.current_time_window, time_points)
             y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
         
-        # Plot the signal and store reference for line visibility control
+        # Plot the signal andltore reference for line visibility control
         pen = pg.mkPen(color=color, width=1.5)
         
         # Plot all graphs as normal line plots (no step ladder)
@@ -1548,12 +1478,14 @@ class SleepMonitorChart(QWidget):
         container.setVisible(False)
         
         # Add to dropdown
-        self.hidden_graphs_dropdown.addItem(chart_name)
-        self.hidden_graphs_dropdown.setEnabled(True)
-        
-        # Reset dropdown to placeholder if this was the first hidden graph
-        if len(self.hidden_graphs) == 1:
-            self.hidden_graphs_dropdown.setCurrentIndex(0)
+        hidden_dropdown = getattr(self, 'dashboard_hidden_graphs_dropdown', None) or getattr(self, 'hidden_graphs_dropdown', None)
+        if hidden_dropdown:
+            hidden_dropdown.addItem(chart_name)
+            hidden_dropdown.setEnabled(True)
+            
+            # Reset dropdown to placeholder if this was the first hidden graph
+            if len(self.hidden_graphs) == 1:
+                hidden_dropdown.setCurrentIndex(0)
         
         print(f"Graph '{chart_name}' hidden and added to dropdown")
     
@@ -1564,7 +1496,11 @@ class SleepMonitorChart(QWidget):
             return
         
         # Get the graph name from dropdown
-        graph_name = self.hidden_graphs_dropdown.itemText(index)
+        hidden_dropdown = getattr(self, 'dashboard_hidden_graphs_dropdown', None) or getattr(self, 'hidden_graphs_dropdown', None)
+        if not hidden_dropdown:
+            return
+            
+        graph_name = hidden_dropdown.itemText(index)
         
         # Check if graph exists in hidden graphs
         if graph_name not in self.hidden_graphs:
@@ -1572,7 +1508,7 @@ class SleepMonitorChart(QWidget):
             return
         
         # Block signals to prevent multiple calls
-        self.hidden_graphs_dropdown.blockSignals(True)
+        hidden_dropdown.blockSignals(True)
         
         try:
             # Get stored graph data
@@ -1622,38 +1558,35 @@ class SleepMonitorChart(QWidget):
             del self.hidden_graphs[graph_name]
             
             # Remove from dropdown
-            self.hidden_graphs_dropdown.removeItem(index)
+            hidden_dropdown.removeItem(index)
             
             # Find the correct position to insert this graph
             insert_position = graph_data['position']
             
-            # Count how many visible graphs come before this position
-            visible_before = 0
-            for i in range(insert_position):
-                if self.graph_order[i] not in self.hidden_graphs:
-                    visible_before += 1
+            # Re-insert the container at the correct position
+            self.charts_layout.insertWidget(insert_position, new_container)
             
-            # Insert the fresh container at the correct position with stretch factor
-            self.charts_layout.insertWidget(visible_before, new_container, stretch=1)
+            # Update graph_order list
+            self.graph_order.insert(insert_position, graph_name)
             
-            # Reconnect mouse event handlers for drag functionality
-            new_container.setAcceptDrops(True)
-            new_container.mousePressEvent = lambda event: self.start_drag(event, graph_name, new_container)
-            new_container.mouseMoveEvent = lambda event: self.continue_drag(event, graph_name)
-            new_container.mouseReleaseEvent = lambda event: self.end_drag(event, graph_name)
+            # Update all position indices for graphs that come after the inserted one
+            for i in range(insert_position + 1, len(self.graph_order)):
+                other_graph_name = self.graph_order[i]
+                if other_graph_name in self.hidden_graphs:
+                    self.hidden_graphs[other_graph_name]['position'] = i
             
             # Disable dropdown if no more hidden graphs
             if len(self.hidden_graphs) == 0:
-                self.hidden_graphs_dropdown.setEnabled(False)
+                hidden_dropdown.setEnabled(False)
             else:
                 # Reset to placeholder
-                self.hidden_graphs_dropdown.setCurrentIndex(0)
+                hidden_dropdown.setCurrentIndex(0)
             
             print(f"Graph '{graph_name}' restored")
         
         finally:
             # Unblock signals
-            self.hidden_graphs_dropdown.blockSignals(False)
+            hidden_dropdown.blockSignals(False)
     
     def toggle_line_visibility(self, label, chart_name, plot_curve):
         """Toggle visibility of graph line when label is clicked"""
@@ -1959,35 +1892,6 @@ class SleepMonitorChart(QWidget):
                 labels_data = self.selection_labels[chart_name]
                 vb = plot_widget.getViewBox()
                 
-<<<<<<< Updated upstream
-                # Get the actual plot area bounds from the ViewBox
-                view_rect = vb.sceneBoundingRect()
-                if not view_rect.isEmpty():
-                    # Convert view bounds to widget coordinates
-                    widget_top_left = plot_widget.mapFromScene(view_rect.topLeft())
-                    widget_bottom_right = plot_widget.mapFromScene(view_rect.bottomRight())
-                    
-                    # Get the actual plot area boundaries
-                    plot_left = widget_top_left.x()
-                    plot_right = widget_bottom_right.x()
-                    plot_width = plot_right - plot_left
-                    
-                    if plot_width > 0:
-                        # Get current view range to calculate proportional position
-                        view_range = vb.viewRange()
-                        x_min_range, x_max_range = view_range[0]
-                        total_range = x_max_range - x_min_range
-<<<<<<< HEAD
-                        if total_range > 0:
-                            start_prop = (start_x - x_min_range) / total_range
-                            end_prop = (end_x - x_min_range) / total_range
-                        else:
-                            start_prop = 0
-                            end_prop = 1
-                            
-                        if start_prop > 1: 
-                            end_prop = 2
-=======
                 # Update each overlay position based on stored data
                 for i, overlay in enumerate(overlays):
                     if i < len(labels_data):
@@ -2005,7 +1909,6 @@ class SleepMonitorChart(QWidget):
                         # Calculate overlay dimensions and position
                         x_min = min(start_widget.x(), end_widget.x())
                         x_max = max(start_widget.x(), end_widget.x())
->>>>>>> Stashed changes
                         
                         # Position overlay on the graph (overlay on plot area)
                         overlay_y = 10  # Position near top of plot area
@@ -2013,7 +1916,6 @@ class SleepMonitorChart(QWidget):
                         overlay.setGeometry(int(x_min), overlay_y, int(x_max - x_min), 25)
                         print(f"Overlay {i} - new geometry: {overlay.geometry()}")
                         print(f"Overlay {i} - Final geometry: {overlay.geometry()}")
-=======
                         
                         # Update each overlay position based on stored data
                         for i, overlay in enumerate(overlays):
@@ -2053,7 +1955,6 @@ class SleepMonitorChart(QWidget):
                                 
                                 overlay.setGeometry(int(x_min), 0, int(width), plot_widget.height())
                                 print(f"Overlay {i} - Final geometry: {overlay.geometry()}")
->>>>>>> 4a5ad819d2ee3032bf2287a1db7629d244387163
         
         # Update current selection overlay if active
         if (self.current_selection_chart == plot_widget and 
@@ -2089,7 +1990,6 @@ class SleepMonitorChart(QWidget):
                 labels_data = self.selection_labels[chart_name]
                 vb = plot_widget.getViewBox()
                 
-<<<<<<< Updated upstream
                 # Get the actual plot area bounds from the ViewBox
                 view_rect = vb.sceneBoundingRect()
                 if not view_rect.isEmpty():
@@ -2144,31 +2044,6 @@ class SleepMonitorChart(QWidget):
                                 print(f"Overlay {i} - x_min: {x_min:.1f}, x_max: {x_max:.1f}, width: {width:.1f}, height: {plot_widget.height()}")
                                 overlay.setGeometry(int(x_min), 0, int(width), plot_widget.height())
                                 print(f"Overlay {i} - new geometry: {overlay.geometry()}")
-=======
-                # Update each overlay position based on stored data
-                for i, overlay in enumerate(overlays):
-                    if i < len(labels_data):
-                        selection_data = labels_data[i]
-                        vb = plot_widget.getViewBox()
-                        
-                        # Convert data coordinates to scene coordinates, then to widget coordinates
-                        start_scene = vb.mapViewToScene(selection_data['start'])
-                        end_scene = vb.mapViewToScene(selection_data['end'])
-                        
-                        # Convert scene coordinates to widget coordinates
-                        start_widget = plot_widget.mapFromScene(start_scene)
-                        end_widget = plot_widget.mapFromScene(end_scene)
-                        
-                        # Calculate overlay dimensions and position
-                        x_min = min(start_widget.x(), end_widget.x())
-                        x_max = max(start_widget.x(), end_widget.x())
-                        
-                        print(f"Overlay {i} - original start: {selection_data['start']}, end: {selection_data['end']}")
-                        print(f"Overlay {i} - start_widget: {start_widget}, end_widget: {end_widget}")
-                        print(f"Overlay {i} - x_min: {x_min}, x_max: {x_max}, width: {int(x_max - x_min)}, height: {plot_widget.height()}")
-                        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
-                        print(f"Overlay {i} - new geometry: {overlay.geometry()}")
->>>>>>> Stashed changes
         
         # Update current selection overlay if active
         if (self.current_selection_chart == plot_widget and 
@@ -2254,7 +2129,6 @@ class SleepMonitorChart(QWidget):
             return
         vb = self.current_selection_chart.getViewBox()
         
-<<<<<<< Updated upstream
         # Get the actual plot area bounds from the ViewBox
         view_rect = vb.sceneBoundingRect()
         if view_rect.isEmpty():
@@ -2275,17 +2149,11 @@ class SleepMonitorChart(QWidget):
         # Get current view range to calculate proportional position
         view_range = vb.viewRange()
         x_min_range, x_max_range = view_range[0]
-=======
-        # Convert data coordinates to scene coordinates, then to widget coordinates
-        start_scene = vb.mapViewToScene(start_pos)
-        end_scene = vb.mapViewToScene(end_pos)
->>>>>>> Stashed changes
         
         # Convert scene coordinates to widget coordinates
         start_widget = self.current_selection_chart.mapFromScene(start_scene)
         end_widget = self.current_selection_chart.mapFromScene(end_scene)
         
-<<<<<<< Updated upstream
         # Map data coordinates to view coordinates proportionally
         total_range = x_max_range - x_min_range
         if total_range > 0:
@@ -2302,11 +2170,6 @@ class SleepMonitorChart(QWidget):
         # Convert to widget coordinates within the actual plot area
         x_min = plot_left + min(start_prop, end_prop) * plot_width
         x_max = plot_left + max(start_prop, end_prop) * plot_width
-=======
-        # Calculate overlay dimensions and position
-        x_min = min(start_widget.x(), end_widget.x())
-        x_max = max(start_widget.x(), end_widget.x())
->>>>>>> Stashed changes
         width = x_max - x_min
         
         # Ensure minimum width
@@ -2314,14 +2177,10 @@ class SleepMonitorChart(QWidget):
             width = 30
         
         print(f"update_selection_overlay - Chart: {self.current_selection_chart.chart_name}")
-<<<<<<< Updated upstream
         print(f"update_selection_overlay - Data coords: start={start_x}, end={end_x}")
         print(f"update_selection_overlay - View range: {x_min_range} to {x_max_range}")
         print(f"update_selection_overlay - Plot bounds: left={plot_left:.1f}, right={plot_right:.1f}, width={plot_width:.1f}")
         print(f"update_selection_overlay - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
-=======
-        print(f"update_selection_overlay - Data coords: start={start_pos.x()}, end={end_pos.x()}")
->>>>>>> Stashed changes
         print(f"update_selection_overlay - Widget coords: x_min={x_min:.1f}, x_max={x_max:.1f}, width={width:.1f}")
         
         # Position overlay on the graph (overlay on plot area)

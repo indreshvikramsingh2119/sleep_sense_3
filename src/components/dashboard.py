@@ -6,13 +6,17 @@ import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea,
-    QSlider, QPushButton, QMenuBar, QMenu, QAction
+    QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont, QPixmap
 
 from .patient_info_widget import PatientInfoWidget
 from .sleep_monitor_chart import SleepMonitorChart
+from .database_window import DatabaseWindow
+from .archive_window import ArchiveWindow
+from ..utils.toolbar_utils import create_toolbar_button, get_icon_definitions, get_toolbar_qss_styles
+from ..utils.button_functions import ButtonFunctions
 
 
 class SleepSenseDashboard(QMainWindow):
@@ -23,15 +27,13 @@ class SleepSenseDashboard(QMainWindow):
         super().__init__()
         self.logo_frame = None
         self.logo_label = None
+        self.button_functions = ButtonFunctions(self)
         self.init_ui()
         self.load_stylesheet()
         
     def init_ui(self):
-        self.setWindowTitle("Sleep Sense - Medical Sleep Monitoring System")
-        self.setGeometry(100, 100, 1200, 900)  # Reduced window width to force scrollbar
-        self.setMinimumSize(1000, 700)  # Ensure all buttons and controls are fully visible
+        self.setWindowTitle("")
         
-                
         # Central Widget
         central_widget = QWidget()
         central_widget.setObjectName("centralWidget")
@@ -44,22 +46,37 @@ class SleepSenseDashboard(QMainWindow):
         # Menu Bar Container - Custom menu bar positioned below system menu bar
         menu_container = QFrame()
         menu_container.setObjectName("menuContainer")
-        menu_container.setMinimumHeight(30)
-        menu_container.setMaximumHeight(35)
+        menu_container.setMinimumHeight(50)
+        menu_container.setMaximumHeight(55)
         menu_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
         menu_layout = QHBoxLayout(menu_container)
-        menu_layout.setContentsMargins(8, 2, 8, 2)
+        menu_layout.setContentsMargins(8, 8, 8, 8)
         menu_layout.setSpacing(4)
         
         # Create custom menu buttons
-        self.create_custom_menu_buttons(menu_layout)
+        self.button_functions.create_custom_menu_buttons(menu_layout)
         
         main_layout.addWidget(menu_container)
         
-        # Header
-        header = self.create_header()
-        main_layout.addWidget(header)
+        # Create a horizontal layout for toolbar and controls
+        top_layout = QHBoxLayout()
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(0)
+        
+        # Professional Icon Toolbar
+        toolbar = self.create_professional_toolbar()
+        top_layout.addWidget(toolbar)
+        
+        # Add spacer to push controls to the right
+        top_layout.addStretch()
+        
+        # Controls Container (Time Window, Hidden Graphs) - Right Side
+        controls_container = self.create_controls_container()
+        top_layout.addWidget(controls_container)
+        
+        # Add the top layout to main layout
+        main_layout.addLayout(top_layout)
         
         # Main Content Area with Scroll
         scroll_area = QScrollArea()
@@ -106,6 +123,13 @@ class SleepSenseDashboard(QMainWindow):
         # Connect dashboard slider to chart navigation updates
         self.monitor_chart.time_position_updated.connect(self.update_slider_position)
         
+        # Set dashboard controls reference in chart
+        self.monitor_chart.set_dashboard_controls(self.time_window_dropdown, self.hidden_graphs_dropdown)
+        
+        # Connect dashboard controls to chart functionality
+        self.time_window_dropdown.currentIndexChanged.connect(self.on_time_window_changed)
+        self.hidden_graphs_dropdown.currentIndexChanged.connect(self.restore_hidden_graph)
+        
         chart_layout.addWidget(self.monitor_chart)
         
         # Add Time Navigation in chart panel (same size as graph containers)
@@ -128,414 +152,110 @@ class SleepSenseDashboard(QMainWindow):
         # Remove margins from main layout to allow full width
         main_layout.setContentsMargins(0, 0, 0, 0)
         
-    def create_header(self):
-        """Create application header"""
-        header = QFrame()
-        header.setObjectName("headerWidget")
-        header.setMinimumHeight(70)
-        header.setMaximumHeight(80)
-        header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    def create_controls_container(self):
+        """Create controls container with Time Window and Hidden Graphs"""
+        controls_container = QFrame()
+        controls_container.setObjectName("controlsContainer")
+        controls_container.setStyleSheet("""
+            QFrame#controlsContainer {
+                background-color: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                padding: 4px;
+                margin: 4px 8px;
+            }
+        """)
+        controls_layout = QHBoxLayout(controls_container)
+        controls_layout.setContentsMargins(8, 4, 8, 4)
+        controls_layout.setSpacing(8)
         
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(24, 8, 24, 8)
-        layout.setSpacing(12)
+        # Time Window Dropdown
+        time_window_label = QLabel("Time Window:")
+        time_window_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        controls_layout.addWidget(time_window_label)
         
-        # Logo and Title
-        logo_layout = QHBoxLayout()
-        logo_layout.setSpacing(12)
+        self.time_window_dropdown = QComboBox()
+        self.time_window_dropdown.setObjectName("timeWindowDropdown")
+        self.time_window_dropdown.setFixedHeight(22)
+        self.time_window_dropdown.setMinimumWidth(60)
         
-        # Logo
-        self.logo_frame = QFrame()
-        self.logo_frame.setObjectName("logoContainer")
-        self.update_logo_size()  # Set initial size based on current window
+        # Add time window options (in seconds)
+        time_windows = [
+            ("10s", 10),
+            ("30s", 30), 
+            ("1m", 60),
+            ("2m", 120),
+            ("5m", 300),
+            ("10m", 600),
+        ]
         
-        # Load DECK MOUNT logo image
-        self.logo_label = QLabel()
-        self.logo_label.setAlignment(Qt.AlignCenter)
+        for label, value in time_windows:
+            self.time_window_dropdown.addItem(label, value)
         
-        # Get the directory where this script is located
-        script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        logo_path = os.path.join(script_dir, "assets", "images", "deck_mount_logo.png")
+        # Set default selection to 1m (index 2)
+        self.time_window_dropdown.setCurrentIndex(2)
         
-        # Store logo path for dynamic updates
-        self.logo_path = logo_path
+        controls_layout.addWidget(self.time_window_dropdown)
         
-        # Load logo with current size
-        self.update_logo_content()
+        # Add vertical divider line
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFrameShadow(QFrame.Sunken)
+        divider.setStyleSheet("""
+            QFrame {
+                background-color: #d1d5db;
+                color: #d1d5db;
+                border: none;
+                margin: 0 4px;
+            }
+        """)
+        divider.setFixedWidth(1)
+        controls_layout.addWidget(divider)
         
-        logo_layout_inner = QVBoxLayout(self.logo_frame)
-        logo_layout_inner.setContentsMargins(0, 0, 0, 0)
-        logo_layout_inner.addWidget(self.logo_label)
-        logo_layout.addWidget(self.logo_frame)
+        # Hidden Graphs Dropdown
+        hidden_graphs_label = QLabel("Hidden Graphs:")
+        hidden_graphs_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        controls_layout.addWidget(hidden_graphs_label)
         
-        # Title and subtitle
-        title_layout = QVBoxLayout()
-        title_layout.setSpacing(0)
+        self.hidden_graphs_dropdown = QComboBox()
+        self.hidden_graphs_dropdown.setObjectName("hiddenGraphsDropdown")
+        self.hidden_graphs_dropdown.setFixedHeight(22)
+        self.hidden_graphs_dropdown.setMinimumWidth(90)
+        self.hidden_graphs_dropdown.addItem("Select to restore...")
+        self.hidden_graphs_dropdown.setEnabled(False)
         
-        title = QLabel("Sleep Sense")
-        title.setObjectName("headerTitle")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #111827;")
-        title_layout.addWidget(title)
+        controls_layout.addWidget(self.hidden_graphs_dropdown)
         
-        subtitle = QLabel("Medical Sleep Monitoring System")
-        subtitle.setObjectName("headerSubtitle")
-        subtitle.setStyleSheet("font-size: 12px; color: #6b7280;")
-        title_layout.addWidget(subtitle)
+        controls_layout.addStretch()
         
-        logo_layout.addLayout(title_layout)
-        layout.addLayout(logo_layout)
-        
-        layout.addStretch()
-        
-        # Status badges
-        # Live Session Badge
-        live_badge = QFrame()
-        live_badge.setObjectName("liveSessionBadge")
-        live_badge.setMinimumWidth(120)
-        live_layout = QVBoxLayout(live_badge)
-        live_layout.setContentsMargins(12, 4, 12, 4)
-        live_layout.setSpacing(0)
-        
-        live_label = QLabel("Live Session")
-        live_label.setObjectName("badgeLabel")
-        live_label.setAlignment(Qt.AlignCenter)
-        live_layout.addWidget(live_label)
-        
-        live_time = QLabel("----")
-        live_time.setObjectName("badgeValue")
-        live_time.setAlignment(Qt.AlignCenter)
-        live_layout.addWidget(live_time)
-        
-        layout.addWidget(live_badge)
-        
-        # Active Status Badge
-        status_badge = QFrame()
-        status_badge.setObjectName("statusActiveBadge")
-        status_badge.setMinimumWidth(100)
-        status_layout = QVBoxLayout(status_badge)
-        status_layout.setContentsMargins(12, 4, 12, 4)
-        status_layout.setSpacing(0)
-        
-        status_label = QLabel("Status")
-        status_label.setObjectName("badgeLabel")
-        status_label.setAlignment(Qt.AlignCenter)
-        status_layout.addWidget(status_label)
-        
-        status_value = QLabel("...")
-        status_value.setObjectName("statusValue")
-        status_value.setAlignment(Qt.AlignCenter)
-        status_layout.addWidget(status_value)
-        
-        layout.addWidget(status_badge)
-        
-        return header
+        return controls_container
     
-    def create_custom_menu_buttons(self, layout):
-        """Create custom menu buttons as clickable buttons instead of system menu bar"""
         
-        # File Menu Button
-        file_btn = QPushButton('File')
-        file_btn.setObjectName("menuButton")
-        file_btn.setMinimumWidth(60)
-        file_btn.clicked.connect(lambda: self.show_menu_popup(file_btn, 'file'))
-        layout.addWidget(file_btn)
-        
-        # Edit Menu Button
-        edit_btn = QPushButton('Edit')
-        edit_btn.setObjectName("menuButton")
-        edit_btn.setMinimumWidth(60)
-        edit_btn.clicked.connect(lambda: self.show_menu_popup(edit_btn, 'edit'))
-        layout.addWidget(edit_btn)
-        
-        # View Menu Button
-        view_btn = QPushButton('View')
-        view_btn.setObjectName("menuButton")
-        view_btn.setMinimumWidth(60)
-        view_btn.clicked.connect(lambda: self.show_menu_popup(view_btn, 'view'))
-        layout.addWidget(view_btn)
-        
-        # Tools Menu Button
-        tools_btn = QPushButton('Tools')
-        tools_btn.setObjectName("menuButton")
-        tools_btn.setMinimumWidth(60)
-        tools_btn.clicked.connect(lambda: self.show_menu_popup(tools_btn, 'tools'))
-        layout.addWidget(tools_btn)
-        
-        # Help Menu Button
-        help_btn = QPushButton('Help')
-        help_btn.setObjectName("menuButton")
-        help_btn.setMinimumWidth(60)
-        help_btn.clicked.connect(lambda: self.show_menu_popup(help_btn, 'help'))
-        layout.addWidget(help_btn)
-        
-        layout.addStretch()
-    
-    def show_menu_popup(self, button, menu_type):
-        """Show popup menu for custom menu buttons"""
-        from PyQt5.QtWidgets import QMenu
-        
-        menu = QMenu(self)
-        
-        if menu_type == 'file':
-            menu.addAction('New', self.file_new, 'Ctrl+N')
-            menu.addAction('Open', self.file_open, 'Ctrl+O')
-            menu.addAction('Save', self.file_save, 'Ctrl+S')
-            menu.addSeparator()
-            menu.addAction('Export Data', self.file_export, 'Ctrl+E')
-            menu.addSeparator()
-            menu.addAction('Exit', self.close, 'Ctrl+Q')
+    def on_time_window_changed(self, index):
+        """Handle time window dropdown change"""
+        if hasattr(self, 'monitor_chart') and self.monitor_chart:
+            # Get the value from dropdown item data
+            seconds = self.time_window_dropdown.itemData(index)
+            print(f"Dashboard: Time window changed to: {self.time_window_dropdown.itemText(index)} ({seconds} seconds)")
             
-        elif menu_type == 'edit':
-            menu.addAction('Undo', self.edit_undo, 'Ctrl+Z')
-            menu.addAction('Redo', self.edit_redo, 'Ctrl+Y')
-            menu.addSeparator()
-            menu.addAction('Copy', self.edit_copy, 'Ctrl+C')
-            menu.addAction('Paste', self.edit_paste, 'Ctrl+V')
+            # Update the chart's time window
+            self.monitor_chart.set_time_window(seconds)
+    
+    def restore_hidden_graph(self, index):
+        """Handle hidden graphs dropdown change"""
+        if hasattr(self, 'monitor_chart') and self.monitor_chart:
+            # Get the graph name from dropdown
+            graph_name = self.hidden_graphs_dropdown.itemText(index)
             
-        elif menu_type == 'view':
-            fullscreen_action = menu.addAction('Fullscreen', self.view_fullscreen, 'F11')
-            fullscreen_action.setCheckable(True)
-            fullscreen_action.setChecked(self.isFullScreen())
-            menu.addSeparator()
-            menu.addAction('Zoom In', self.view_zoom_in, 'Ctrl++')
-            menu.addAction('Zoom Out', self.view_zoom_out, 'Ctrl+-')
-            menu.addAction('Reset Zoom', self.view_reset_zoom, 'Ctrl+0')
+            # Check if graph exists in hidden graphs
+            if graph_name not in self.monitor_chart.hidden_graphs:
+                print(f"Dashboard: Graph '{graph_name}' not found in hidden graphs")
+                return
             
-        elif menu_type == 'tools':
-            menu.addAction('Settings', self.tools_settings, 'Ctrl+,')
-            menu.addSeparator()
-            menu.addAction('Import Data', self.tools_import_data)
-            menu.addAction('Data Analysis', self.tools_data_analysis)
-            menu.addAction('Generate Report', self.tools_generate_report)
+            print(f"Dashboard: Restoring hidden graph '{graph_name}'")
             
-        elif menu_type == 'help':
-            menu.addAction('Documentation', self.help_documentation, 'F1')
-            menu.addAction('About', self.help_about)
-        
-        # Show menu below the button
-        button_rect = button.geometry()
-        menu_pos = button.mapToGlobal(button_rect.bottomLeft())
-        menu.exec_(menu_pos)
-    
-    def create_menu_bar(self):
-        """Create application menu bar with File, Edit, View, Tools, Help menus"""
-        menubar = self.menuBar()
-        
-        # File Menu
-        file_menu = menubar.addMenu('File')
-        
-        new_action = QAction('New', self)
-        new_action.setShortcut('Ctrl+N')
-        new_action.setStatusTip('Create new session')
-        new_action.triggered.connect(self.file_new)
-        file_menu.addAction(new_action)
-        
-        open_action = QAction('Open', self)
-        open_action.setShortcut('Ctrl+O')
-        open_action.setStatusTip('Open existing file')
-        open_action.triggered.connect(self.file_open)
-        file_menu.addAction(open_action)
-        
-        save_action = QAction('Save', self)
-        save_action.setShortcut('Ctrl+S')
-        save_action.setStatusTip('Save current session')
-        save_action.triggered.connect(self.file_save)
-        file_menu.addAction(save_action)
-        
-        file_menu.addSeparator()
-        
-        export_action = QAction('Export Data', self)
-        export_action.setShortcut('Ctrl+E')
-        export_action.setStatusTip('Export monitoring data')
-        export_action.triggered.connect(self.file_export)
-        file_menu.addAction(export_action)
-        
-        file_menu.addSeparator()
-        
-        exit_action = QAction('Exit', self)
-        exit_action.setShortcut('Ctrl+Q')
-        exit_action.setStatusTip('Exit application')
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-        
-        # Edit Menu
-        edit_menu = menubar.addMenu('Edit')
-        
-        undo_action = QAction('Undo', self)
-        undo_action.setShortcut('Ctrl+Z')
-        undo_action.setStatusTip('Undo last action')
-        undo_action.triggered.connect(self.edit_undo)
-        edit_menu.addAction(undo_action)
-        
-        redo_action = QAction('Redo', self)
-        redo_action.setShortcut('Ctrl+Y')
-        redo_action.setStatusTip('Redo last action')
-        redo_action.triggered.connect(self.edit_redo)
-        edit_menu.addAction(redo_action)
-        
-        edit_menu.addSeparator()
-        
-        copy_action = QAction('Copy', self)
-        copy_action.setShortcut('Ctrl+C')
-        copy_action.setStatusTip('Copy selection')
-        copy_action.triggered.connect(self.edit_copy)
-        edit_menu.addAction(copy_action)
-        
-        paste_action = QAction('Paste', self)
-        paste_action.setShortcut('Ctrl+V')
-        paste_action.setStatusTip('Paste from clipboard')
-        paste_action.triggered.connect(self.edit_paste)
-        edit_menu.addAction(paste_action)
-        
-        # View Menu
-        view_menu = menubar.addMenu('View')
-        
-        fullscreen_action = QAction('Fullscreen', self)
-        fullscreen_action.setShortcut('F11')
-        fullscreen_action.setStatusTip('Toggle fullscreen mode')
-        fullscreen_action.setCheckable(True)
-        fullscreen_action.triggered.connect(self.view_fullscreen)
-        view_menu.addAction(fullscreen_action)
-        
-        view_menu.addSeparator()
-        
-        zoom_in_action = QAction('Zoom In', self)
-        zoom_in_action.setShortcut('Ctrl++')
-        zoom_in_action.setStatusTip('Zoom in charts')
-        zoom_in_action.triggered.connect(self.view_zoom_in)
-        view_menu.addAction(zoom_in_action)
-        
-        zoom_out_action = QAction('Zoom Out', self)
-        zoom_out_action.setShortcut('Ctrl+-')
-        zoom_out_action.setStatusTip('Zoom out charts')
-        zoom_out_action.triggered.connect(self.view_zoom_out)
-        view_menu.addAction(zoom_out_action)
-        
-        reset_zoom_action = QAction('Reset Zoom', self)
-        reset_zoom_action.setShortcut('Ctrl+0')
-        reset_zoom_action.setStatusTip('Reset chart zoom')
-        reset_zoom_action.triggered.connect(self.view_reset_zoom)
-        view_menu.addAction(reset_zoom_action)
-        
-        # Tools Menu
-        tools_menu = menubar.addMenu('Tools')
-        
-        settings_action = QAction('Settings', self)
-        settings_action.setShortcut('Ctrl+,')
-        settings_action.setStatusTip('Open application settings')
-        settings_action.triggered.connect(self.tools_settings)
-        tools_menu.addAction(settings_action)
-        
-        tools_menu.addSeparator()
-        
-        data_import_action = QAction('Import Data', self)
-        data_import_action.setStatusTip('Import patient data')
-        data_import_action.triggered.connect(self.tools_import_data)
-        tools_menu.addAction(data_import_action)
-        
-        data_analysis_action = QAction('Data Analysis', self)
-        data_analysis_action.setStatusTip('Open data analysis tools')
-        data_analysis_action.triggered.connect(self.tools_data_analysis)
-        tools_menu.addAction(data_analysis_action)
-        
-        report_generator_action = QAction('Generate Report', self)
-        report_generator_action.setStatusTip('Generate medical report')
-        report_generator_action.triggered.connect(self.tools_generate_report)
-        tools_menu.addAction(report_generator_action)
-        
-        # Help Menu
-        help_menu = menubar.addMenu('Help')
-        
-        documentation_action = QAction('Documentation', self)
-        documentation_action.setShortcut('F1')
-        documentation_action.setStatusTip('Open documentation')
-        documentation_action.triggered.connect(self.help_documentation)
-        help_menu.addAction(documentation_action)
-        
-        about_action = QAction('About', self)
-        about_action.setStatusTip('About Sleep Sense')
-        about_action.triggered.connect(self.help_about)
-        help_menu.addAction(about_action)
-    
-    # File Menu Actions
-    def file_new(self):
-        print("File -> New clicked")
-        # TODO: Implement new session functionality
-    
-    def file_open(self):
-        print("File -> Open clicked")
-        # TODO: Implement file open functionality
-    
-    def file_save(self):
-        print("File -> Save clicked")
-        # TODO: Implement file save functionality
-    
-    def file_export(self):
-        print("File -> Export Data clicked")
-        # TODO: Implement data export functionality
-    
-    # Edit Menu Actions
-    def edit_undo(self):
-        print("Edit -> Undo clicked")
-        # TODO: Implement undo functionality
-    
-    def edit_redo(self):
-        print("Edit -> Redo clicked")
-        # TODO: Implement redo functionality
-    
-    def edit_copy(self):
-        print("Edit -> Copy clicked")
-        # TODO: Implement copy functionality
-    
-    def edit_paste(self):
-        print("Edit -> Paste clicked")
-        # TODO: Implement paste functionality
-    
-    # View Menu Actions
-    def view_fullscreen(self, checked):
-        if checked:
-            self.showFullScreen()
-        else:
-            self.showNormal()
-        print(f"View -> Fullscreen {'enabled' if checked else 'disabled'}")
-    
-    def view_zoom_in(self):
-        print("View -> Zoom In clicked")
-        # TODO: Implement zoom in functionality
-    
-    def view_zoom_out(self):
-        print("View -> Zoom Out clicked")
-        # TODO: Implement zoom out functionality
-    
-    def view_reset_zoom(self):
-        print("View -> Reset Zoom clicked")
-        # TODO: Implement reset zoom functionality
-    
-    # Tools Menu Actions
-    def tools_settings(self):
-        print("Tools -> Settings clicked")
-        # TODO: Implement settings dialog
-    
-    def tools_import_data(self):
-        print("Tools -> Import Data clicked")
-        # TODO: Implement data import functionality
-    
-    def tools_data_analysis(self):
-        print("Tools -> Data Analysis clicked")
-        # TODO: Implement data analysis tools
-    
-    def tools_generate_report(self):
-        print("Tools -> Generate Report clicked")
-        # TODO: Implement report generation
-    
-    # Help Menu Actions
-    def help_documentation(self):
-        print("Help -> Documentation clicked")
-        # TODO: Open documentation
-    
-    def help_about(self):
-        print("Help -> About clicked")
-        # TODO: Show about dialog
+            # Call the chart's restore method
+            self.monitor_chart.restore_hidden_graph(index)
     
     def create_time_slider_bar(self):
         """Create time slider navigation bar with professional styling - same size as graph containers"""
@@ -833,74 +553,173 @@ class SleepSenseDashboard(QMainWindow):
         # Get the directory where this script is located
         script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         qss_file = os.path.join(script_dir, "sleep_sense_medical_white.qss")
+        
+        # Start with toolbar styles
+        stylesheet = get_toolbar_qss_styles()
+        
+        # Add existing stylesheet if it exists
         if os.path.exists(qss_file):
             with open(qss_file, 'r') as f:
-                self.setStyleSheet(f.read())
+                stylesheet += f.read()
         else:
             print(f"Warning: Stylesheet file '{qss_file}' not found!")
+        
+        self.setStyleSheet(stylesheet)
     
-    def update_logo_size(self):
-        """Update logo size based on window dimensions"""
-        if not self.logo_frame:
-            return
-            
-        # Calculate logo size based on window width (adaptive scaling)
-        window_width = self.width()
-        base_size = 64  # Base size for 1200px window
         
-        # Scale factor: larger windows get larger logos
-        if window_width >= 1600:
-            scale_factor = 1.5  # 50% larger for wide screens
-        elif window_width >= 1400:
-            scale_factor = 1.3  # 30% larger
-        elif window_width >= 1200:
-            scale_factor = 1.1  # 10% larger
-        elif window_width >= 1000:
-            scale_factor = 1.0  # Base size
-        else:
-            scale_factor = 0.8  # Smaller for compact windows
+    def create_professional_toolbar(self):
+        """Create professional icon toolbar with grouped buttons"""
+        toolbar = QToolBar("MainToolbar")
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(32, 32))
+        toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        toolbar.setMinimumHeight(50)
         
+        # Get icon definitions
+        icons = get_icon_definitions()
+        script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         
-        # Calculate new size
-        new_size = int(base_size * scale_factor)
-        new_size = max(40, min(new_size, 100))  # Clamp between 40px and 100px
+        # Navigation Group: Previous / Next
+        self.btn_previous = create_toolbar_button(
+            os.path.join(script_dir, icons[0]["icon"]),
+            icons[0]["tooltip"],
+            icons[0]["status_tip"],
+            self.go_to_previous
+        )
+        toolbar.addWidget(self.btn_previous)
         
-        # Apply new size
-        self.logo_frame.setFixedSize(new_size, new_size)
+        self.btn_next = create_toolbar_button(
+            os.path.join(script_dir, icons[1]["icon"]),
+            icons[1]["tooltip"],
+            icons[1]["status_tip"],
+            self.go_to_next
+        )
+        toolbar.addWidget(self.btn_next)
         
-        # Update font size for text fallback
-        font_size = int(new_size * 0.8)  # Font size 80% of container size
-        self.current_font_size = font_size
+        toolbar.addSeparator()
         
-        print(f"Logo size updated to: {new_size}x{new_size}px (font: {font_size}px)")
+        # Device Group: Prepare / Download
+        self.btn_prepare_device = create_toolbar_button(
+            os.path.join(script_dir, icons[2]["icon"]),
+            icons[2]["tooltip"],
+            icons[2]["status_tip"],
+            self.prepare_device
+        )
+        toolbar.addWidget(self.btn_prepare_device)
+        
+        self.btn_download_data = create_toolbar_button(
+            os.path.join(script_dir, icons[3]["icon"]),
+            icons[3]["tooltip"],
+            icons[3]["status_tip"],
+            self.download_data
+        )
+        self.btn_download_data.setEnabled(False)  # Disabled until device connected
+        toolbar.addWidget(self.btn_download_data)
+        
+        toolbar.addSeparator()
+        
+        # Views Group: Signal / Report
+        self.btn_signal_view = create_toolbar_button(
+            os.path.join(script_dir, icons[6]["icon"]),
+            icons[6]["tooltip"],
+            icons[6]["status_tip"],
+            self.open_signal_view
+        )
+        toolbar.addWidget(self.btn_signal_view)
+        
+        self.btn_report_view = create_toolbar_button(
+            os.path.join(script_dir, icons[5]["icon"]),
+            icons[5]["tooltip"],
+            icons[5]["status_tip"],
+            self.open_report_view
+        )
+        toolbar.addWidget(self.btn_report_view)
+        
+        toolbar.addSeparator()
+        
+        # Data Group: Database / Archive
+        self.btn_database = create_toolbar_button(
+            os.path.join(script_dir, icons[4]["icon"]),
+            icons[4]["tooltip"],
+            icons[4]["status_tip"],
+            self.open_database
+        )
+        toolbar.addWidget(self.btn_database)
+        
+        self.btn_archive = create_toolbar_button(
+            os.path.join(script_dir, icons[8]["icon"]),
+            icons[8]["tooltip"],
+            icons[8]["status_tip"],
+            self.open_archive
+        )
+        toolbar.addWidget(self.btn_archive)
+        
+        toolbar.addSeparator()
+        
+        # Event List
+        self.btn_event_list = create_toolbar_button(
+            os.path.join(script_dir, icons[7]["icon"]),
+            icons[7]["tooltip"],
+            icons[7]["status_tip"],
+            self.open_event_list
+        )
+        toolbar.addWidget(self.btn_event_list)
+        
+        return toolbar
     
-    def update_logo_content(self):
-        """Update logo content (image or text) with current size"""
-        if not self.logo_label or not hasattr(self, 'current_font_size'):
-            return
-            
-        # Try to load the logo image
-        if os.path.exists(self.logo_path):
-            pixmap = QPixmap(self.logo_path)
-            if not pixmap.isNull():
-                # Scale image to fit current logo frame size
-                frame_size = self.logo_frame.width()
-                image_size = int(frame_size * 0.9)  # 90% of frame size
-                scaled_pixmap = pixmap.scaled(image_size, image_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.logo_label.setPixmap(scaled_pixmap)
-                self.logo_label.setText("")  # Clear any text
-                return
-        
-        # Fallback to text if image doesn't exist or fails to load
-        self.logo_label.setText("SS")
-        font_size = getattr(self, 'current_font_size', 52)
-        self.logo_label.setStyleSheet(f"font-size: {font_size}px; font-weight: bold; color: #111827;")
+    # Toolbar Button Callback Methods
+    def go_to_previous(self):
+        """Go to previous record/page"""
+        print("Previous button clicked")
+        # TODO: Implement navigation to previous record
     
-    def resizeEvent(self, event):
-        """Handle window resize event to update logo size"""
-        super().resizeEvent(event)
+    def go_to_next(self):
+        """Go to next record/page"""
+        print("Next button clicked")
+        # TODO: Implement navigation to next record
+    
+    def prepare_device(self):
+        """Initialize and connect device"""
+        print("Prepare Device button clicked")
+        # TODO: Implement device preparation logic
+        # Enable download button after device is prepared
+        self.btn_download_data.setEnabled(True)
+    
+    def download_data(self):
+        """Download data from device"""
+        print("Download Data button clicked")
+        # TODO: Implement data download logic
+    
+    def open_database(self):
+        """Open patient database"""
+        print("Database button clicked")
+        self.database_window = DatabaseWindow()
+        self.database_window.show()
+    
+    def open_report_view(self):
+        """View ECG/Sleep reports - Opens Patient Record Form"""
+        print("Report View button clicked")
+        # Import the patient record form
+        from .patient_record_form import PatientRecordForm
         
-        # Update logo size on window resize
-        if self.logo_frame:
-            self.update_logo_size()
-            self.update_logo_content()
+        # Create and show the patient record form
+        self.patient_record_form = PatientRecordForm(self)
+        self.patient_record_form.show()
+    
+    def open_signal_view(self):
+        """View live physiological signals"""
+        print("Signal View button clicked")
+        # TODO: Implement signal view logic
+    
+    def open_event_list(self):
+        """View detected events"""
+        print("Event List button clicked")
+        # TODO: Implement event list logic
+    
+    def open_archive(self):
+        """Access archived records"""
+        print("Archive button clicked")
+        self.archive_window = ArchiveWindow()
+        self.archive_window.show()
+
+    
