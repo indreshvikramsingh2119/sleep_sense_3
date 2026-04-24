@@ -56,8 +56,32 @@ class SleepSenseDashboard(QMainWindow):
         menu_layout.setContentsMargins(8, 2, 8, 2)
         menu_layout.setSpacing(4)
         
-        # Create custom menu buttons
-        self.create_custom_menu_buttons(menu_layout)
+        # Create simple menu buttons
+        self.file_btn = QPushButton('File')
+        self.file_btn.setObjectName("menuButton")
+        self.file_btn.setMinimumWidth(60)
+        self.file_btn.clicked.connect(lambda: self.show_file_menu())
+        menu_layout.addWidget(self.file_btn)
+        
+        self.edit_btn = QPushButton('Edit')
+        self.edit_btn.setObjectName("menuButton")
+        self.edit_btn.setMinimumWidth(60)
+        self.edit_btn.clicked.connect(lambda: self.show_edit_menu())
+        menu_layout.addWidget(self.edit_btn)
+        
+        self.view_btn = QPushButton('View')
+        self.view_btn.setObjectName("menuButton")
+        self.view_btn.setMinimumWidth(60)
+        self.view_btn.clicked.connect(lambda: self.show_view_menu())
+        menu_layout.addWidget(self.view_btn)
+        
+        self.help_btn = QPushButton('Help')
+        self.help_btn.setObjectName("menuButton")
+        self.help_btn.setMinimumWidth(60)
+        self.help_btn.clicked.connect(lambda: self.show_help_menu())
+        menu_layout.addWidget(self.help_btn)
+        
+        menu_layout.addStretch()
         
         main_layout.addWidget(menu_container)
         
@@ -234,271 +258,85 @@ class SleepSenseDashboard(QMainWindow):
         
         return header
     
-    def create_custom_menu_buttons(self, layout):
-        """Create custom menu buttons as clickable buttons instead of system menu bar"""
-        
-        # File Menu Button
-        file_btn = QPushButton('File')
-        file_btn.setObjectName("menuButton")
-        file_btn.setMinimumWidth(60)
-        file_btn.clicked.connect(lambda: self.show_menu_popup(file_btn, 'file'))
-        layout.addWidget(file_btn)
-        
-        # Edit Menu Button
-        edit_btn = QPushButton('Edit')
-        edit_btn.setObjectName("menuButton")
-        edit_btn.setMinimumWidth(60)
-        edit_btn.clicked.connect(lambda: self.show_menu_popup(edit_btn, 'edit'))
-        layout.addWidget(edit_btn)
-        
-        # View Menu Button
-        view_btn = QPushButton('View')
-        view_btn.setObjectName("menuButton")
-        view_btn.setMinimumWidth(60)
-        view_btn.clicked.connect(lambda: self.show_menu_popup(view_btn, 'view'))
-        layout.addWidget(view_btn)
-        
-        # Tools Menu Button
-        tools_btn = QPushButton('Tools')
-        tools_btn.setObjectName("menuButton")
-        tools_btn.setMinimumWidth(60)
-        tools_btn.clicked.connect(lambda: self.show_menu_popup(tools_btn, 'tools'))
-        layout.addWidget(tools_btn)
-        
-        # Help Menu Button
-        help_btn = QPushButton('Help')
-        help_btn.setObjectName("menuButton")
-        help_btn.setMinimumWidth(60)
-        help_btn.clicked.connect(lambda: self.show_menu_popup(help_btn, 'help'))
-        layout.addWidget(help_btn)
-        
-        layout.addStretch()
-    
-    def show_menu_popup(self, button, menu_type):
-        """Show popup menu for custom menu buttons"""
+    def show_file_menu(self):
+        """Show File menu popup"""
         from PyQt5.QtWidgets import QMenu, QApplication
         
         menu = QMenu(self)
+        menu.addAction('Database', self.button_functions.file_database)
+        menu.addAction('Archive', self.button_functions.file_archive)
+        menu.addSeparator()
+        menu.addAction('Save report locally', self.button_functions.file_save_report_locally, 'Ctrl+S')
+        menu.addAction('Print report', self.button_functions.file_print_report, 'Ctrl+P')
+        menu.addAction('Print patient instructions', self.button_functions.file_print_patient_instructions)
+        menu.addSeparator()
+        menu.addAction('View external data', self.button_functions.file_view_external_data)
+        menu.addAction('Duplicate', self.button_functions.file_duplicate, 'Ctrl+D')
+        menu.addSeparator()
+        menu.addAction('Export', self.button_functions.file_export, 'Ctrl+E')
+        menu.addAction('Import recording', self.button_functions.file_import_recording, 'Ctrl+I')
+        menu.addSeparator()
+        menu.addAction('Send report by email', self.button_functions.file_send_report_by_email)
+        menu.addSeparator()
+        menu.addAction('Exit', self.close, 'Ctrl+Q')
         
-        if menu_type == 'file':
-            menu.addAction('Database', self.button_functions.file_database)
-            menu.addAction('Archive', self.button_functions.file_archive)
-            menu.addSeparator()
-            menu.addAction('Save report locally', self.button_functions.file_save_report_locally, 'Ctrl+S')
-            menu.addAction('Print report', self.button_functions.file_print_report, 'Ctrl+P')
-            menu.addAction('Print patient instructions', self.button_functions.file_print_patient_instructions)
-            menu.addSeparator()
-            menu.addAction('View external data', self.button_functions.file_view_external_data)
-            menu.addAction('Duplicate', self.button_functions.file_duplicate, 'Ctrl+D')
-            menu.addSeparator()
-            menu.addAction('Export', self.button_functions.file_export, 'Ctrl+E')
-            menu.addAction('Import recording', self.button_functions.file_import_recording, 'Ctrl+I')
-            menu.addSeparator()
-            menu.addAction('Send report by email', self.button_functions.file_send_report_by_email)
-            menu.addSeparator()
-            menu.addAction('Exit', self.close, 'Ctrl+Q')
-            
-        elif menu_type == 'edit':
-            menu.addAction('Undo', self.button_functions.edit_undo, 'Ctrl+Z')
-            
-        elif menu_type == 'view':
-            menu.addAction('Report view', self.button_functions.view_report_view)
-            menu.addAction('Signal view', self.button_functions.view_signal_view)
-            menu.addAction('Event list', self.button_functions.view_event_list)
-            menu.addAction('Quick start', self.button_functions.view_quick_start)
-            menu.addSeparator()
-            fullscreen_action = menu.addAction('Fullscreen', self.button_functions.view_fullscreen, 'F11')
-            fullscreen_action.setCheckable(True)
-            fullscreen_action.setChecked(self.isFullScreen())
-            menu.addSeparator()
-            menu.addAction('Zoom In', self.button_functions.view_zoom_in, 'Ctrl++')
-            menu.addAction('Zoom Out', self.button_functions.view_zoom_out, 'Ctrl+-')
-            menu.addAction('Reset Zoom', self.button_functions.view_reset_zoom, 'Ctrl+0')
-            
-        elif menu_type == 'tools':
-            menu.addAction('Re-analyze', self.button_functions.tools_reanalyze)
-            menu.addAction('New event group', self.button_functions.tools_new_event_group)
-            menu.addAction('Delete event group', self.button_functions.tools_delete_event_group)
-            menu.addAction('Edit event group', self.button_functions.tools_edit_event_group)
-            menu.addSeparator()
-            menu.addAction('Settings', self.button_functions.tools_settings, 'Ctrl+,')
-            menu.addAction('Send Event Log by email', self.button_functions.tools_send_event_log_by_email)
-            menu.addAction('Database Transfer', self.button_functions.tools_database_transfer)
-            menu.addSeparator()
-            menu.addAction('Import Data', self.button_functions.tools_import_data)
-            menu.addAction('Data Analysis', self.button_functions.tools_data_analysis)
-            menu.addAction('Generate Report', self.button_functions.tools_generate_report)
-            
-        elif menu_type == 'help':
-            menu.addAction('Clinical Guide', self.button_functions.help_clinical_guide)
-            menu.addAction('Patient instructions', self.button_functions.help_patient_instructions)
-            menu.addAction('Program info', self.button_functions.help_program_info)
-            menu.addAction('Recording info', self.button_functions.help_recording_info)
-            menu.addAction('Device info', self.button_functions.help_device_info)
-            menu.addSeparator()
-            menu.addAction('Documentation', self.button_functions.help_documentation, 'F1')
-            menu.addAction('About', self.button_functions.help_about)
-        
-        # Show menu below the button with proper positioning
-        button_rect = button.geometry()
-        menu_pos = button.mapToGlobal(button_rect.bottomLeft())
-        
-        # Adjust position to ensure menu is fully visible
-        screen_geometry = QApplication.desktop().screenGeometry()
-        menu_size = menu.sizeHint()
-        
-        # Check if menu goes below screen and adjust if needed
-        if menu_pos.y() + menu_size.height() > screen_geometry.bottom():
-            menu_pos = button.mapToGlobal(button_rect.topLeft())
-            menu_pos.setY(menu_pos.y() - menu_size.height())
-        
-        # Check if menu goes right of screen and adjust if needed
-        if menu_pos.x() + menu_size.width() > screen_geometry.right():
-            menu_pos.setX(screen_geometry.right() - menu_size.width())
-        
+        # Show menu below button
+        button_rect = self.file_btn.geometry()
+        menu_pos = self.file_btn.mapToGlobal(button_rect.bottomLeft())
         menu.exec_(menu_pos)
     
-    def create_menu_bar(self):
-        """Create application menu bar with File, Edit, View, Tools, Help menus"""
-        menubar = self.menuBar()
+    def show_edit_menu(self):
+        """Show Edit menu popup"""
+        from PyQt5.QtWidgets import QMenu
         
-        # File Menu
-        file_menu = menubar.addMenu('File')
+        menu = QMenu(self)
+        menu.addAction('Undo', self.button_functions.edit_undo, 'Ctrl+Z')
         
-        new_action = QAction('New', self)
-        new_action.setShortcut('Ctrl+N')
-        new_action.setStatusTip('Create new session')
-        new_action.triggered.connect(self.file_new)
-        file_menu.addAction(new_action)
-        
-        open_action = QAction('Open', self)
-        open_action.setShortcut('Ctrl+O')
-        open_action.setStatusTip('Open existing file')
-        open_action.triggered.connect(self.file_open)
-        file_menu.addAction(open_action)
-        
-        save_action = QAction('Save', self)
-        save_action.setShortcut('Ctrl+S')
-        save_action.setStatusTip('Save current session')
-        save_action.triggered.connect(self.file_save)
-        file_menu.addAction(save_action)
-        
-        file_menu.addSeparator()
-        
-        export_action = QAction('Export Data', self)
-        export_action.setShortcut('Ctrl+E')
-        export_action.setStatusTip('Export monitoring data')
-        export_action.triggered.connect(self.file_export)
-        file_menu.addAction(export_action)
-        
-        file_menu.addSeparator()
-        
-        exit_action = QAction('Exit', self)
-        exit_action.setShortcut('Ctrl+Q')
-        exit_action.setStatusTip('Exit application')
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-        
-        # Edit Menu
-        edit_menu = menubar.addMenu('Edit')
-        
-        undo_action = QAction('Undo', self)
-        undo_action.setShortcut('Ctrl+Z')
-        undo_action.setStatusTip('Undo last action')
-        undo_action.triggered.connect(self.edit_undo)
-        edit_menu.addAction(undo_action)
-        
-        redo_action = QAction('Redo', self)
-        redo_action.setShortcut('Ctrl+Y')
-        redo_action.setStatusTip('Redo last action')
-        redo_action.triggered.connect(self.edit_redo)
-        edit_menu.addAction(redo_action)
-        
-        edit_menu.addSeparator()
-        
-        copy_action = QAction('Copy', self)
-        copy_action.setShortcut('Ctrl+C')
-        copy_action.setStatusTip('Copy selection')
-        copy_action.triggered.connect(self.edit_copy)
-        edit_menu.addAction(copy_action)
-        
-        paste_action = QAction('Paste', self)
-        paste_action.setShortcut('Ctrl+V')
-        paste_action.setStatusTip('Paste from clipboard')
-        paste_action.triggered.connect(self.edit_paste)
-        edit_menu.addAction(paste_action)
-        
-        # View Menu
-        view_menu = menubar.addMenu('View')
-        
-        fullscreen_action = QAction('Fullscreen', self)
-        fullscreen_action.setShortcut('F11')
-        fullscreen_action.setStatusTip('Toggle fullscreen mode')
-        fullscreen_action.setCheckable(True)
-        fullscreen_action.triggered.connect(self.view_fullscreen)
-        view_menu.addAction(fullscreen_action)
-        
-        view_menu.addSeparator()
-        
-        zoom_in_action = QAction('Zoom In', self)
-        zoom_in_action.setShortcut('Ctrl++')
-        zoom_in_action.setStatusTip('Zoom in charts')
-        zoom_in_action.triggered.connect(self.view_zoom_in)
-        view_menu.addAction(zoom_in_action)
-        
-        zoom_out_action = QAction('Zoom Out', self)
-        zoom_out_action.setShortcut('Ctrl+-')
-        zoom_out_action.setStatusTip('Zoom out charts')
-        zoom_out_action.triggered.connect(self.view_zoom_out)
-        view_menu.addAction(zoom_out_action)
-        
-        reset_zoom_action = QAction('Reset Zoom', self)
-        reset_zoom_action.setShortcut('Ctrl+0')
-        reset_zoom_action.setStatusTip('Reset chart zoom')
-        reset_zoom_action.triggered.connect(self.view_reset_zoom)
-        view_menu.addAction(reset_zoom_action)
-        
-        # Tools Menu
-        tools_menu = menubar.addMenu('Tools')
-        
-        settings_action = QAction('Settings', self)
-        settings_action.setShortcut('Ctrl+,')
-        settings_action.setStatusTip('Open application settings')
-        settings_action.triggered.connect(self.tools_settings)
-        tools_menu.addAction(settings_action)
-        
-        tools_menu.addSeparator()
-        
-        data_import_action = QAction('Import Data', self)
-        data_import_action.setStatusTip('Import patient data')
-        data_import_action.triggered.connect(self.tools_import_data)
-        tools_menu.addAction(data_import_action)
-        
-        data_analysis_action = QAction('Data Analysis', self)
-        data_analysis_action.setStatusTip('Open data analysis tools')
-        data_analysis_action.triggered.connect(self.tools_data_analysis)
-        tools_menu.addAction(data_analysis_action)
-        
-        report_generator_action = QAction('Generate Report', self)
-        report_generator_action.setStatusTip('Generate medical report')
-        report_generator_action.triggered.connect(self.tools_generate_report)
-        tools_menu.addAction(report_generator_action)
-        
-        # Help Menu
-        help_menu = menubar.addMenu('Help')
-        
-        documentation_action = QAction('Documentation', self)
-        documentation_action.setShortcut('F1')
-        documentation_action.setStatusTip('Open documentation')
-        documentation_action.triggered.connect(self.help_documentation)
-        help_menu.addAction(documentation_action)
-        
-        about_action = QAction('About', self)
-        about_action.setStatusTip('About Sleep Sense')
-        about_action.triggered.connect(self.help_about)
-        help_menu.addAction(about_action)
+        # Show menu below button
+        button_rect = self.edit_btn.geometry()
+        menu_pos = self.edit_btn.mapToGlobal(button_rect.bottomLeft())
+        menu.exec_(menu_pos)
     
+    def show_view_menu(self):
+        """Show View menu popup"""
+        from PyQt5.QtWidgets import QMenu
         
+        menu = QMenu(self)
+        menu.addAction('Report view', self.button_functions.view_report_view)
+        menu.addAction('Signal view', self.button_functions.view_signal_view)
+        menu.addAction('Event list', self.button_functions.view_event_list)
+        menu.addAction('Quick start', self.button_functions.view_quick_start)
+        menu.addSeparator()
+        menu.addAction('Fullscreen', self.button_functions.view_fullscreen, 'F11')
+        menu.addSeparator()
+        menu.addAction('Zoom In', self.button_functions.view_zoom_in, 'Ctrl++')
+        menu.addAction('Zoom Out', self.button_functions.view_zoom_out, 'Ctrl+-')
+        menu.addAction('Reset Zoom', self.button_functions.view_reset_zoom, 'Ctrl+0')
+        
+        # Show menu below button
+        button_rect = view_btn.geometry()
+        menu_pos = view_btn.mapToGlobal(button_rect.bottomLeft())
+        menu.exec_(menu_pos)
+    
+    def show_help_menu(self):
+        """Show Help menu popup"""
+        from PyQt5.QtWidgets import QMenu
+        
+        menu = QMenu(self)
+        menu.addAction('Clinical Guide', self.button_functions.help_clinical_guide)
+        menu.addAction('Patient instructions', self.button_functions.help_patient_instructions)
+        menu.addAction('Program info', self.button_functions.help_program_info)
+        menu.addAction('Recording info', self.button_functions.help_recording_info)
+        menu.addAction('Device info', self.button_functions.help_device_info)
+        menu.addSeparator()
+        menu.addAction('Documentation', self.button_functions.help_documentation, 'F1')
+        menu.addAction('About', self.button_functions.help_about)
+        
+        # Show menu below button
+        button_rect = help_btn.geometry()
+        menu_pos = help_btn.mapToGlobal(button_rect.bottomLeft())
+        menu.exec_(menu_pos)
+    
     def create_time_slider_bar(self):
         """Create time slider navigation bar with professional styling - same size as graph containers"""
         # Main container with same styling as graph containers

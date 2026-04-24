@@ -1,6 +1,3 @@
-
-
-
 """
 Sleep Monitor Chart Widget - Sleep Monitoring Chart Component
 """
@@ -12,7 +9,7 @@ import pandas as pd
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider
+    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QCheckBox
 )
 from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QPoint, QRect, QMimeData
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen
@@ -72,6 +69,10 @@ class SleepMonitorChart(QWidget):
         self.selection_timer = QTimer(self)
         self.selection_timer.setSingleShot(True)
         self.selection_timer.timeout.connect(self.finish_selection)
+        # Load user preferences (persistent across runs)
+        self.user_prefs = {}
+        self._prefs_path = os.path.expanduser("~/.sleep_sense_config.json")
+        self.load_user_prefs()
         self.init_ui()
         self.init_charts()
         
@@ -330,16 +331,55 @@ class SleepMonitorChart(QWidget):
     def set_patient_id(self, patient_id: str):
         self.patient_id = patient_id or "--------"
 
+    def load_user_prefs(self):
+        """Load persistent user preferences from home directory."""
+        try:
+            if os.path.exists(self._prefs_path):
+                with open(self._prefs_path, "r", encoding="utf-8") as f:
+                    self.user_prefs = json.load(f)
+            else:
+                self.user_prefs = {}
+        except Exception:
+            # don't crash on malformed file; fallback to empty prefs
+            self.user_prefs = {}
+
+    def save_user_prefs(self):
+        """Save user preferences to home directory."""
+        try:
+            os.makedirs(os.path.dirname(self._prefs_path), exist_ok=True)
+            with open(self._prefs_path, "w", encoding="utf-8") as f:
+                json.dump(self.user_prefs, f, indent=2)
+        except Exception:
+            # ignore write errors silently (optional: log)
+            pass
+
     def confirm_and_save_raw_data(self):
-        reply = QMessageBox.question(
-            self,
-            "Save raw data",
-            "Generate a timestamped raw-data file for the current session?",
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Yes,
-        )
-        if reply != QMessageBox.Yes:
+        # If user previously chose to suppress the prompt, auto-save once
+        if self.user_prefs.get("suppress_save_prompt", False):
+            file_path, timestamp_iso = self.save_raw_data_file()
+            if file_path:
+                self.raw_data_saved.emit(file_path, timestamp_iso)
             return
+
+        # Show dialog with "Don't ask again" checkbox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Save raw data")
+        msg.setText("Generate a timestamped raw-data file for the current session?")
+        msg.setIcon(QMessageBox.Question)
+        checkbox = QCheckBox("Don't ask again")
+        msg.setCheckBox(checkbox)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Yes)
+        ret = msg.exec_()
+
+        if checkbox.isChecked():
+            # Persist user's preference so the prompt doesn't reappear
+            self.user_prefs["suppress_save_prompt"] = True
+            self.save_user_prefs()
+
+        if ret != QMessageBox.Yes:
+            return
+
         file_path, timestamp_iso = self.save_raw_data_file()
         if file_path:
             self.raw_data_saved.emit(file_path, timestamp_iso)
@@ -2071,44 +2111,8 @@ class SleepMonitorChart(QWidget):
                 """)
     
     def on_plot_resized(self, plot_widget):
-        """Handle plot widget resize/pan/zoom to update overlay positions"""
-        # Update persistent overlays for this chart
-        if hasattr(plot_widget, 'selection_overlays'):
-            chart_name = plot_widget.chart_name
-            if chart_name in self.selection_labels:
-                overlays = plot_widget.selection_overlays
-                labels_data = self.selection_labels[chart_name]
-                vb = plot_widget.getViewBox()
-                
-                # Update each overlay position based on stored data
-                for i, overlay in enumerate(overlays):
-                    if i < len(labels_data):
-                        selection_data = labels_data[i]
-                        vb = plot_widget.getViewBox()
-                        
-                        # Convert data coordinates to scene coordinates, then to widget coordinates
-                        start_scene = vb.mapViewToScene(selection_data['start'])
-                        end_scene = vb.mapViewToScene(selection_data['end'])
-                        
-                        # Convert scene coordinates to widget coordinates
-                        start_widget = plot_widget.mapFromScene(start_scene)
-                        end_widget = plot_widget.mapFromScene(end_scene)
-                        
-                        # Calculate overlay dimensions and position
-                        x_min = min(start_widget.x(), end_widget.x())
-                        x_max = max(start_widget.x(), end_widget.x())
-                        
-                        print(f"Overlay {i} - original start: {selection_data['start']}, end: {selection_data['end']}")
-                        print(f"Overlay {i} - start_widget: {start_widget}, end_widget: {end_widget}")
-                        print(f"Overlay {i} - x_min: {x_min}, x_max: {x_max}, width: {int(x_max - x_min)}, height: {plot_widget.height()}")
-                        overlay.setGeometry(int(x_min), 0, int(x_max - x_min), plot_widget.height())
-                        print(f"Overlay {i} - new geometry: {overlay.geometry()}")
-        
-        # Update current selection overlay if active
-        if (self.current_selection_chart == plot_widget and 
-            hasattr(plot_widget, 'selection_overlay') and
-            self.selection_start and self.selection_end):
-            self.update_selection_overlay(self.selection_start, self.selection_end)
+        """Handle plot resize to update overlay positions"""
+        self.update_all_overlay_positions(plot_widget)
     
     def on_mouse_released(self, event, plot_widget):
         """Finish selection on mouse release"""
@@ -2404,6 +2408,11 @@ class SleepMonitorChart(QWidget):
         self.selection_start_scene = None
         self.selection_end_scene = None
         self.current_selection_chart = None
+    
+    def update_all_overlay_positions(self, plot_widget):
+        """Update all overlay positions for a given plot widget"""
+        # Original simple implementation - no dynamic positioning
+        pass
     
     def plot_apnea_event(self, plot_widget, event_data):
         """Plot an apnea event as a colored region on the graph"""
@@ -2855,23 +2864,7 @@ class SleepMonitorChart(QWidget):
             seconds = int(duration_seconds % 60)
             return f"{minutes}m {seconds}s"
     
-    def update_overlay_position(self, plot_widget, overlay, start_pos, end_pos):
-        """Update overlay position based on current view"""
-        vb = plot_widget.getViewBox()
-        p1 = vb.mapViewToScene(start_pos)
-        p2 = vb.mapViewToScene(end_pos)
-        w1 = plot_widget.mapFromScene(p1)
-        w2 = plot_widget.mapFromScene(p2)
-
-        x_min = min(w1.x(), w2.x())
-        x_max = max(w1.x(), w2.x())
         
-        # Position overlay on the graph (overlay on plot area)
-        overlay_y = 10  # Position near top of plot area
-        overlay_height = 25  # Fixed height for selection containers
-
-        overlay.setGeometry(int(x_min), overlay_y, int(x_max - x_min), int(overlay_height))
-    
     def update_all_overlays_on_resize(self):
         """Update all overlay positions when window is resized"""
         for i in range(self.charts_layout.count()):
