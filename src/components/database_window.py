@@ -4,7 +4,7 @@ Replicates the database interface shown in the reference image
 """
 
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QFrame, QSplitter, QGroupBox, QLineEdit, QCheckBox,
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
     QToolBar, QSizePolicy
@@ -13,21 +13,21 @@ from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont
 
 
-class DatabaseWindow(QMainWindow):
+class DatabaseWindow(QDialog):
     """Patient Database Window matching the reference image design"""
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowTitle("Patient Database")
+        self.setFixedSize(1200, 800)
         self.init_ui()
         self.load_sample_data()
         
     def init_ui(self):
-        self.setWindowTitle("Patient Database")
-        self.setGeometry(100, 100, 1200, 800)
-        
         # Apply medical theme
         self.setStyleSheet("""
-            QMainWindow {
+            QDialog {
                 background-color: #f8f9fa;
             }
             QWidget {
@@ -37,12 +37,8 @@ class DatabaseWindow(QMainWindow):
             }
         """)
         
-        # Central Widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        
         # Main Layout
-        main_layout = QVBoxLayout(central_widget)
+        main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(12)
         
@@ -72,7 +68,7 @@ class DatabaseWindow(QMainWindow):
         
         main_layout.addWidget(content_splitter)
         
-        # Bottom toolbar
+        # Bottom toolbar with Cancel button
         toolbar = self.create_bottom_toolbar()
         main_layout.addWidget(toolbar)
         
@@ -411,6 +407,7 @@ class DatabaseWindow(QMainWindow):
         self.selection_btn = QPushButton("Selection")
         self.view_btn = QPushButton("View")
         self.delete_btn = QPushButton("Delete")
+        self.cancel_btn = QPushButton("Cancel")
         
         # Style buttons with professional medical look
         button_style = """
@@ -452,14 +449,36 @@ class DatabaseWindow(QMainWindow):
             }
         """
         
+        # Special styling for cancel button
+        cancel_style = """
+            QPushButton {
+                background-color: #95a5a6;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 20px;
+                font-weight: 600;
+                font-size: 13px;
+                min-width: 90px;
+            }
+            QPushButton:hover {
+                background-color: #7f8c8d;
+            }
+            QPushButton:pressed {
+                background-color: #6c7a7b;
+            }
+        """
+        
         self.selection_btn.setStyleSheet(button_style)
         self.view_btn.setStyleSheet(button_style)
         self.delete_btn.setStyleSheet(delete_style)
+        self.cancel_btn.setStyleSheet(cancel_style)
         
         # Add buttons to layout
         layout.addWidget(self.selection_btn)
         layout.addWidget(self.view_btn)
         layout.addWidget(self.delete_btn)
+        layout.addWidget(self.cancel_btn)
         
         return toolbar
         
@@ -521,6 +540,7 @@ class DatabaseWindow(QMainWindow):
         self.selection_btn.clicked.connect(self.handle_selection)
         self.view_btn.clicked.connect(self.handle_view)
         self.delete_btn.clicked.connect(self.handle_delete)
+        self.cancel_btn.clicked.connect(self.reject)  # Close dialog
         
     def filter_patients(self):
         """Filter patients table based on search criteria"""

@@ -16,7 +16,7 @@ from .sleep_monitor_chart import SleepMonitorChart
 from .database_window import DatabaseWindow
 from .archive_window import ArchiveWindow
 from ..utils.toolbar_utils import create_toolbar_button, get_icon_definitions, get_toolbar_qss_styles
-from ..utils.button_functions import ButtonFunctions
+from src.utils.button_functions import ButtonFunctions
 
 
 class SleepSenseDashboard(QMainWindow):
@@ -27,6 +27,7 @@ class SleepSenseDashboard(QMainWindow):
         super().__init__()
         self.logo_frame = None
         self.logo_label = None
+        # create ButtonFunctions helper and attach to dashboard
         self.button_functions = ButtonFunctions(self)
         self.init_ui()
         self.load_stylesheet()
@@ -505,7 +506,7 @@ class SleepSenseDashboard(QMainWindow):
     def on_slider_changed(self, value):
         """Handle slider value change"""
         if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
-            # Calculate maximum possible time based on data length
+            # Calculate maximum time based on data length
             max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  # 10 samples per second
             
             if max_duration > self.monitor_chart.current_time_window:
@@ -691,20 +692,20 @@ class SleepSenseDashboard(QMainWindow):
         # TODO: Implement data download logic
     
     def open_database(self):
-        """Open patient database"""
+        """Open patient database as modal dialog"""
         print("Database button clicked")
-        self.database_window = DatabaseWindow()
-        self.database_window.show()
+        self.database_window = DatabaseWindow(self)
+        self.database_window.exec_()  # Modal dialog
     
     def open_report_view(self):
-        """View ECG/Sleep reports - Opens Patient Record Form"""
+        """View ECG/Sleep reports - Opens Patient Record Form as modal dialog"""
         print("Report View button clicked")
         # Import the patient record form
         from .patient_record_form import PatientRecordForm
         
-        # Create and show the patient record form
+        # Create and show the patient record form as modal dialog
         self.patient_record_form = PatientRecordForm(self)
-        self.patient_record_form.show()
+        self.patient_record_form.exec_()  # Modal dialog
     
     def open_signal_view(self):
         """View live physiological signals"""
@@ -717,9 +718,63 @@ class SleepSenseDashboard(QMainWindow):
         # TODO: Implement event list logic
     
     def open_archive(self):
-        """Access archived records"""
+        """Access archived records as modal dialog"""
         print("Archive button clicked")
-        self.archive_window = ArchiveWindow()
-        self.archive_window.show()
-
+        self.archive_window = ArchiveWindow(self)
+        self.archive_window.exec_()  # Modal dialog
     
+    def create_menubar(self):
+        """Create menubar with File and View menus"""
+        menubar = self.menuBar()
+        menubar.setObjectName("mainMenuBar")
+        
+        # File menu
+        file_menu = menubar.addMenu('File')
+        
+        # View menu and wire to handlers in button_functions
+        view_menu = menubar.addMenu('View')
+
+        fullscreen_action = QAction('Fullscreen', self)
+        fullscreen_action.setCheckable(True)
+        fullscreen_action.setStatusTip('Toggle fullscreen')
+        fullscreen_action.triggered.connect(self.button_functions.view_fullscreen)
+        view_menu.addAction(fullscreen_action)
+
+        view_menu.addSeparator()
+
+        zoom_in_action = QAction('Zoom In', self)
+        zoom_in_action.setShortcut('Ctrl++')
+        zoom_in_action.triggered.connect(self.button_functions.view_zoom_in)
+        view_menu.addAction(zoom_in_action)
+
+        zoom_out_action = QAction('Zoom Out', self)
+        zoom_out_action.setShortcut('Ctrl+-')
+        zoom_out_action.triggered.connect(self.button_functions.view_zoom_out)
+        view_menu.addAction(zoom_out_action)
+
+        reset_zoom_action = QAction('Reset Zoom', self)
+        reset_zoom_action.setShortcut('Ctrl+0')
+        reset_zoom_action.triggered.connect(self.button_functions.view_reset_zoom)
+        view_menu.addAction(reset_zoom_action)
+
+        view_menu.addSeparator()
+
+        report_view_action = QAction('Report view', self)
+        report_view_action.triggered.connect(self.button_functions.view_report_view)
+        view_menu.addAction(report_view_action)
+
+        signal_view_action = QAction('Signal view', self)
+        signal_view_action.triggered.connect(self.button_functions.view_signal_view)
+        view_menu.addAction(signal_view_action)
+
+        event_list_action = QAction('Event list', self)
+        event_list_action.triggered.connect(self.button_functions.view_event_list)
+        view_menu.addAction(event_list_action)
+
+        quick_start_action = QAction('Quick start', self)
+        quick_start_action.triggered.connect(self.button_functions.view_quick_start)
+        view_menu.addAction(quick_start_action)
+        
+        return menubar
+
+
