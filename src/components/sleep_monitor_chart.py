@@ -2122,8 +2122,48 @@ class SleepMonitorChart(QWidget):
         if plot_width <= 0:
             return
         
-        # Use the existing update_overlay_position function for consistent positioning
-        self.update_overlay_position(self.current_selection_chart, overlay, start_pos, end_pos)
+# Get current view range to calculate proportional position
+        view_range = vb.viewRange()
+        x_min_range, x_max_range = view_range[0]
+        
+        # Convert scene coordinates to widget coordinates
+        start_widget = self.current_selection_chart.mapFromScene(start_scene)
+        end_widget = self.current_selection_chart.mapFromScene(end_scene)
+        
+        # Map data coordinates to view coordinates proportionally
+        total_range = x_max_range - x_min_range
+        if total_range > 0:
+            start_prop = (start_x - x_min_range) / total_range
+            end_prop = (end_x - x_min_range) / total_range
+        else:
+            start_prop = 0
+            end_prop = 1
+        
+        # Clamp proportions to [0, 1]
+        start_prop = max(0, min(1, start_prop))
+        end_prop = max(0, min(1, end_prop))
+        
+        # Convert to widget coordinates within the actual plot area
+        x_min = plot_left + min(start_prop, end_prop) * plot_width
+        x_max = plot_left + max(start_prop, end_prop) * plot_width
+        width = x_max - x_min
+        
+        # Ensure minimum width
+        if width < 30:
+            width = 30
+        
+        print(f"update_selection_overlay - Chart: {self.current_selection_chart.chart_name}")
+        print(f"update_selection_overlay - Data coords: start={start_x}, end={end_x}")
+        print(f"update_selection_overlay - View range: {x_min_range} to {x_max_range}")
+        print(f"update_selection_overlay - Plot bounds: left={plot_left:.1f}, right={plot_right:.1f}, width={plot_width:.1f}")
+        print(f"update_selection_overlay - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
+        print(f"update_selection_overlay - Widget coords: x_min={x_min:.1f}, x_max={x_max:.1f}, width={width:.1f}")
+        
+        # Position overlay on the graph (overlay on plot area)
+        overlay_y = 10  # Position near top of plot area
+        overlay_height = 25
+        
+        overlay.setGeometry(int(x_min), overlay_y, int(width), overlay_height)
         overlay.setVisible(True)
         overlay.raise_()  # Ensure overlay is on top
         overlay.setText("Selecting...")
@@ -2574,7 +2614,6 @@ class SleepMonitorChart(QWidget):
                 plot_widget.dynamic_overlays.clear()
             else:
                 plot_widget.dynamic_overlays = []
-                
 
             # Create dynamic overlays for selections visible in current time window
             current_start_time = self.current_time_offset

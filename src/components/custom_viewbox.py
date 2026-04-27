@@ -9,6 +9,7 @@ from PyQt5.QtCore import pyqtSignal
 class CustomViewBox(pg.ViewBox):
     """ViewBox with sigMouseReleased signal"""
     sigMouseReleased = pyqtSignal(object)
+    sigViewChanged = pyqtSignal()
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -49,6 +50,9 @@ class CustomViewBox(pg.ViewBox):
         except TypeError:
             # Handle older pyqtgraph versions
             super().setRange(rect, padding=padding, update=update, **kwargs)
+        
+        # Emit view changed signal for real-time selection updates
+        self.sigViewChanged.emit()
     
     def mouseReleaseEvent(self, event):
         """Emit signal on mouse release"""
