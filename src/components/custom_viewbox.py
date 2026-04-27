@@ -3,13 +3,12 @@ Custom ViewBox with mouse release signal for drag selection
 """
 
 import pyqtgraph as pg
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import pyqtSignal, QRectF
 
 
 class CustomViewBox(pg.ViewBox):
     """ViewBox with sigMouseReleased signal"""
     sigMouseReleased = pyqtSignal(object)
-    sigViewChanged = pyqtSignal()
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -22,37 +21,32 @@ class CustomViewBox(pg.ViewBox):
         self.time_window_max = max_val
     
     def viewRange(self):
-        """Override to enforce time window limits"""
+        """Override to enforce fixed time window limits"""
         range_val = super().viewRange()
         x_range, y_range = range_val
         
-        # Enforce X-axis limits
-        if x_range[0] < self.time_window_min:
-            x_range[0] = self.time_window_min
-        if x_range[1] > self.time_window_max:
-            x_range[1] = self.time_window_max
+        # Force X-axis to be exactly the limits
+        forced_x_range = [self.time_window_min, self.time_window_max]
         
-        return [x_range, y_range]
+        return [forced_x_range, y_range]
     
     def setRange(self, rect=None, padding=0.02, update=True, disableAutoRange=True, **kwargs):
         """Override setRange to enforce time window limits"""
         if rect is None:
             rect = self.viewRect()
         
-        # Enforce X-axis limits
-        if rect.left() < self.time_window_min:
-            rect.setLeft(self.time_window_min)
-        if rect.right() > self.time_window_max:
-            rect.setRight(self.time_window_max)
+        # Force X-axis to stay within limits
+        current_width = rect.width()
+        
+        # Always force the range to be exactly the limits
+        forced_rect = QRectF(self.time_window_min, rect.top(), 
+                             self.time_window_max - self.time_window_min, rect.height())
         
         try:
-            super().setRange(rect, padding=padding, update=update, disableAutoRange=disableAutoRange, **kwargs)
+            super().setRange(forced_rect, padding=0, update=update, disableAutoRange=disableAutoRange, **kwargs)
         except TypeError:
             # Handle older pyqtgraph versions
-            super().setRange(rect, padding=padding, update=update, **kwargs)
-        
-        # Emit view changed signal for real-time selection updates
-        self.sigViewChanged.emit()
+            super().setRange(forced_rect, padding=0, update=update, **kwargs)
     
     def mouseReleaseEvent(self, event):
         """Emit signal on mouse release"""

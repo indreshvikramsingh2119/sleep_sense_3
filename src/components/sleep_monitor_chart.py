@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider
 )
-from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QPoint, QRect, QMimeData
+from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QPoint, QRect, QMimeData, QPointF
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen
 import pyqtgraph as pg
 from .custom_viewbox import CustomViewBox
@@ -41,6 +41,11 @@ class SleepMonitorChart(QWidget):
         self.manual_drag_graph_name = None  # Track manually dragging graph name
         self.manual_drag_start_height = None  # Store original height during manual drag
         self.manual_drag_start_y = None  # Store starting Y position during manual drag
+        
+        # Timer to enforce fixed X-axis range
+        self.range_enforcement_timer = QTimer()
+        self.range_enforcement_timer.timeout.connect(self.enforce_fixed_ranges)
+        self.range_enforcement_timer.start(100)  # Check every 100ms
         
         # Time window data management
         self.spo2_full_data = None  # Store full SpO2 data (time, spo2)
@@ -91,7 +96,7 @@ class SleepMonitorChart(QWidget):
     def scroll_down(self):
         """Scroll down by a fixed amount"""
         if hasattr(self, 'scroll_area'):
-            scrollbar = self.scroll_area.verticalScrollBar() 
+            scrollbar = self.scroll_area.verticalScrollBar()
             current_value = scrollbar.value()
             max_value = scrollbar.maximum()
             new_value = min(max_value, current_value + 100)  # Scroll down by 100 pixels
@@ -378,17 +383,31 @@ class SleepMonitorChart(QWidget):
                 plot_widget = container.plot_widget
                 chart_name = plot_widget.chart_name
                 
-                # Update time window limits on CustomViewBox with offset
+                # Update time window limits on CustomViewBox to fixed range
                 vb = plot_widget.getViewBox()
                 if hasattr(vb, 'set_time_window_limits'):
-                    vb.set_time_window_limits(self.current_time_offset, self.current_time_offset + self.current_time_window)
+                    vb.set_time_window_limits(0, self.current_time_window)
+                    print(f"Debug: ViewBox limits set to 0 → {self.current_time_window}, offset={self.current_time_offset}")
                 
-                # Update X-axis range to show current time window
-                plot_widget.setXRange(0, self.current_time_window)
+                # Force X-axis range to be fixed (prevent any sliding)
+                plot_widget.setXRange(0, self.current_time_window, padding=0)
                 
                 # Update bottom axis to show correct time ticks for new window
                 bottom_axis = plot_widget.getAxis('bottom')
                 bottom_axis.setRange(0, self.current_time_window)
+                
+                # Double-enforce the X-axis range to prevent any sliding
+                vb = plot_widget.getViewBox()
+                if hasattr(vb, 'setRange'):
+                    try:
+                        # Force the exact range with no padding
+                        vb.setRange(x=[0, self.current_time_window], padding=0)
+                    except:
+                        # Fallback method
+                        plot_widget.setXRange(0, self.current_time_window, padding=0)
+                
+                # Store reference for enforcement timer
+                plot_widget.fixed_range = [0, self.current_time_window]
                 
                 # Update data for each chart
                 if chart_name.strip() == "SpO2":
@@ -1088,8 +1107,8 @@ class SleepMonitorChart(QWidget):
             # Try alternative method for older pyqtgraph versions
             plot_widget.setRange(yRange=[y_min, y_max])
         
-        # Restrict zoom to X-axis only (time-based zoom)
-        plot_widget.setMouseEnabled(x=True, y=False)
+        # Restrict zoom to Y-axis only (amplitude zoom) - disable X-axis to prevent sliding
+        plot_widget.setMouseEnabled(x=False, y=True)
         
         # Disable auto-range and set fixed limits
         plot_widget.enableAutoRange(axis='y', enable=False)
@@ -1127,12 +1146,9 @@ class SleepMonitorChart(QWidget):
         # Set time window limits on CustomViewBox to enforce zoom constraints
         vb = plot_widget.getViewBox()
         if hasattr(vb, 'set_time_window_limits'):
-            vb.set_time_window_limits(self.current_time_offset, self.current_time_offset + self.current_time_window)
-            
-        # Connect view change signal to update dynamic overlays
-        vb.sigRangeChanged.connect(lambda: self.update_dynamic_overlay_positions(plot_widget))
+            vb.set_time_window_limits(0, self.current_time_window)
         
-        plot_widget.setMouseEnabled(x=True, y=False)
+        plot_widget.setMouseEnabled(x=False, y=True)
         plot_widget.hideButtons()  # Hide the 'A' button
         
         # Center the plot widget in its container
@@ -1146,7 +1162,6 @@ class SleepMonitorChart(QWidget):
                 base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 csv_path = os.path.join(base_dir, "extracted_data", "spo2_6hr_10Hz_data (1).csv")
                 print(f"Loading SpO2 data from: {csv_path}")
-                
                 self.load_spo2_data(csv_path)
             
             # Get filtered data for current time window
@@ -1156,7 +1171,7 @@ class SleepMonitorChart(QWidget):
             if len(x) == 0:
                 print("Falling back to simulated SpO2 data")
                 time_points = 1000
-                x = np.linspace(self.current_time_offset, self.current_time_offset + self.current_time_window, time_points)
+                x = np.linspace(0, self.current_time_window, time_points)
                 y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
             else:
                 # Center the SpO2 data around mean (baseline correction)
@@ -1166,7 +1181,7 @@ class SleepMonitorChart(QWidget):
         else:
             # Generate simulated data for other signals based on time window
             time_points = int(self.current_time_window * 10)  # 10 Hz sampling rate
-            x = np.linspace(self.current_time_offset, self.current_time_offset + self.current_time_window, time_points)
+            x = np.linspace(0, self.current_time_window, time_points)
             y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
         
         # Plot the signal andltore reference for line visibility control
@@ -1225,27 +1240,20 @@ class SleepMonitorChart(QWidget):
         plot_widget.chart_name = name
         plot_widget.plot_curve = plot_curve
         
-        # Enable mouse tracking for area selection
-        plot_widget.setMouseEnabled(x=True, y=True)
+        # Enable mouse tracking for area selection (disable X-axis to prevent sliding)
+        plot_widget.setMouseEnabled(x=False, y=True)
         plot_widget.scene().sigMouseMoved.connect(lambda pos, pw=plot_widget: self.on_mouse_moved(pos, pw))
         plot_widget.mousePressEvent = lambda event, pw=plot_widget: self.custom_mouse_press(event, pw)
         plot_widget.mouseReleaseEvent = lambda event, pw=plot_widget: self.custom_mouse_release(event, pw)
         
         # Connect resize event to update overlay positions
         vb = plot_widget.getViewBox()
-        vb.sigResized.connect(lambda: self.on_plot_resized(plot_widget))
-        
-        # Connect range changed event to update overlay positions when graph pans/zooms
-        def on_range_changed():
-            print(f"Range changed for {plot_widget.chart_name} - updating overlays")
-            self.on_plot_resized(plot_widget)
-        
-        vb.sigRangeChanged.connect(on_range_changed)
+        vb.sigResized.connect(lambda pw=plot_widget: self.on_plot_resized(pw))
         
         # Add click event handler to label for line visibility
         label.mousePressEvent = lambda event: self.toggle_graph_visibility(label, name, plot_curve, container, plot_widget)
                 
-        # Enable drag and drop for container (for reordering)
+        # Enable drag and drop for entire container (only for reordering)
         container.setAcceptDrops(True)
         container.mousePressEvent = lambda event: self.start_drag(event, name, container)
         container.mouseMoveEvent = lambda event: self.continue_drag(event, name)
@@ -1404,42 +1412,45 @@ class SleepMonitorChart(QWidget):
             self.manual_drag_start_y = None
     
     def start_drag(self, event, graph_name, container):
-        """Start drag operation for resizing container height"""
+        """Start drag operation"""
         if event.button() == Qt.LeftButton:
             self.dragged_graph = container
             self.dragged_graph_name = graph_name
             self.drag_start_pos = event.pos()
-            self.drag_start_height = container.height()
-            container.setCursor(Qt.SizeVerCursor)
+            # No revert button functionality
     
     def continue_drag(self, event, graph_name):
-        """Continue drag operation for resizing container height"""
+        """Continue drag operation"""
         if self.dragged_graph and event.buttons() == Qt.LeftButton:
             # Calculate drag distance
             drag_distance = event.pos().y() - self.drag_start_pos.y()
             
-            # Calculate new height
-            new_height = self.drag_start_height + drag_distance
-            
-            # Set minimum and maximum height constraints
-            min_height = 60
-            max_height = 400
-            new_height = max(min_height, min(max_height, new_height))
-            
-            # Apply new height to container
-            self.dragged_graph.setMinimumHeight(new_height)
-            self.dragged_graph.setMaximumHeight(new_height)
-            self.dragged_graph.resize(self.dragged_graph.width(), new_height)
+            # If dragged down enough, just track the drag without removing from layout
+            if abs(drag_distance) > 20:
+                if not hasattr(self.dragged_graph, '_is_dragging'):
+                    self.dragged_graph._is_dragging = True
+                    # Don't remove from layout, just track drag state
     
     def end_drag(self, event, graph_name):
-        """End drag operation for resizing"""
+        """End drag operation"""
         if self.dragged_graph:
-            # Reset cursor
-            self.dragged_graph.setCursor(Qt.ArrowCursor)
+            # No revert button to hide
             
-            # Log the new height
-            final_height = self.dragged_graph.height()
-            print(f"Graph '{graph_name}' resized to height: {final_height}px")
+            # If was being dragged, find new position and reinsert
+            if hasattr(self.dragged_graph, '_is_dragging'):
+                delattr(self.dragged_graph, '_is_dragging')
+                
+                # Find drop position based on mouse
+                drop_pos = event.pos()
+                
+                # Find which position to insert at
+                insert_index = self.find_drop_position(drop_pos)
+                
+                # Reinsert at new position
+                self.dragged_graph.setParent(self.charts_widget)
+                self.charts_layout.insertWidget(insert_index, self.dragged_graph)
+                
+                print(f"Graph '{graph_name}' moved to position {insert_index}")
             
             self.dragged_graph = None
     
@@ -1680,8 +1691,6 @@ class SleepMonitorChart(QWidget):
         # Get the chart name from the plot widget
         chart_name = getattr(plot_widget, 'chart_name', '')
         y_min, y_max = y_axis_ranges.get(chart_name.strip(), (0, 100))
-        y_min += 5
-        y_max +=6 
         
         try:
             plot_widget.setYRange(y_min, y_max)
@@ -1811,11 +1820,11 @@ class SleepMonitorChart(QWidget):
     def on_mouse_clicked(self, event, plot_widget):
         """Handle mouse click for area selection and label removal"""
         if event.button() == Qt.LeftButton:
-            scene_pos = event.scenePos()
+            widget_pos = event.pos()
             widget_rect = plot_widget.rect()
-            widget_pos = plot_widget.mapFromScene(scene_pos)
             if not widget_rect.contains(widget_pos):
                 return
+            scene_pos = plot_widget.mapToScene(widget_pos)
             # Debounce - prevent duplicate clicks
             import time
             current_time = time.time()
@@ -1846,7 +1855,7 @@ class SleepMonitorChart(QWidget):
         if event.button() != Qt.LeftButton:
             return
             
-        # Handle left click directly without converting to scene event
+        # Handle left click directly
         widget_pos = event.pos()
         widget_rect = plot_widget.rect()
         if not widget_rect.contains(widget_pos):
@@ -1859,7 +1868,7 @@ class SleepMonitorChart(QWidget):
             return
         self.last_click_time = current_time
         
-        # Convert to scene position for existing logic
+        # Convert widget position to scene position
         scene_pos = plot_widget.mapToScene(widget_pos)
         
         # Check for label click
@@ -1899,30 +1908,23 @@ class SleepMonitorChart(QWidget):
                 labels_data = self.selection_labels[chart_name]
                 vb = plot_widget.getViewBox()
                 
-                # Update each overlay position based on stored data
-                for i, overlay in enumerate(overlays):
-                    if i < len(labels_data):
-                        selection_data = labels_data[i]
-                        vb = plot_widget.getViewBox()
-                        
-                        # Convert data coordinates to scene coordinates, then to widget coordinates
-                        start_scene = vb.mapViewToScene(selection_data['start'])
-                        end_scene = vb.mapViewToScene(selection_data['end'])
-                        
-                        # Convert scene coordinates to widget coordinates
-                        start_widget = plot_widget.mapFromScene(start_scene)
-                        end_widget = plot_widget.mapFromScene(end_scene)
-                        
-                        # Calculate overlay dimensions and position
-                        x_min = min(start_widget.x(), end_widget.x())
-                        x_max = max(start_widget.x(), end_widget.x())
-                        
-                        # Position overlay on the graph (overlay on plot area)
-                        overlay_y = 10  # Position near top of plot area
-                        
-                        overlay.setGeometry(int(x_min), overlay_y, int(x_max - x_min), 25)
-                        print(f"Overlay {i} - new geometry: {overlay.geometry()}")
-                        print(f"Overlay {i} - Final geometry: {overlay.geometry()}")
+                # Get the actual plot area bounds from the ViewBox
+                view_rect = vb.sceneBoundingRect()
+                if not view_rect.isEmpty():
+                    # Convert view bounds to widget coordinates
+                    widget_top_left = plot_widget.mapFromScene(view_rect.topLeft())
+                    widget_bottom_right = plot_widget.mapFromScene(view_rect.bottomRight())
+                    
+                    # Get the actual plot area boundaries
+                    plot_left = widget_top_left.x()
+                    plot_right = widget_bottom_right.x()
+                    plot_width = plot_right - plot_left
+                    
+                    if plot_width > 0:
+                        # Get current view range to calculate proportional position
+                        view_range = vb.viewRange()
+                        x_min_range, x_max_range = view_range[0]
+                        total_range = x_max_range - x_min_range
                         
                         # Update each overlay position based on stored data
                         for i, overlay in enumerate(overlays):
@@ -2015,11 +2017,42 @@ class SleepMonitorChart(QWidget):
                         x_min_range, x_max_range = view_range[0]
                         total_range = x_max_range - x_min_range
                         
-                        # Update each overlay position using the existing update_overlay_position function
+                        # Update each overlay position based on stored data
                         for i, overlay in enumerate(overlays):
                             if i < len(labels_data):
                                 selection_data = labels_data[i]
-                                self.update_overlay_position(plot_widget, overlay, selection_data['start'], selection_data['end'])
+                                
+                                # Calculate proportional positions based on stored data coordinates
+                                start_x = selection_data['start'].x()
+                                end_x = selection_data['end'].x()
+                                
+                                # Map data coordinates to view coordinates proportionally
+                                if total_range > 0:
+                                    start_prop = (start_x - x_min_range) / total_range
+                                    end_prop = (end_x - x_min_range) / total_range
+                                else:
+                                    start_prop = 0
+                                    end_prop = 1
+                                
+                                # Clamp proportions to [0, 1]
+                                start_prop = max(0, min(1, start_prop))
+                                end_prop = max(0, min(1, end_prop))
+                                
+                                # Convert to widget coordinates within the actual plot area
+                                x_min = plot_left + min(start_prop, end_prop) * plot_width
+                                x_max = plot_left + max(start_prop, end_prop) * plot_width
+                                width = x_max - x_min
+                                
+                                # Ensure minimum width
+                                if width < 30:
+                                    width = 30
+                                
+                                print(f"Overlay {i} - original start: {selection_data['start']}, end: {selection_data['end']}")
+                                print(f"Overlay {i} - Plot bounds: left={plot_left:.1f}, right={plot_right:.1f}, width={plot_width:.1f}")
+                                print(f"Overlay {i} - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
+                                print(f"Overlay {i} - x_min: {x_min:.1f}, x_max: {x_max:.1f}, width: {width:.1f}, height: {plot_widget.height()}")
+                                overlay.setGeometry(int(x_min), 0, int(width), plot_widget.height())
+                                print(f"Overlay {i} - new geometry: {overlay.geometry()}")
         
         # Update current selection overlay if active
         if (self.current_selection_chart == plot_widget and 
@@ -2045,7 +2078,7 @@ class SleepMonitorChart(QWidget):
                 mouse_point = vb.mapSceneToView(self.selection_end_scene)
                 self.selection_end = mouse_point
 
-                # FORCE MENU OPEN
+                #  FORCE MENU OPEN
                 self.show_selection_menu()
 
             else:
@@ -2065,7 +2098,7 @@ class SleepMonitorChart(QWidget):
                     widget_rect = plot_widget.rect()
                     widget_pos = plot_widget.mapFromScene(scene_pos)
                     if widget_rect.contains(widget_pos):
-                        return plot_widge
+                        return plot_widget
         return None
     
     def finish_selection(self):
@@ -2089,7 +2122,7 @@ class SleepMonitorChart(QWidget):
                 self.clear_selection()
     
     def update_selection_overlay(self, start_pos, end_pos):
-        """Update the visual selection overlay using proper coordinate transformation"""
+        """Update the visual selection overlay using proper ViewBox transformation"""
         if not self.current_selection_chart:
             return
         # Hide overlays of all other charts
@@ -2105,65 +2138,36 @@ class SleepMonitorChart(QWidget):
             return
         vb = self.current_selection_chart.getViewBox()
         
-        # Get the actual plot area bounds from the ViewBox
-        view_rect = vb.sceneBoundingRect()
-        if view_rect.isEmpty():
-            return
-            
-        # Convert view bounds to widget coordinates
-        widget_top_left = self.current_selection_chart.mapFromScene(view_rect.topLeft())
-        widget_bottom_right = self.current_selection_chart.mapFromScene(view_rect.bottomRight())
+        # Get data coordinates
+        start_x = start_pos.x()
+        end_x = end_pos.x()
         
-        # Get the actual plot area boundaries
-        plot_left = widget_top_left.x()
-        plot_right = widget_bottom_right.x()
-        plot_width = plot_right - plot_left
+        # Create data points
+        start_point = QPointF(start_x, 0)
+        end_point = QPointF(end_x, 0)
         
-        if plot_width <= 0:
-            return
+        # Convert data → scene
+        start_scene = vb.mapViewToScene(start_point)
+        end_scene = vb.mapViewToScene(end_point)
         
-# Get current view range to calculate proportional position
-        view_range = vb.viewRange()
-        x_min_range, x_max_range = view_range[0]
-        
-        # Convert scene coordinates to widget coordinates
+        # Convert scene → widget
         start_widget = self.current_selection_chart.mapFromScene(start_scene)
         end_widget = self.current_selection_chart.mapFromScene(end_scene)
         
-        # Map data coordinates to view coordinates proportionally
-        total_range = x_max_range - x_min_range
-        if total_range > 0:
-            start_prop = (start_x - x_min_range) / total_range
-            end_prop = (end_x - x_min_range) / total_range
-        else:
-            start_prop = 0
-            end_prop = 1
-        
-        # Clamp proportions to [0, 1]
-        start_prop = max(0, min(1, start_prop))
-        end_prop = max(0, min(1, end_prop))
-        
-        # Convert to widget coordinates within the actual plot area
-        x_min = plot_left + min(start_prop, end_prop) * plot_width
-        x_max = plot_left + max(start_prop, end_prop) * plot_width
+        x_min = min(start_widget.x(), end_widget.x())
+        x_max = max(start_widget.x(), end_widget.x())
         width = x_max - x_min
         
         # Ensure minimum width
         if width < 30:
             width = 30
         
+        print(f"View range: {vb.viewRange()}")
         print(f"update_selection_overlay - Chart: {self.current_selection_chart.chart_name}")
         print(f"update_selection_overlay - Data coords: start={start_x}, end={end_x}")
-        print(f"update_selection_overlay - View range: {x_min_range} to {x_max_range}")
-        print(f"update_selection_overlay - Plot bounds: left={plot_left:.1f}, right={plot_right:.1f}, width={plot_width:.1f}")
-        print(f"update_selection_overlay - Proportions: start={start_prop:.3f}, end={end_prop:.3f}")
         print(f"update_selection_overlay - Widget coords: x_min={x_min:.1f}, x_max={x_max:.1f}, width={width:.1f}")
         
-        # Position overlay on the graph (overlay on plot area)
-        overlay_y = 10  # Position near top of plot area
-        overlay_height = 25
-        
-        overlay.setGeometry(int(x_min), overlay_y, int(width), overlay_height)
+        overlay.setGeometry(int(x_min), 0, int(width), self.current_selection_chart.height())
         overlay.setVisible(True)
         overlay.raise_()  # Ensure overlay is on top
         overlay.setText("Selecting...")
@@ -2196,7 +2200,7 @@ class SleepMonitorChart(QWidget):
             overlay.setText("Choose Label...")
             overlay.setStyleSheet("""
                 QLabel#selectionOverlay {
-                    background-color: rgba(251, 146, 60, 0.4);₹
+                    background-color: rgba(251, 146, 60, 0.4);
                     border: 2px solid #f97316;
                     border-radius: 6px;
                     color: white;
@@ -2274,8 +2278,8 @@ class SleepMonitorChart(QWidget):
             self.dynamic_selections[chart_name] = []
 
         # Convert pixel coordinates to absolute time coordinates
-        start_time = self.selection_start.x() + self.current_time_offset
-        end_time = self.selection_end.x() + self.current_time_offset
+        start_time_abs = self.selection_start.x() + self.current_time_offset
+        end_time_abs = self.selection_end.x() + self.current_time_offset
 
         selection_data = {
             'label': label_type,
@@ -2287,64 +2291,20 @@ class SleepMonitorChart(QWidget):
         # Store in dynamic selections with absolute time coordinates
         dynamic_selection_data = {
             'label': label_type,
-            'start_time': start_time,
-            'end_time': end_time,
+            'start_time': start_time_abs,
+            'end_time': end_time_abs,
             'color': self.get_label_color(label_type)
         }
 
         self.selection_labels[chart_name].append(selection_data)
         self.dynamic_selections[chart_name].append(dynamic_selection_data)
 
-        # CREATE NEW OVERLAY (instead of reusing one)
-        overlay = QLabel(plot_widget)
-        overlay.setAlignment(Qt.AlignCenter)
-        # Calculate timestamp information
-        start_time = self.selection_start.x()
-        end_time = self.selection_end.x()
-        duration = end_time - start_time
-        
-        # Format timestamp display
-        start_str = self.format_timestamp(start_time)
-        duration_str = self.format_duration(duration)
-        
-        overlay.setText(f"{label_type}\n{start_str}\n{duration_str}")
-        overlay.setStyleSheet(f"""
-            background-color: {selection_data['color']};
-            border: 2px solid {selection_data['color'].replace('0.2', '0.8')};
-            border-radius: 6px;
-            color: white;
-            font-size: 11px;
-            font-weight: bold;
-            padding: 4px;
-        """)
-        
-        # Make overlay clickable
-        overlay.mousePressEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_click(event, ov, cn)
-        overlay.mouseDoubleClickEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_double_click(event, ov, cn)
-
-        # Position overlay
-        vb = plot_widget.getViewBox()
-        p1 = vb.mapViewToScene(selection_data['start'])
-        p2 = vb.mapViewToScene(selection_data['end'])
-        w1 = plot_widget.mapFromScene(p1)
-        w2 = plot_widget.mapFromScene(p2)
-
-        x_min = min(w1.x(), w2.x())
-        x_max = max(w1.x(), w2.x())
-
-        # Position overlay on the graph (overlay on plot area)
-        overlay_y = 10  # Position near top of plot area
-
-        overlay.setGeometry(int(x_min), overlay_y, int(x_max - x_min), 25)
-        overlay.show()
-        overlay.raise_()  # Ensure overlay is on top
-
         # Hide the temporary "Choose Label" overlay
         if hasattr(plot_widget, 'selection_overlay'):
             plot_widget.selection_overlay.setVisible(False)
 
-        # store overlay
-        plot_widget.selection_overlays.append(overlay)
+        # Render all selections dynamically (including the new one)
+        self.render_dynamic_selections()
 
         print(f"Label '{label_type}' added (persistent)")
 
@@ -2354,84 +2314,6 @@ class SleepMonitorChart(QWidget):
         self.selection_start_scene = None
         self.selection_end_scene = None
         self.current_selection_chart = None
-    
-    def plot_apnea_event(self, plot_widget, event_data):
-        """Plot an apnea event as a colored region on the graph"""
-        chart_name = plot_widget.chart_name
-        
-        # Initialize plot items list for this chart if needed
-        if chart_name not in self.event_plot_items:
-            self.event_plot_items[chart_name] = []
-        
-        # Create a colored region for the event
-        start_time = event_data['start_time']
-        end_time = event_data['end_time']
-        color = event_data['color']
-        
-        # Convert color string to RGB values for plotting
-        color_map = {
-            'rgba(239, 68, 68, 0.2)': (239, 68, 68),    # Red for OSA
-            'rgba(59, 130, 246, 0.2)': (59, 130, 246),   # Blue for CSA
-            'rgba(245, 158, 11, 0.2)': (245, 158, 11),   # Yellow for MSA
-            'rgba(16, 185, 129, 0.2)': (16, 185, 129)    # Green for HSA
-        }
-        
-        rgb_color = color_map.get(color, (107, 114, 128))  # Default gray
-        
-        # Create a fill between item for the event region
-        x = [start_time, start_time, end_time, end_time]
-        y = [-100, 100, 100, -100]  # Cover the full Y range
-        
-        # Create the plot item with transparency
-        fill_item = pg.FillBetweenItem(
-            pg.PlotDataItem(x, y, pen=pg.mkPen(color=rgb_color, width=0)),
-            pg.PlotDataItem(x, [0, 0, 0, 0], pen=pg.mkPen(color=rgb_color, width=0))
-        )
-        fill_item.setBrush(pg.mkBrush(rgb_color, alpha=100))  # Semi-transparent
-        
-        # Add to plot
-        plot_widget.addItem(fill_item)
-        
-        # Store reference for later removal
-        self.event_plot_items[chart_name].append(fill_item)
-        
-        print(f"Plotted {event_data['label']} event on {chart_name} from {start_time:.1f}s to {end_time:.1f}s")
-    
-    def update_apnea_events_display(self):
-        """Update all apnea events when time window changes"""
-        for chart_name in self.event_plot_items:
-            # Clear existing plot items
-            for plot_item in self.event_plot_items[chart_name]:
-                # Find the plot widget and remove the item
-                for i in range(self.charts_layout.count()):
-                    container = self.charts_layout.itemAt(i).widget()
-                    if hasattr(container, 'findChildren'):
-                        plots = container.findChildren(pg.PlotWidget)
-                        if plots and plots[0].chart_name == chart_name:
-                            plots[0].removeItem(plot_item)
-                            break
-            
-            # Clear the list
-            self.event_plot_items[chart_name].clear()
-        
-        # Re-plot all events for current time window
-        current_start_time = self.current_time_offset
-        current_end_time = self.current_time_offset + self.current_time_window
-        
-        for event in self.apnea_events:
-            event_start = event['start_time']
-            event_end = event['end_time']
-            
-            # Check if event overlaps with current time window
-            if (event_end >= current_start_time and event_start <= current_end_time):
-                # Find the appropriate plot widget (usually SpO2)
-                for i in range(self.charts_layout.count()):
-                    container = self.charts_layout.itemAt(i).widget()
-                    if hasattr(container, 'findChildren'):
-                        plots = container.findChildren(pg.PlotWidget)
-                        if plots and plots[0].chart_name.strip() == "SpO2":
-                            self.plot_apnea_event(plots[0], event)
-                            break
     
     def handle_overlay_click(self, event, overlay, chart_name):
         """Handle right click on overlay"""
@@ -2472,8 +2354,31 @@ class SleepMonitorChart(QWidget):
                     # remove from data also
                     if chart_name in self.selection_labels and index < len(self.selection_labels[chart_name]):
                         self.selection_labels[chart_name].pop(index)
+                    
+                    # remove from dynamic selections also
+                    if chart_name in self.dynamic_selections and index < len(self.dynamic_selections[chart_name]):
+                        self.dynamic_selections[chart_name].pop(index)
 
+        # Re-render selections to update positions
+        self.render_dynamic_selections()
         print("Overlay + data deleted")
+    
+    def enforce_fixed_ranges(self):
+        """Continuously enforce fixed X-axis ranges on all charts"""
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if container and hasattr(container, 'plot_widget'):
+                plot_widget = container.plot_widget
+                if hasattr(plot_widget, 'fixed_range'):
+                    # Force the X-axis range to be exactly what we want
+                    try:
+                        current_range = plot_widget.getViewBox().viewRange()
+                        # Only print if range is not what we want (to avoid spam)
+                        if current_range[0][0] != plot_widget.fixed_range[0] or current_range[0][1] != plot_widget.fixed_range[1]:
+                            print(f"🔧 FIXING ViewBox {plot_widget.chart_name}: {current_range[0]} → {plot_widget.fixed_range}")
+                        plot_widget.setXRange(plot_widget.fixed_range[0], plot_widget.fixed_range[1], padding=0)
+                    except:
+                        pass  # Ignore errors during enforcement
     
     def get_label_color(self, label_type):
         """Get color for label type"""
@@ -2491,16 +2396,18 @@ class SleepMonitorChart(QWidget):
         chart_name = plot_widget.chart_name
         if chart_name not in self.selection_labels or not self.selection_labels[chart_name]:
             return False
-        vb = plot_widget.getViewBox()
+        
         widget_pos = plot_widget.mapFromScene(scene_pos)
-        for i, selection_data in enumerate(self.selection_labels[chart_name]):
-            p1 = vb.mapViewToScene(selection_data['start'])
-            p2 = vb.mapViewToScene(selection_data['end'])
-            label_start = plot_widget.mapFromScene(p1)
-            label_end = plot_widget.mapFromScene(p2)
-            if (min(label_start.x(), label_end.x()) <= widget_pos.x() <= max(label_start.x(), label_end.x())):
-                self.show_remove_menu(plot_widget, chart_name, i, selection_data, scene_pos)
-                return True
+        
+        # Use overlay geometry for precise click detection
+        if hasattr(plot_widget, 'selection_overlays'):
+            overlays = plot_widget.selection_overlays
+            for i, overlay in enumerate(overlays):
+                if overlay.geometry().contains(widget_pos):
+                    selection_data = self.selection_labels[chart_name][i]
+                    self.show_remove_menu(plot_widget, chart_name, i, selection_data, scene_pos)
+                    return True
+        
         return False
     
     def show_remove_menu(self, plot_widget, chart_name, label_index, selection_data, scene_pos):
@@ -2592,202 +2499,10 @@ class SleepMonitorChart(QWidget):
         self.is_selecting = False
         print("Selection cleared")
     
-    def render_dynamic_selections(self):
-        """Render dynamic selections based on current time window"""
-        for i in range(self.charts_layout.count()):
-            container = self.charts_layout.itemAt(i).widget()
-            plots = container.findChildren(pg.PlotWidget)
-
-            if not plots:
-                continue
-
-            plot_widget = plots[0]
-            chart_name = plot_widget.chart_name
-
-            if chart_name not in self.dynamic_selections:
-                continue
-
-            # Clear existing dynamic overlays
-            if hasattr(plot_widget, 'dynamic_overlays'):
-                for overlay in plot_widget.dynamic_overlays:
-                    overlay.setParent(None)
-                plot_widget.dynamic_overlays.clear()
-            else:
-                plot_widget.dynamic_overlays = []
-
-            # Create dynamic overlays for selections visible in current time window
-            current_start_time = self.current_time_offset
-            current_end_time = self.current_time_offset + self.current_time_window
-
-            for selection in self.dynamic_selections[chart_name]:
-                selection_start = selection['start_time']
-                selection_end = selection['end_time']
-                
-                # Check if selection overlaps with current time window
-                if (selection_end >= current_start_time and selection_start <= current_end_time):
-                    # Convert absolute time to relative time for current window
-                    relative_start = selection_start - current_start_time
-                    relative_end = selection_end - current_start_time
-                    
-                    # Clamp to window bounds
-                    relative_start = max(0, relative_start)
-                    relative_end = min(self.current_time_window, relative_end)
-                    
-                    # Only create overlay if there's visible portion
-                    if relative_end > relative_start:
-                        self.create_dynamic_overlay(plot_widget, selection, relative_start, relative_end)
-
-    def create_dynamic_overlay(self, plot_widget, selection, start_pos, end_pos):
-        """Create a dynamic overlay for a selection that sticks to the graph"""
-        overlay = QLabel(plot_widget)
-        overlay.setAlignment(Qt.AlignCenter)
-        overlay.setObjectName("dynamicSelectionOverlay")
-        
-        # Calculate duration
-        duration = end_pos - start_pos
-        
-        # Format display text
-        duration_str = f"{duration:.1f}s"
-        overlay_text = f"{selection['label']}\n{duration_str}"
-        overlay.setText(overlay_text)
-        
-        # Set styling
-        overlay.setStyleSheet(f"""
-            QLabel#dynamicSelectionOverlay {{
-                background-color: {selection['color']}33;
-                border: 2px solid {selection['color']};
-                border-radius: 4px;
-                color: {selection['color']};
-                font-size: 11px;
-                font-weight: bold;
-                padding: 3px 5px;
-                text-align: center;
-            }}
-        """)
-        
-        # Position overlay using proper coordinate transformation
-        vb = plot_widget.getViewBox()
-        
-        # Convert time coordinates to scene coordinates, then to widget coordinates
-        start_point = vb.mapViewToScene(pg.Point(start_pos, 0))
-        end_point = vb.mapViewToScene(pg.Point(end_pos, 0))
-        
-        # Convert scene coordinates to widget coordinates
-        start_widget = plot_widget.mapFromScene(start_point)
-        end_widget = plot_widget.mapFromScene(end_point)
-        
-        # Calculate overlay dimensions and position
-        x_start = int(start_widget.x())
-        x_end = int(end_widget.x())
-        overlay_width = max(20, x_end - x_start)  # Minimum width for visibility
-        
-        # Position overlay on the graph (overlay on plot area)
-        overlay_y = 10  # Position near top of plot area
-        overlay.setGeometry(x_start, overlay_y, overlay_width, 25)
-        overlay.setVisible(True)
-        overlay.raise_()  # Ensure overlay is on top
-        
-        # Add to dynamic overlays
-        if not hasattr(plot_widget, 'dynamic_overlays'):
-            plot_widget.dynamic_overlays = []
-        plot_widget.dynamic_overlays.append(overlay)
-
-    def update_dynamic_overlay_positions(self, plot_widget):
-        """Update positions of dynamic overlays when view changes"""
-        if not hasattr(plot_widget, 'dynamic_overlays'):
-            return
-            
-        chart_name = plot_widget.chart_name
-        if chart_name not in self.dynamic_selections:
-            return
-            
-        # Clear current overlays
-        for overlay in plot_widget.dynamic_overlays:
-            overlay.setParent(None)
-        plot_widget.dynamic_overlays.clear()
-        
-        # Recreate overlays for current time window
-        current_start_time = self.current_time_offset
-        current_end_time = self.current_time_offset + self.current_time_window
-        
-        for selection in self.dynamic_selections[chart_name]:
-            selection_start = selection['start_time']
-            selection_end = selection['end_time']
-            
-            # Check if selection overlaps with current time window
-            if (selection_end >= current_start_time and selection_start <= current_end_time):
-                # Convert absolute time to relative time for current window
-                relative_start = selection_start - current_start_time
-                relative_end = selection_end - current_start_time
-                
-                # Clamp to window bounds
-                relative_start = max(0, relative_start)
-                relative_end = min(self.current_time_window, relative_end)
-                
-                # Only create overlay if there's visible portion
-                if relative_end > relative_start:
-                    self.create_dynamic_overlay(plot_widget, selection, relative_start, relative_end)
-
     def restore_all_selections(self):
         """Restore all selection overlays when charts are recreated"""
-        # First render dynamic selections
+        # Simply call render_dynamic_selections which handles everything
         self.render_dynamic_selections()
-        
-        # Update apnea events display
-        self.update_apnea_events_display()
-        
-        for i in range(self.charts_layout.count()):
-            container = self.charts_layout.itemAt(i).widget()
-            plots = container.findChildren(pg.PlotWidget)
-
-            if not plots:
-                continue
-
-            plot_widget = plots[0]
-            chart_name = plot_widget.chart_name
-
-            if chart_name not in self.selection_labels:
-                continue
-
-            # Clear existing overlays
-            if hasattr(plot_widget, 'selection_overlays'):
-                plot_widget.selection_overlays.clear()
-
-            for selection in self.selection_labels[chart_name]:
-                overlay = QLabel(plot_widget)
-                
-                # Calculate timestamp information
-                start_time = selection['start'].x()
-                end_time = selection['end'].x()
-                duration = end_time - start_time
-                
-                # Format timestamp display
-                start_str = self.format_timestamp(start_time)
-                duration_str = self.format_duration(duration)
-                
-                overlay.setText(f"{selection['label']}\n{start_str}\n{duration_str}")
-                overlay.setStyleSheet(f"""
-                    background-color: {selection['color']};
-                    border: 2px solid {selection['color'].replace('0.2', '0.8')};
-                    border-radius: 6px;
-                    color: white;
-                    font-size: 11px;
-                    font-weight: bold;
-                    padding: 4px;
-                """)
-
-                # Make overlay clickable
-                overlay.mousePressEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_click(event, ov, cn)
-                overlay.mouseDoubleClickEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_double_click(event, ov, cn)
-
-                # Position overlay correctly
-                self.update_overlay_position(plot_widget, overlay, selection['start'], selection['end'])
-                overlay.show()
-                
-                # Store overlay
-                if not hasattr(plot_widget, 'selection_overlays'):
-                    plot_widget.selection_overlays = []
-                plot_widget.selection_overlays.append(overlay)
     
     def format_timestamp(self, time_seconds):
         """Format time in seconds to readable timestamp"""
@@ -2795,7 +2510,7 @@ class SleepMonitorChart(QWidget):
         minutes = int((time_seconds % 3600) // 60)
         seconds = int(time_seconds % 60)
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-      
+    
     def format_duration(self, duration_seconds):
         """Format duration to readable string"""
         if duration_seconds < 60:
@@ -2816,11 +2531,89 @@ class SleepMonitorChart(QWidget):
         x_min = min(w1.x(), w2.x())
         x_max = max(w1.x(), w2.x())
         
-        # Position overlay on the graph (overlay on plot area)
-        overlay_y = 10  # Position near top of plot area
-        overlay_height = 25  # Fixed height for selection containers
+        # Use large overlay height for persistent selections
+        plot_height = plot_widget.height()
+        overlay_height = max(60, plot_height)  # Minimum 60px or full plot height
+        y_position = 0  # Start from top for large appearance
 
-        overlay.setGeometry(int(x_min), overlay_y, int(x_max - x_min), int(overlay_height))
+        overlay.setGeometry(int(x_min), y_position, int(x_max - x_min), int(overlay_height))
+    
+    def render_dynamic_selections(self):
+        """Render selection overlays based on current time window and offset"""
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if hasattr(container, 'findChildren'):
+                plots = container.findChildren(pg.PlotWidget)
+                if plots:
+                    plot_widget = plots[0]
+                    chart_name = plot_widget.chart_name
+                    
+                    # Clear existing overlays
+                    if hasattr(plot_widget, 'selection_overlays'):
+                        for overlay in plot_widget.selection_overlays:
+                            overlay.hide()
+                            overlay.deleteLater()
+                        plot_widget.selection_overlays.clear()
+                    
+                    # Check if this chart has dynamic selections
+                    if chart_name in self.dynamic_selections:
+                        for selection_data in self.dynamic_selections[chart_name]:
+                            # Calculate relative position within current time window
+                            start_time_abs = selection_data['start_time']
+                            end_time_abs = selection_data['end_time']
+                            
+                            # Convert absolute time to relative time within current window
+                            start_time_rel = start_time_abs - self.current_time_offset
+                            end_time_rel = end_time_abs - self.current_time_offset
+                            
+                            # Only render if selection is within current time window
+                            if (end_time_rel >= 0 and start_time_rel <= self.current_time_window):
+                                # Clamp to window bounds
+                                start_time_clamped = max(0, start_time_rel)
+                                end_time_clamped = min(self.current_time_window, end_time_rel)
+                                
+                                # Create overlay
+                                overlay = QLabel(plot_widget)
+                                overlay.setAlignment(Qt.AlignCenter)
+                                
+                                # Calculate duration and format display
+                                duration = end_time_abs - start_time_abs
+                                start_str = self.format_timestamp(start_time_abs)
+                                duration_str = self.format_duration(duration)
+                                
+                                overlay.setText(f"{selection_data['label']}\n{start_str}\n{duration_str}")
+                                overlay.setStyleSheet(f"""
+                                    background-color: {selection_data['color']};
+                                    border: 2px solid {selection_data['color'].replace('0.2', '0.8')};
+                                    border-radius: 6px;
+                                    color: white;
+                                    font-size: 11px;
+                                    font-weight: bold;
+                                    padding: 4px;
+                                """)
+                                
+                                # Make overlay clickable
+                                overlay.mousePressEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_click(event, ov, cn)
+                                overlay.mouseDoubleClickEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_double_click(event, ov, cn)
+                                
+                                # Position overlay using relative coordinates
+                                start_pos = pg.Point(start_time_clamped, 0)
+                                end_pos = pg.Point(end_time_clamped, 0)
+                                self.update_overlay_position(plot_widget, overlay, start_pos, end_pos)
+                                overlay.show()
+                                
+                                # Store overlay
+                                if not hasattr(plot_widget, 'selection_overlays'):
+                                    plot_widget.selection_overlays = []
+                                plot_widget.selection_overlays.append(overlay)
+                                
+                                print(f"Rendered selection '{selection_data['label']}' on {chart_name} at {start_time_clamped:.1f}s-{end_time_clamped:.1f}s")
+
+    def update_apnea_events_display(self):
+        """Update apnea events display for current time window (placeholder method)"""
+        # This method is called during refresh_charts but doesn't need to do anything
+        # unless apnea events functionality is implemented
+        pass
     
     def update_all_overlays_on_resize(self):
         """Update all overlay positions when window is resized"""
