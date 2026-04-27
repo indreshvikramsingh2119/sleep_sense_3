@@ -534,20 +534,17 @@ class SleepSenseDashboard(QMainWindow):
                 slider_value = int(slider_progress * 100)
                 slider_value = max(0, min(100, slider_value))  # Clamp between 0-100
                 
-                print(f"Debug: time_offset={self.monitor_chart.current_time_offset:.1f}s, max_duration={max_duration:.1f}s, max_offset={max_offset:.1f}s, progress={slider_progress:.3f}, slider_value={slider_value}")
-                
                 # Block signals to prevent recursive calls
                 self.time_slider.blockSignals(True)
                 self.time_slider.setValue(slider_value)
                 self.time_slider.blockSignals(False)
-                
-                print(f"Slider position updated: {slider_value}% (time: {self.monitor_chart.current_time_offset:.1f}s)")
-            
-            # Update slider time label with HH:MM:SS format
-            hours = int(self.monitor_chart.current_time_offset // 3600)
-            minutes = int((self.monitor_chart.current_time_offset % 3600) // 60)
-            seconds = int(self.monitor_chart.current_time_offset % 60)
-            self.slider_time_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        
+        # Update slider time label with HH:MM:SS format (always execute)
+        hours = int(self.monitor_chart.current_time_offset // 3600)
+        minutes = int((self.monitor_chart.current_time_offset % 3600) // 60)
+        seconds = int(self.monitor_chart.current_time_offset % 60)
+        time_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        self.slider_time_label.setText(time_text)
     
     def load_stylesheet(self):
         """Load QSS stylesheet"""

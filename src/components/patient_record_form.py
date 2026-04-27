@@ -54,7 +54,7 @@ class PatientRecordForm(QDialog):
             }
         """)
         main_layout.addWidget(title_label)
-        
+         
         # Scroll Area for the form
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
