@@ -5,7 +5,7 @@ Replicates the archive interface shown in the reference image
 
 import os
 from PyQt5.QtWidgets import (
-    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QFrame, QGroupBox, QLineEdit, QCheckBox,
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
     QToolBar, QSizePolicy, QFileDialog, QMessageBox, QSplitter
@@ -14,21 +14,21 @@ from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont
 
 
-class ArchiveWindow(QDialog):
+class ArchiveWindow(QMainWindow):
     """Archive Window matching the reference image design"""
     
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setModal(True)
-        self.setWindowTitle("Archive Records")
-        self.setFixedSize(1000, 600)
+    def __init__(self):
+        super().__init__()
         self.init_ui()
         self.load_sample_data()
         
     def init_ui(self):
+        self.setWindowTitle("Archive Records")
+        self.setGeometry(150, 150, 1000, 600)
+        
         # Apply medical theme
         self.setStyleSheet("""
-            QDialog {
+            QMainWindow {
                 background-color: #f8f9fa;
             }
             QWidget {
@@ -38,8 +38,12 @@ class ArchiveWindow(QDialog):
             }
         """)
         
+        # Central Widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
         # Main Layout
-        main_layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(12)
         

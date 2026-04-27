@@ -4,7 +4,7 @@ Creates a comprehensive patient record form matching the provided design
 """
 
 from PyQt5.QtWidgets import (
-    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QRadioButton, QButtonGroup, QTextEdit, QPushButton,
     QFrame, QScrollArea, QDateEdit, QGroupBox, QGridLayout,
     QSizePolicy, QApplication
@@ -13,19 +13,25 @@ from PyQt5.QtCore import Qt, QDate
 from PyQt5.QtGui import QFont, QPixmap
 
 
-class PatientRecordForm(QDialog):
+class PatientRecordForm(QMainWindow):
     """Full Page Patient Record Form"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setModal(True)
-        self.setWindowTitle("Patient Record Card")
-        self.setFixedSize(750, 650)
         self.init_ui()
         
     def init_ui(self):
+        self.setWindowTitle("Patient Record Card")
+        self.setGeometry(100, 100, 750, 650)
+        self.setMinimumSize(700, 600)
+        self.setMaximumSize(800, 700)
+        
+        # Central Widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
         # Main Layout with reduced margins
-        main_layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(12)
         
