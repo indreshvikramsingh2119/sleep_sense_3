@@ -220,6 +220,7 @@ class ButtonFunctions:
             menu.addSeparator()
             menu.addAction('Import Data', self.tools_import_data)
             menu.addAction('Data Analysis', self.tools_data_analysis)
+            menu.addAction('Analysis Parameters', self.tools_analysis_parameters)
             menu.addAction('Reanalysis', self.tools_reanalysis)
             menu.addAction('Generate Report', self.tools_generate_report)
             
@@ -465,7 +466,15 @@ class ButtonFunctions:
         print("Tools -> Generate Report clicked")
         # TODO: Implement report generation
     
+    def tools_analysis_parameters(self):
+        """Analysis Parameters"""
+        print("Tools -> Analysis Parameters clicked")
+        from src.components.analysis_parameters_dialog import AnalysisParametersDialog
+        dialog = AnalysisParametersDialog(self.parent)
+        dialog.exec_()
+    
     def tools_reanalysis(self):
+        """Reanalysis"""
         print("Tools -> Reanalysis clicked")
         # TODO: Implement reanalysis functionality
     
