@@ -33,7 +33,7 @@ class PatientInfoWidget(QWidget):
         main_layout.addWidget(info_tab)
         
     def create_info_tab(self):
-        """Create patient information tab"""
+        """Create patient information tab with professional container"""
         widget = QWidget()
         widget.setObjectName("infoTab")
         layout = QVBoxLayout(widget)
@@ -49,16 +49,62 @@ class PatientInfoWidget(QWidget):
         
         scroll_content = QWidget()
         scroll_content.setObjectName("scrollContent")
-        scroll_content.setContentsMargins(16, 16, 16, 16) # Add internal padding
+        scroll_content.setContentsMargins(8, 16, 8, 16) # Reduced left margin for more left shift
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setSpacing(16) # Adjusted spacing between sections
         
+        # Main Professional Container
+        main_container = QFrame()
+        main_container.setObjectName("patientMainContainer")
+        main_container.setMinimumHeight(1170)  
+        main_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        main_container.setStyleSheet("""
+            QFrame#patientMainContainer {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.45 #f8fafc,
+                    stop: 0.55 #f1f5f9,
+                    stop: 1 #e2e8f0
+                );
+                border: 2px solid #cbd5e1;
+                border-radius: 12px;
+                padding: 4px;
+                margin: 2px;
+            }
+            QFrame#patientMainContainer:hover {
+                border: 2px solid #3b82f6;
+                box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
+            }
+        """)
+        
+        container_layout = QVBoxLayout(main_container)
+        container_layout.setContentsMargins(12, 12, 12, 12)
+        container_layout.setSpacing(12)
+        
         # Patient Avatar and Name Section
         avatar_section = self.create_avatar_section()
-        scroll_layout.addWidget(avatar_section)
+        container_layout.addWidget(avatar_section)
         
-        # Patient Details Cards
-        details_layout = QVBoxLayout()
+        # Patient Details Section Container
+        details_container = QFrame()
+        details_container.setObjectName("detailsContainer")
+        details_container.setStyleSheet("""
+            QFrame#detailsContainer {
+                background-color: rgba(255, 255, 255, 0.9);
+                border: 2px solid #cbd5e1;
+                border-radius: 10px;
+                padding: 8px;
+                margin: 4px;
+            }
+            QFrame#detailsContainer:hover {
+                border: 2px solid #94a3b8;
+                background-color: rgba(255, 255, 255, 1.0);
+            }
+        """)
+        
+        details_layout = QVBoxLayout(details_container)
+        details_layout.setContentsMargins(8, 8, 8, 8)
         details_layout.setSpacing(10) # Adjusted spacing between info cards
         
         # Age/Gender Card
@@ -69,12 +115,37 @@ class PatientInfoWidget(QWidget):
         action_buttons = self.create_action_buttons()
         details_layout.addWidget(action_buttons)
         
-        scroll_layout.addLayout(details_layout)
+        container_layout.addWidget(details_container)
 
+        # Raw Data File Section Container
+        raw_container = QFrame()
+        raw_container.setObjectName("rawDataContainer")
+        raw_container.setStyleSheet("""
+            QFrame#rawDataContainer {
+                background-color: rgba(255, 255, 255, 0.9);
+                border: 2px solid #cbd5e1;
+                border-radius: 10px;
+                padding: 8px;
+                margin: 4px;
+            }
+            QFrame#rawDataContainer:hover {
+                border: 2px solid #94a3b8;
+                background-color: rgba(255, 255, 255, 1.0);
+            }
+        """)
+        
+        raw_container_layout = QVBoxLayout(raw_container)
+        raw_container_layout.setContentsMargins(8, 8, 8, 8)
+        raw_container_layout.setSpacing(8)
+        
         # Raw Data File Section (inline, under patient details)
         raw_section = self.create_raw_data_section()
-        scroll_layout.addWidget(raw_section)
+        raw_container_layout.addWidget(raw_section)
         
+        container_layout.addWidget(raw_container)
+        
+        container_layout.addStretch()
+        scroll_layout.addWidget(main_container)
         scroll_layout.addStretch()
         
         scroll.setWidget(scroll_content)
@@ -86,21 +157,56 @@ class PatientInfoWidget(QWidget):
         """Create save and upload action buttons"""
         frame = QFrame()
         frame.setObjectName("actionButtonsSection")
+        frame.setMinimumHeight(100)  # Increased container height
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         frame_layout = QVBoxLayout(frame)
-        frame_layout.setContentsMargins(0, 0, 0, 0)
-        frame_layout.setSpacing(8)
+        frame_layout.setContentsMargins(8, 8, 8, 8)  # Added margins for clear visibility
+        frame_layout.setSpacing(12)  # Increased spacing
 
         # Save Button
         save_btn = QPushButton(" Save Data")
         save_btn.setObjectName("actionButton")
-        save_btn.setMinimumHeight(36)
+        save_btn.setMinimumHeight(42)  # Increased button height
+        save_btn.setStyleSheet("""
+            QPushButton#actionButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #3b82f6,
+                    stop: 0.5 #2563eb,
+                    stop: 1 #1d4ed8
+                );
+                border: 1px solid #1e40af;
+                border-radius: 8px;
+                color: white;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 8px 16px;
+            }
+            QPushButton#actionButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #60a5fa,
+                    stop: 0.5 #3b82f6,
+                    stop: 1 #2563eb
+                );
+                border: 1px solid #1d4ed8;
+            }
+            QPushButton#actionButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #1d4ed8,
+                    stop: 0.5 #1e40af,
+                    stop: 1 #1e3a8a
+                );
+            }
+        """)
         save_btn.clicked.connect(self.save_data)
         frame_layout.addWidget(save_btn)
 
         # Upload Button 
         upload_btn = QPushButton(" Upload Data")
         upload_btn.setObjectName("actionButton")
-        upload_btn.setMinimumHeight(36)
+        upload_btn.setMinimumHeight(42)  # Increased button height
         upload_btn.clicked.connect(self.upload_data)
         frame_layout.addWidget(upload_btn)
 
@@ -128,9 +234,11 @@ class PatientInfoWidget(QWidget):
         """Inline raw-data file list shown under patient details."""
         frame = QFrame()
         frame.setObjectName("rawDataSection")
+        frame.setMinimumHeight(250)  # Further increased container height
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # Changed to Expanding for more space
         frame_layout = QVBoxLayout(frame)
-        frame_layout.setContentsMargins(0, 0, 0, 0)
-        frame_layout.setSpacing(8)
+        frame_layout.setContentsMargins(12, 12, 12, 12)  # Increased margins for more space
+        frame_layout.setSpacing(16)  # Further increased spacing
 
         header = QHBoxLayout()
         title = QLabel("Save file List")
@@ -150,7 +258,37 @@ class PatientInfoWidget(QWidget):
 
         self.raw_file_list = QListWidget()
         self.raw_file_list.setObjectName("Saved file List")
+        self.raw_file_list.setMinimumHeight(220)  # Increased list height for more items
+        self.raw_file_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # Allow expansion
         self.raw_file_list.setVisible(False)
+        # Reduce item spacing and padding to minimize empty space
+        self.raw_file_list.setStyleSheet("""
+            QListWidget#Saved file List {
+                background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 6px;
+                padding: 4px;
+                spacing: 2px;
+            }
+            QListWidget#Saved file List::item {
+                background-color: white;
+                border: 1px solid #e5e7eb;
+                bord
+                er-radius: 4px;
+                padding: 6px 8px;
+                margin: 1px;
+                min-height: 24px;
+            }
+            QListWidget#Saved file List::item:selected {
+                background-color: #3b82f6;
+                color: white;
+                border: 1px solid #2563eb;
+            }
+            QListWidget#Saved file List::item:hover {
+                background-color: #f1f5f9;
+                border: 1px solid #cbd5e1;
+            }
+        """)
         frame_layout.addWidget(self.raw_file_list)
 
         return frame
@@ -245,7 +383,7 @@ class PatientInfoWidget(QWidget):
         """Create an info card with icon, label, and value"""
         frame = QFrame()
         frame.setObjectName(object_name)
-        frame.setMinimumHeight(60)
+        frame.setMinimumHeight(80)  # Increased height from 60 to 80
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         
         layout = QHBoxLayout(frame)

@@ -2238,23 +2238,7 @@ class SleepMonitorChart(QWidget):
         start_scene = vb.mapViewToScene(start_point)
         end_scene = vb.mapViewToScene(end_point)
         
-<<<<<<< Updated upstream
         # Convert scene → widget
-=======
-# Get current view range to calculate proportional position
-        view_range = vb.viewRange()
-        x_min_range, x_max_range = view_range[0]
-        
-        # Extract x coordinates from position parameters
-        start_x = start_pos.x() if hasattr(start_pos, 'x') else start_pos[0]
-        end_x = end_pos.x() if hasattr(end_pos, 'x') else end_pos[0]
-        
-        # Convert data coordinates to scene coordinates first
-        start_scene = self.current_selection_chart.plotItem.vb.mapViewToScene(pg.Point(start_x, 0))
-        end_scene = self.current_selection_chart.plotItem.vb.mapViewToScene(pg.Point(end_x, 0))
-        
-        # Convert scene coordinates to widget coordinates
->>>>>>> Stashed changes
         start_widget = self.current_selection_chart.mapFromScene(start_scene)
         end_widget = self.current_selection_chart.mapFromScene(end_scene)
         

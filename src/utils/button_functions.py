@@ -159,6 +159,52 @@ class ButtonFunctions:
         from PyQt5.QtWidgets import QMenu
         
         menu = QMenu(self.parent)
+        # Apply professional styling to the menu
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 8px;
+                padding: 4px 0px;
+                font-size: 13px;
+                font-weight: 500;
+                color: #374151;
+                min-width: 180px;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            }
+            QMenu::item {
+                background-color: transparent;
+                padding: 8px 16px;
+                margin: 2px 8px;
+                border-radius: 6px;
+                color: #374151;
+            }
+            QMenu::item:selected {
+                background-color: #3b82f6;
+                color: #ffffff;
+            }
+            QMenu::item:pressed {
+                background-color: #2563eb;
+                color: #ffffff;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #e5e7eb;
+                margin: 4px 12px;
+            }
+            QMenu::indicator {
+                width: 16px;
+                height: 16px;
+                border: 2px solid #d1d5db;
+                border-radius: 3px;
+                background-color: #ffffff;
+            }
+            QMenu::indicator:checked {
+                background-color: #3b82f6;
+                border-color: #3b82f6;
+                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDEiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPgo=);
+            }
+        """)
         
         if menu_type == 'file':
             # custom file menu matching requested image
@@ -228,10 +274,12 @@ class ButtonFunctions:
             menu.addAction('Documentation', self.help_documentation, 'F1')
             menu.addAction('About', self.help_about)
         
-        # Show menu below the button
-        button_rect = button.geometry()
-        menu_pos = button.mapToGlobal(button_rect.bottomLeft())
-        menu.exec_(menu_pos)
+        # Show menu below the button with correct positioning
+        button_rect = button.rect()
+        # Get the global position of the button's bottom-left corner
+        global_pos = button.mapToGlobal(button_rect.bottomLeft())
+        # Ensure menu appears directly below button without offset
+        menu.exec_(global_pos)
     
     def create_menu_bar(self):
         """Create application menu bar with File, Edit, View, Tools, Help menus"""
