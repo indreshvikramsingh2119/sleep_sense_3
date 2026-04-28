@@ -226,7 +226,6 @@ class SleepSenseDashboard(QMainWindow):
         self.hidden_graphs_dropdown.setEnabled(False)
         
         controls_layout.addWidget(self.hidden_graphs_dropdown)
-        
         controls_layout.addStretch()
         
         return controls_container
@@ -492,8 +491,8 @@ class SleepSenseDashboard(QMainWindow):
         """Navigate forward using slider buttons"""
         if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
             # Step size equals the current time window size
-            step_size = self.monitor_chart.current_time_window  # Move by exact time window size
-            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  # 10 samples per second
+            step_size = self.monitor_chart.current_time_window  
+            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  
             max_offset = max_duration - self.monitor_chart.current_time_window
             
             # Move forward by step size
@@ -507,7 +506,7 @@ class SleepSenseDashboard(QMainWindow):
         """Handle slider value change"""
         if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
             # Calculate maximum time based on data length
-            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  # 10 samples per second
+            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  
             
             if max_duration > self.monitor_chart.current_time_window:
                 # Calculate time offset from slider value (0-100)
@@ -532,8 +531,7 @@ class SleepSenseDashboard(QMainWindow):
                 max_offset = max_duration - self.monitor_chart.current_time_window
                 slider_progress = self.monitor_chart.current_time_offset / max_offset
                 slider_value = int(slider_progress * 100)
-                slider_value = max(0, min(100, slider_value))  # Clamp between 0-100
-                
+                slider_value = max(0, min(100, slider_value))  
                 print(f"Debug: time_offset={self.monitor_chart.current_time_offset:.1f}s, max_duration={max_duration:.1f}s, max_offset={max_offset:.1f}s, progress={slider_progress:.3f}, slider_value={slider_value}")
                 
                 # Block signals to prevent recursive calls
@@ -614,7 +612,7 @@ class SleepSenseDashboard(QMainWindow):
             icons[3]["status_tip"],
             self.download_data
         )
-        self.btn_download_data.setEnabled(False)  # Disabled until device connected
+        self.btn_download_data.setEnabled(False)  
         toolbar.addWidget(self.btn_download_data)
         
         toolbar.addSeparator()
@@ -666,24 +664,33 @@ class SleepSenseDashboard(QMainWindow):
         )
         toolbar.addWidget(self.btn_event_list)
         
+        # Screenshot Button
+        self.btn_screenshot = create_toolbar_button(
+            "📷",
+            "Take Screenshot",
+            "Capture entire application window",
+            self.take_screenshot
+        )
+        toolbar.addWidget(self.btn_screenshot)
+        
         return toolbar
     
     # Toolbar Button Callback Methods
     def go_to_previous(self):
         """Go to previous record/page"""
         print("Previous button clicked")
-        # TODO: Implement navigation to previous record
+        # TODO: 
     
     def go_to_next(self):
         """Go to next record/page"""
         print("Next button clicked")
-        # TODO: Implement navigation to next record
+        # TODO: 
     
     def prepare_device(self):
         """Initialize and connect device"""
         print("Prepare Device button clicked")
         # TODO: Implement device preparation logic
-        # Enable download button after device is prepared
+   
         self.btn_download_data.setEnabled(True)
     
     def download_data(self):
@@ -695,7 +702,7 @@ class SleepSenseDashboard(QMainWindow):
         """Open patient database as modal dialog"""
         print("Database button clicked")
         self.database_window = DatabaseWindow(self)
-        self.database_window.exec_()  # Modal dialog
+        self.database_window.exec_()  
     
     def open_report_view(self):
         """View ECG/Sleep reports - Opens Patient Record Form as modal dialog"""
@@ -722,6 +729,39 @@ class SleepSenseDashboard(QMainWindow):
         print("Archive button clicked")
         self.archive_window = ArchiveWindow(self)
         self.archive_window.exec_()  # Modal dialog
+    
+    def take_screenshot(self):
+        """Take a screenshot of the entire application"""
+        try:
+            # Get the main window
+            from PyQt5.QtWidgets import QApplication
+            from PyQt5.QtGui import QPixmap, QScreen, QFileDialog
+            from datetime import datetime
+            
+            # Capture the entire application window
+            screen = QApplication.primaryScreen().grabWindow(self.windowHandle())
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"sleep_sense_screenshot_{timestamp}.png"
+            
+            # Save dialog
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Screenshot",
+                filename,
+                "PNG Files (*.png);;All Files (*)"
+            )
+            
+            if file_path:
+                screen.save(file_path, "PNG")
+                from PyQt5.QtWidgets import QMessageBox
+                QMessageBox.information(self, "Screenshot Saved", 
+                                   f"Screenshot saved to:\n{file_path}")
+        except Exception as e:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Screenshot Error", 
+                               f"Failed to take screenshot:\n{str(e)}")
     
     def create_menubar(self):
         """Create menubar with File and View menus"""

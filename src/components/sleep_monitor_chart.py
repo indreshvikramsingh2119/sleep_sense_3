@@ -12,9 +12,10 @@ import pandas as pd
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider
+    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog
 )
 from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QPoint, QRect, QMimeData, QPointF
+from PyQt5.QtGui import QPixmap, QScreen
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen
 import pyqtgraph as pg
 from .custom_viewbox import CustomViewBox
@@ -236,6 +237,49 @@ class SleepMonitorChart(QWidget):
         self.scroll_area.setWidget(self.charts_widget)
         chart_layout.addWidget(self.scroll_area, stretch=1)
         
+        # Screenshot Button in main toolbar
+        screenshot_btn = QPushButton("📷")
+        screenshot_btn.setObjectName("screenshotButton")
+        screenshot_btn.setFixedSize(28, 20)
+        screenshot_btn.setStyleSheet("""
+            QPushButton#screenshotButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #4CAF50,
+                    stop: 1 #45A049
+                );
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: 600;
+                text-align: center;
+                padding: 2px;
+            }
+            QPushButton#screenshotButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #45A049,
+                    stop: 1 #3D8B58
+                );
+                border: 1px solid #3D8B58;
+            }
+            QPushButton#screenshotButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #3D8B58,
+                    stop: 1 #2E7D32
+                );
+            }
+        """)
+        screenshot_btn.setToolTip("Take Screenshot")
+        
+        def on_screenshot():
+            self.take_screenshot()
+        
+        screenshot_btn.clicked.connect(on_screenshot)
+        chart_layout.addWidget(screenshot_btn)
+        
         # Status Bar
         status_bar = self.create_status_bar()
         chart_layout.addWidget(status_bar)
@@ -252,18 +296,57 @@ class SleepMonitorChart(QWidget):
         self.dashboard_hidden_graphs_dropdown = hidden_graphs_dropdown
 
     def confirm_and_save_raw_data(self):
-        reply = QMessageBox.question(
-            self,
-            "Save raw data",
-            "Generate a timestamped raw-data file for the current session?",
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Yes,
-        )
-        if reply != QMessageBox.Yes:
+        """Prompt user to confirm and save raw data"""
+        if not hasattr(self, 'patient_id') or self.patient_id == "--------":
+            QMessageBox.warning(self, "No Patient Selected", 
+                           "Please select a patient ID before saving data.")
             return
-        file_path, timestamp_iso = self.save_raw_data_file()
-        if file_path:
-            self.raw_data_saved.emit(file_path, timestamp_iso)
+        
+        reply = QMessageBox.question(
+            self, "Confirm Save",
+            f"Save raw data for patient {self.patient_id}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.save_raw_data()
+    
+    def take_screenshot(self):
+        """Take a screenshot of the entire sleep monitor chart"""
+        try:
+            # Get the main window or widget
+            parent_widget = self.parent()
+            while parent_widget and parent_widget.parent():
+                parent_widget = parent_widget.parent()
+            
+            if parent_widget:
+                # Capture the entire window
+                screen = QScreen.grabWindow(parent_widget.windowHandle())
+            else:
+                # Fallback to primary screen
+                screen = QApplication.primaryScreen().grabWindow(QApplication.activeWindow())
+            
+            # Generate filename with timestamp
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"sleep_monitor_screenshot_{timestamp}.png"
+            
+            # Save dialog
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Screenshot",
+                filename,
+                "PNG Files (*.png);;All Files (*)"
+            )
+            
+            if file_path:
+                screen.save(file_path, "PNG")
+                QMessageBox.information(self, "Screenshot Saved", 
+                                   f"Screenshot saved to:\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Screenshot Error", 
+                               f"Failed to take screenshot:\n{str(e)}")
 
     def save_raw_data_file(self):
         """Write a timestamped raw-data JSON file and return (path, timestamp_iso)."""
@@ -985,6 +1068,11 @@ class SleepMonitorChart(QWidget):
         zoom_layout.addWidget(reset_btn)
         print(f"DEBUG: Added reset button to layout for {name}")
         
+        zoom_layout.addStretch()
+        plot_container_layout.addWidget(zoom_frame)
+        
+        zoom_layout.addStretch()
+        plot_container_layout.addWidget(zoom_frame)
         zoom_layout.addStretch()
         plot_container_layout.addWidget(zoom_frame)
         
@@ -2150,7 +2238,23 @@ class SleepMonitorChart(QWidget):
         start_scene = vb.mapViewToScene(start_point)
         end_scene = vb.mapViewToScene(end_point)
         
+<<<<<<< Updated upstream
         # Convert scene → widget
+=======
+# Get current view range to calculate proportional position
+        view_range = vb.viewRange()
+        x_min_range, x_max_range = view_range[0]
+        
+        # Extract x coordinates from position parameters
+        start_x = start_pos.x() if hasattr(start_pos, 'x') else start_pos[0]
+        end_x = end_pos.x() if hasattr(end_pos, 'x') else end_pos[0]
+        
+        # Convert data coordinates to scene coordinates first
+        start_scene = self.current_selection_chart.plotItem.vb.mapViewToScene(pg.Point(start_x, 0))
+        end_scene = self.current_selection_chart.plotItem.vb.mapViewToScene(pg.Point(end_x, 0))
+        
+        # Convert scene coordinates to widget coordinates
+>>>>>>> Stashed changes
         start_widget = self.current_selection_chart.mapFromScene(start_scene)
         end_widget = self.current_selection_chart.mapFromScene(end_scene)
         
