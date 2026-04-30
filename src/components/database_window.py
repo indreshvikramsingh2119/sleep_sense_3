@@ -11,6 +11,10 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from src.utils.database_manager import DatabaseManager
 
 
 class DatabaseWindow(QDialog):
@@ -18,11 +22,12 @@ class DatabaseWindow(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setModal(True)
+        self.setModal(False)
         self.setWindowTitle("Patient Database")
         self.setFixedSize(1200, 800)
+        self.db_manager = DatabaseManager()
         self.init_ui()
-        self.load_sample_data()
+        self.load_patients_from_database()
         
     def init_ui(self):
         # Apply medical theme
@@ -149,8 +154,7 @@ class DatabaseWindow(QDialog):
             QCheckBox::indicator:checked {
                 background-color: #3498db;
                 border-color: #3498db;
-                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iOCIgdmlld0JveD0iMCAwIDEwIDgiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTEgNEwzLjUgNi41TDkgMSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPg==);
-            }
+                l
         """
         
         self.full_text_search.setStyleSheet(checkbox_style)
@@ -482,54 +486,21 @@ class DatabaseWindow(QDialog):
         
         return toolbar
         
-    def load_sample_data(self):
-        """Load sample data matching the reference image"""
-        # Patients data
-        patients_data = [
-            ("0", "Normal", "14-02-1967"),
-            ("Example", "DSA", "21-09-1945"),
-            ("Example", "Cheyne Stokes", "01-12-1958")
-        ]
+    def load_patients_from_database(self):
+        """Load patients from database"""
+        patients = self.db_manager.get_all_patients()
         
-        self.patients_table.setRowCount(len(patients_data))
-        for row, (last_name, first_name, dob) in enumerate(patients_data):
-            self.patients_table.setItem(row, 0, QTableWidgetItem(last_name))
-            self.patients_table.setItem(row, 1, QTableWidgetItem(first_name))
-            self.patients_table.setItem(row, 2, QTableWidgetItem(dob))
+        self.patients_table.setRowCount(len(patients))
+        for row, patient in enumerate(patients):
+            self.patients_table.setItem(row, 0, QTableWidgetItem(patient['last_name']))
+            self.patients_table.setItem(row, 1, QTableWidgetItem(patient['first_name']))
+            self.patients_table.setItem(row, 2, QTableWidgetItem(patient['dob']))
+            # Store patient ID in the row for later retrieval
+            self.patients_table.item(row, 0).setData(Qt.UserRole, patient['id'])
         
-        # Records data
-        records_data = [
-            ("0", "Normal", "28-04-2010", "22:34:10", "03:38:42", False),
-            ("Example", "DSA", "23-08-2008", "23:33:44", "04:10:43", False),
-            ("Example", "Cheyne Sto", "21-01-2009", "21:13:18", "08:42:50", False)
-        ]
-        
-        self.records_table.setRowCount(len(records_data))
-        for row, (last_name, first_name, rec_date, start_time, duration, archived) in enumerate(records_data):
-            self.records_table.setItem(row, 0, QTableWidgetItem(last_name))
-            self.records_table.setItem(row, 1, QTableWidgetItem(first_name))
-            self.records_table.setItem(row, 2, QTableWidgetItem(rec_date))
-            self.records_table.setItem(row, 3, QTableWidgetItem(start_time))
-            self.records_table.setItem(row, 4, QTableWidgetItem(duration))
-            
-            # Add checkbox for archived column
-            checkbox = QCheckBox()
-            checkbox.setChecked(archived)
-            checkbox.setEnabled(False)  # Make it read-only
-            self.records_table.setCellWidget(row, 5, checkbox)
-        
-        # Reports data
-        reports_data = [
-            ("23-04-2026 11:39:39", "Analyzed automatically", ""),
-            ("23-04-2026 11:31:35", "", "Edited manually"),
-            ("18-04-2026 12:23:00", "", "Edited manually")
-        ]
-        
-        self.reports_table.setRowCount(len(reports_data))
-        for row, (datetime, analysis_status, manual_status) in enumerate(reports_data):
-            self.reports_table.setItem(row, 0, QTableWidgetItem(datetime))
-            self.reports_table.setItem(row, 1, QTableWidgetItem(analysis_status))
-            self.reports_table.setItem(row, 2, QTableWidgetItem(manual_status))
+        # Clear records and reports tables for now
+        self.records_table.setRowCount(0)
+        self.reports_table.setRowCount(0)
         
         # Connect search functionality
         self.search_input.textChanged.connect(self.filter_patients)
@@ -563,9 +534,47 @@ class DatabaseWindow(QDialog):
             
     def handle_selection(self):
         """Handle Selection button click"""
-        selected_rows = self.patients_table.selectedItems()
-        if selected_rows:
-            print(f"Selection: {len(set(item.row() for item in selected_rows))} patients selected")
+        selected_items = self.patients_table.selectedItems()
+        if selected_items:
+            # Get the first selected row
+            row = selected_items[0].row()
+            
+            # Get patient database ID from the row
+            patient_db_id = self.patients_table.item(row, 0).data(Qt.UserRole)
+            
+            # Get patient data from the selected row
+            last_name = self.patients_table.item(row, 0).text()
+            first_name = self.patients_table.item(row, 1).text()
+            dob = self.patients_table.item(row, 2).text()
+            
+            # Fetch full patient data from database
+            full_patient_data = self.db_manager.get_patient_by_id(patient_db_id)
+            
+            if full_patient_data:
+                print(f"Selected patient: {full_patient_data['last_name']} {full_patient_data['first_name']} (DB ID: {patient_db_id})")
+                
+                # Set patient data in parent dashboard
+                if self.parent() and hasattr(self.parent(), 'load_patient_data'):
+                    self.parent().load_patient_data(full_patient_data)
+                else:
+                    # Fallback to old method if load_patient_data doesn't exist
+                    if self.parent() and hasattr(self.parent(), 'monitor_chart'):
+                        patient_id_str = f"{last_name}_{first_name}_{dob}"
+                        self.parent().monitor_chart.set_patient_id(patient_id_str)
+                        
+                        # Update patient info widget
+                        if hasattr(self.parent(), 'patient_info'):
+                            self.parent().patient_info.set_patient_data({
+                                'last_name': last_name,
+                                'first_name': first_name,
+                                'dob': dob,
+                                'patient_id': patient_id_str
+                            })
+                
+                # Close the dialog
+                self.accept()
+            else:
+                print("Error: Could not fetch patient data from database")
         else:
             print("No patients selected")
             

@@ -138,7 +138,7 @@ class PatientInfoWidget(QWidget):
         raw_container_layout.setContentsMargins(8, 8, 8, 8)
         raw_container_layout.setSpacing(8)
         
-        # Raw Data File Section (inline, under patient details)
+        # Raw Data File Section 
         raw_section = self.create_raw_data_section()
         raw_container_layout.addWidget(raw_section)
         
@@ -422,3 +422,18 @@ class PatientInfoWidget(QWidget):
         layout.addStretch()
         
         return frame
+    
+    def set_patient_data(self, patient_data):
+        """Update patient information display with selected patient data"""
+        # Update patient name
+        name_label = self.findChild(QLabel, "patientName")
+        if name_label:
+            full_name = f"{patient_data.get('first_name', '')} {patient_data.get('last_name', '')}"
+            name_label.setText(full_name.strip())
+        
+        # Update patient ID
+        id_label = self.findChild(QLabel, "patientId")
+        if id_label:
+            id_label.setText(f"ID: {patient_data.get('patient_id', '--------')}")
+        
+        print(f"Updated patient info: {patient_data}")

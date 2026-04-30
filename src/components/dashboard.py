@@ -6,7 +6,7 @@ import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea,
-    QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar
+    QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox
 )
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont, QPixmap
@@ -15,6 +15,7 @@ from .patient_info_widget import PatientInfoWidget
 from .sleep_monitor_chart import SleepMonitorChart
 from .database_window import DatabaseWindow
 from .archive_window import ArchiveWindow
+from .event_window import EventWindow
 from ..utils.toolbar_utils import create_toolbar_button, get_icon_definitions, get_toolbar_qss_styles
 from src.utils.button_functions import ButtonFunctions
 
@@ -66,8 +67,8 @@ class SleepSenseDashboard(QMainWindow):
         top_layout.setSpacing(0)
         
         # Professional Icon Toolbar
-        toolbar = self.create_professional_toolbar()
-        top_layout.addWidget(toolbar)
+        self.toolbar = self.create_professional_toolbar()
+        top_layout.addWidget(self.toolbar)
         
         # Add spacer to push controls to the right
         top_layout.addStretch()
@@ -226,6 +227,67 @@ class SleepSenseDashboard(QMainWindow):
         self.hidden_graphs_dropdown.setEnabled(False)
         
         controls_layout.addWidget(self.hidden_graphs_dropdown)
+        
+        # Add vertical divider line
+        divider2 = QFrame()
+        divider2.setFrameShape(QFrame.VLine)
+        divider2.setFrameShadow(QFrame.Sunken)
+        divider2.setStyleSheet("""
+            QFrame {
+                background-color: #d1d5db;
+                color: #d1d5db;
+                border: none;
+                margin: 0 4px;
+            }
+        """)
+        divider2.setFixedWidth(1)
+        controls_layout.addWidget(divider2)
+        
+        # Screenshot Button
+        self.btn_screenshot = QPushButton("📷")
+        self.btn_screenshot.setObjectName("screenshotButton")
+        self.btn_screenshot.setFixedSize(30, 22)
+        self.btn_screenshot.setToolTip("Take Screenshot")
+        self.btn_screenshot.setStatusTip("Capture entire application window")
+        self.btn_screenshot.clicked.connect(self.take_screenshot)
+        self.btn_screenshot.setStyleSheet("""
+            QPushButton#screenshotButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f8fafc,
+                    stop: 1 #f1f5f9
+                );
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                color: #374151;
+                font-size: 14px;
+                font-weight: bold;
+                text-align: center;
+            }
+            QPushButton#screenshotButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #dbeafe,
+                    stop: 1 #bfdbfe
+                );
+                border: 1px solid #3b82f6;
+                color: #1e40af;
+            }
+            QPushButton#screenshotButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #f8fafc,
+                    stop: 0.5 #e2e8f0,
+                    stop: 1 #cbd5e1
+                );
+                border: 1px solid #94a3b8;
+                color: #1e293b;
+            }
+        """)
+        controls_layout.addWidget(self.btn_screenshot)
+        
         controls_layout.addStretch()
         
         return controls_container
@@ -473,12 +535,13 @@ class SleepSenseDashboard(QMainWindow):
         
         return main_container
     
+        
     def slider_navigate_backward(self):
         """Navigate backward using slider buttons"""
         if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
             # Step size equals the current time window size
-            step_size = self.monitor_chart.current_time_window  # Move by exact time window size
-            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  # 10 samples per second
+            step_size = self.monitor_chart.current_time_window  
+            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0 
             
             # Move backward by step size
             self.monitor_chart.current_time_offset = max(0, self.monitor_chart.current_time_offset - step_size)
@@ -545,7 +608,7 @@ class SleepSenseDashboard(QMainWindow):
         """Update slider position based on current time offset"""
         if self.time_slider and hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
             # Calculate maximum possible time based on data length
-            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  # 10 samples per second
+            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  
             
             # Calculate slider value (0-100) based on current position
             if max_duration > self.monitor_chart.current_time_window:
@@ -570,14 +633,14 @@ class SleepSenseDashboard(QMainWindow):
     
     def load_stylesheet(self):
         """Load QSS stylesheet"""
-        # Get the directory where this script is located
+        
         script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         qss_file = os.path.join(script_dir, "sleep_sense_medical_white.qss")
         
         # Start with toolbar styles
         stylesheet = get_toolbar_qss_styles()
         
-        # Add existing stylesheet if it exists
+        
         if os.path.exists(qss_file):
             with open(qss_file, 'r') as f:
                 stylesheet += f.read()
@@ -636,26 +699,6 @@ class SleepSenseDashboard(QMainWindow):
         self.btn_download_data.setEnabled(False)  
         toolbar.addWidget(self.btn_download_data)
         
-        toolbar.addSeparator()
-        
-        # Views Group: Signal / Report
-        self.btn_signal_view = create_toolbar_button(
-            os.path.join(script_dir, icons[6]["icon"]),
-            icons[6]["tooltip"],
-            icons[6]["status_tip"],
-            self.open_signal_view
-        )
-        toolbar.addWidget(self.btn_signal_view)
-        
-        self.btn_report_view = create_toolbar_button(
-            os.path.join(script_dir, icons[5]["icon"]),
-            icons[5]["tooltip"],
-            icons[5]["status_tip"],
-            self.open_report_view
-        )
-        toolbar.addWidget(self.btn_report_view)
-        
-        toolbar.addSeparator()
         
         # Data Group: Database / Archive
         self.btn_database = create_toolbar_button(
@@ -676,40 +719,64 @@ class SleepSenseDashboard(QMainWindow):
         
         toolbar.addSeparator()
         
-        # Event List
-        self.btn_event_list = create_toolbar_button(
-            os.path.join(script_dir, icons[7]["icon"]),
-            icons[7]["tooltip"],
-            icons[7]["status_tip"],
-            self.open_event_list
-        )
-        toolbar.addWidget(self.btn_event_list)
+        # Extended Database Options (initially hidden - using QAction)
+        from PyQt5.QtGui import QIcon
         
-        # Screenshot Button
-        self.btn_screenshot = create_toolbar_button(
-            "📷",
-            "Take Screenshot",
-            "Capture entire application window",
-            self.take_screenshot
-        )
-        toolbar.addWidget(self.btn_screenshot)
+        self.action_patient_record = QAction(QIcon(os.path.join(script_dir, icons[4]["icon"])), "Patient Record Card", self)
+        self.action_patient_record.setToolTip("Patient Record Card")
+        self.action_patient_record.setStatusTip("View patient record card")
+        self.action_patient_record.triggered.connect(self.open_report_view)
+        self.action_patient_record.setVisible(False)
+        self.action_patient_record.setEnabled(True)
+        toolbar.addAction(self.action_patient_record)
+        
+        self.action_report_view = QAction(QIcon(os.path.join(script_dir, icons[5]["icon"])), "Report View", self)
+        self.action_report_view.setToolTip("Report View")
+        self.action_report_view.setStatusTip("View ECG/Sleep reports")
+        self.action_report_view.triggered.connect(self.open_report_view)
+        self.action_report_view.setVisible(False)
+        self.action_report_view.setEnabled(True)
+        toolbar.addAction(self.action_report_view)
+        
+        self.action_event_list = QAction(QIcon(os.path.join(script_dir, icons[7]["icon"])), "Event List", self)
+        self.action_event_list.setToolTip("Event List")
+        self.action_event_list.setStatusTip("View detected events")
+        self.action_event_list.triggered.connect(self.open_event_list)
+        self.action_event_list.setVisible(False)
+        self.action_event_list.setEnabled(True)
+        toolbar.addAction(self.action_event_list)
         
         return toolbar
     
     # Toolbar Button Callback Methods
     def go_to_previous(self):
-        """Go to previous record/page"""
+        """Go to previous time window"""
         print("Previous button clicked")
-        # TODO: 
+        self.hide_extended_buttons()
+        if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+            step_size = self.monitor_chart.current_time_window
+            self.monitor_chart.current_time_offset = max(0, self.monitor_chart.current_time_offset - step_size)
+            self.monitor_chart.refresh_charts()
+            self.update_slider_position()
+            print(f"Toolbar previous: offset={self.monitor_chart.current_time_offset:.1f}s")
     
     def go_to_next(self):
-        """Go to next record/page"""
+        """Go to next time window"""
         print("Next button clicked")
-        # TODO: 
+        self.hide_extended_buttons()
+        if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+            step_size = self.monitor_chart.current_time_window
+            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0
+            max_offset = max_duration - self.monitor_chart.current_time_window
+            self.monitor_chart.current_time_offset = min(max_offset, self.monitor_chart.current_time_offset + step_size)
+            self.monitor_chart.refresh_charts()
+            self.update_slider_position()
+            print(f"Toolbar next: offset={self.monitor_chart.current_time_offset:.1f}s") 
     
     def prepare_device(self):
         """Initialize and connect device"""
         print("Prepare Device button clicked")
+        self.hide_extended_buttons()
         # TODO: Implement device preparation logic
    
         self.btn_download_data.setEnabled(True)
@@ -720,10 +787,28 @@ class SleepSenseDashboard(QMainWindow):
         # TODO: Implement data download logic
     
     def open_database(self):
-        """Open patient database as modal dialog"""
+        """Open patient database as modeless window and show extended buttons"""
         print("Database button clicked")
+        # Show extended buttons immediately
+        self.action_patient_record.setVisible(True)
+        self.action_report_view.setVisible(True)
+        self.action_event_list.setVisible(True)
+        # Open database window as modeless (non-blocking)
         self.database_window = DatabaseWindow(self)
-        self.database_window.exec_()  
+        self.database_window.show()
+    
+    def hide_extended_buttons(self):
+        """Hide extended database buttons"""
+        self.action_patient_record.setVisible(False)
+        self.action_report_view.setVisible(False)
+        self.action_event_list.setVisible(False)  
+    
+    def open_archive(self):
+        """Access archived records as modal dialog"""
+        print("Archive button clicked")
+        self.hide_extended_buttons()
+        self.archive_window = ArchiveWindow(self)
+        self.archive_window.exec_()  # Modal dialog
     
     def open_report_view(self):
         """View ECG/Sleep reports - Opens Patient Record Form as modal dialog"""
@@ -735,6 +820,28 @@ class SleepSenseDashboard(QMainWindow):
         self.patient_record_form = PatientRecordForm(self)
         self.patient_record_form.exec_()  # Modal dialog
     
+    def load_patient_data(self, patient_data):
+        """Load patient data from database and display in dashboard"""
+        print(f"Loading patient data: {patient_data['last_name']} {patient_data['first_name']}")
+        
+        # Create patient ID string for display
+        patient_id_str = patient_data.get('patient_id', str(patient_data.get('id', '--------')))
+        
+        # Set patient ID in monitor chart
+        if hasattr(self, 'monitor_chart'):
+            self.monitor_chart.set_patient_id(patient_id_str)
+        
+        # Update patient info widget
+        if hasattr(self, 'patient_info'):
+            self.patient_info.set_patient_data({
+                'last_name': patient_data.get('last_name', ''),
+                'first_name': patient_data.get('first_name', ''),
+                'dob': patient_data.get('dob', ''),
+                'patient_id': patient_id_str
+            })
+        
+        print(f"Patient data loaded successfully in dashboard")
+    
     def open_signal_view(self):
         """View live physiological signals"""
         print("Signal View button clicked")
@@ -743,24 +850,19 @@ class SleepSenseDashboard(QMainWindow):
     def open_event_list(self):
         """View detected events"""
         print("Event List button clicked")
-        # TODO: Implement event list logic
-    
-    def open_archive(self):
-        """Access archived records as modal dialog"""
-        print("Archive button clicked")
-        self.archive_window = ArchiveWindow(self)
-        self.archive_window.exec_()  # Modal dialog
+        self.event_window = EventWindow(self)
+        self.event_window.exec_()  # Modal dialog
     
     def take_screenshot(self):
         """Take a screenshot of the entire application"""
         try:
             # Get the main window
             from PyQt5.QtWidgets import QApplication
-            from PyQt5.QtGui import QPixmap, QScreen, QFileDialog
+            from PyQt5.QtGui import QPixmap, QScreen
             from datetime import datetime
             
             # Capture the entire application window
-            screen = QApplication.primaryScreen().grabWindow(self.windowHandle())
+            screen = QApplication.primaryScreen().grabWindow(self.winId())
             
             # Generate filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -776,11 +878,9 @@ class SleepSenseDashboard(QMainWindow):
             
             if file_path:
                 screen.save(file_path, "PNG")
-                from PyQt5.QtWidgets import QMessageBox
                 QMessageBox.information(self, "Screenshot Saved", 
                                    f"Screenshot saved to:\n{file_path}")
         except Exception as e:
-            from PyQt5.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Screenshot Error", 
                                f"Failed to take screenshot:\n{str(e)}")
     

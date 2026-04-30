@@ -237,49 +237,7 @@ class SleepMonitorChart(QWidget):
         self.scroll_area.setWidget(self.charts_widget)
         chart_layout.addWidget(self.scroll_area, stretch=1)
         
-        # Screenshot Button in main toolbar
-        screenshot_btn = QPushButton("📷")
-        screenshot_btn.setObjectName("screenshotButton")
-        screenshot_btn.setFixedSize(28, 20)
-        screenshot_btn.setStyleSheet("""
-            QPushButton#screenshotButton {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #4CAF50,
-                    stop: 1 #45A049
-                );
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 12px;
-                font-weight: 600;
-                text-align: center;
-                padding: 2px;
-            }
-            QPushButton#screenshotButton:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #45A049,
-                    stop: 1 #3D8B58
-                );
-                border: 1px solid #3D8B58;
-            }
-            QPushButton#screenshotButton:pressed {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #3D8B58,
-                    stop: 1 #2E7D32
-                );
-            }
-        """)
-        screenshot_btn.setToolTip("Take Screenshot")
-        
-        def on_screenshot():
-            self.take_screenshot()
-        
-        screenshot_btn.clicked.connect(on_screenshot)
-        chart_layout.addWidget(screenshot_btn)
-        
+                
         # Status Bar
         status_bar = self.create_status_bar()
         chart_layout.addWidget(status_bar)
@@ -310,7 +268,7 @@ class SleepMonitorChart(QWidget):
         )
         
         if reply == QMessageBox.Yes:
-            self.save_raw_data()
+            self.save_raw_data_file()
     
     def take_screenshot(self):
         """Take a screenshot of the entire sleep monitor chart"""
@@ -386,6 +344,9 @@ class SleepMonitorChart(QWidget):
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
+        # Emit signal to update save file list in patient info widget
+        self.raw_data_saved.emit(file_path, timestamp_iso)
+        
         return file_path, timestamp_iso
 
     def on_time_window_changed(self, index):
