@@ -497,6 +497,27 @@ class SleepSenseDashboard(QMainWindow):
             
             # Move forward by step size
             self.monitor_chart.current_time_offset = min(max_offset, self.monitor_chart.current_time_offset + step_size)
+            
+            # ✅ FORCE VIEWBOX UPDATE AND PLOT REDRAW
+            for i in range(self.monitor_chart.charts_layout.count()):
+                container = self.monitor_chart.charts_layout.itemAt(i).widget()
+                if hasattr(container, 'plot_widget'):
+                    pw = container.plot_widget
+                    
+                    # Force X-axis range update
+                    start = 0
+                    end = self.monitor_chart.current_time_window
+                    pw.setXRange(start, end, padding=0)
+                    
+                    # Force redraw
+                    pw.getViewBox().update()
+                    pw.repaint()
+                    print(f"Updated ViewBox range to {start} → {end} for {pw.chart_name}")
+            
+            # ✅ DELAYED OVERLAY RENDER (IMPORTANT)
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, self.monitor_chart.render_dynamic_selections)
+            
             self.monitor_chart.refresh_charts()
             self.update_slider_position()
             
