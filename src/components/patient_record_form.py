@@ -7,10 +7,14 @@ from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QRadioButton, QButtonGroup, QTextEdit, QPushButton,
     QFrame, QScrollArea, QDateEdit, QGroupBox, QGridLayout,
-    QSizePolicy, QApplication
+    QSizePolicy, QApplication, QMessageBox
 )
 from PyQt5.QtCore import Qt, QDate
 from PyQt5.QtGui import QFont, QPixmap
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from src.utils.database_manager import DatabaseManager
 
 
 class PatientRecordForm(QDialog):
@@ -21,6 +25,7 @@ class PatientRecordForm(QDialog):
         self.setModal(True)
         self.setWindowTitle("Patient Record Card")
         self.setFixedSize(750, 650)
+        self.db_manager = DatabaseManager()
         self.init_ui()
         
     def init_ui(self):
@@ -254,7 +259,7 @@ class PatientRecordForm(QDialog):
             QPushButton#cancelBtn:hover {
                 background: qlineargradient(
                     x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #f75c4c,
+                    stop: 0 #f75c4c, 
                     stop: 0 #d0493b
                 );
             }
@@ -670,15 +675,26 @@ class PatientRecordForm(QDialog):
         # Validate required fields
         if not self.last_name_edit.text().strip():
             self.last_name_edit.setStyleSheet("background-color: #ffcccb; border: 2px solid red;")
+            QMessageBox.warning(self, "Validation Error", "Last name is required!")
             return
         
         if not self.dob_edit.date().isValid():
             self.dob_edit.setStyleSheet("background-color: #ffcccb; border: 2px solid red;")
+            QMessageBox.warning(self, "Validation Error", "Date of birth is required!")
             return
         
-        # Here you can save the form data
-        print("Patient record saved successfully!")
-        self.close()
+        # Get patient data
+        patient_data = self.get_patient_data()
+        
+        # Save to database
+        patient_id = self.db_manager.save_patient(patient_data)
+        
+        if patient_id:
+            QMessageBox.information(self, "Success", f"Patient record saved successfully!\nDatabase ID: {patient_id}")
+            print(f"Patient record saved with ID: {patient_id}")
+            self.close()
+        else:
+            QMessageBox.critical(self, "Error", "Failed to save patient record to database!")
     
     def reject_form(self):
         """Handle Cancel button click"""

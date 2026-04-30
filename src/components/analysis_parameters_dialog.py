@@ -30,9 +30,13 @@ class AnalysisParametersDialog(QDialog):
         # Initialize parameter values
         self.parameters = {
             'apnea_detection': True,
+            'threshold': 20.0,
+            'min_duration': 10.0,
+            'max_duration': 80.0,
+            'obstructive_apnea_threshold': 20.0,
+            'central_apnea_threshold': 60.0,
+            'amplitude_threshold_central': 8.0,
             'apnea_type': 'All Types',
-            'central_apnea_threshold': 3.0,
-            'obstructive_apnea_threshold': 10.0,
             'hypopnea_threshold': 8.0,
             'desaturation_threshold': 3.0,
             'flow_limitation': False,
@@ -249,6 +253,7 @@ class AnalysisParametersDialog(QDialog):
         self.snoring_duration.valueChanged.connect(self.on_parameter_changed)
         layout.addWidget(self.snoring_duration, 2, 1, 1, 1)
         
+    
         # Frequency Analysis
         self.snoring_frequency_enabled = QCheckBox("Enable Frequency Analysis")
         self.snoring_frequency_enabled.setChecked(False)
@@ -427,55 +432,106 @@ class AnalysisParametersDialog(QDialog):
         self.apnea_enabled.stateChanged.connect(self.on_parameter_changed)
         layout.addWidget(self.apnea_enabled, 0, 0, 1, 2)
         
-        # Central Apnea Threshold
-        layout.addWidget(QLabel("Central Apnea Threshold:"), 1, 0, 1, 1)
-        self.central_threshold = QDoubleSpinBox()
-        self.central_threshold.setRange(0.0, 10.0)
-        self.central_threshold.setSingleStep(0.1)
-        self.central_threshold.setDecimals(1)
-        self.central_threshold.setValue(self.parameters['central_apnea_threshold'])
-        self.central_threshold.setSuffix(" seconds")
-        self.central_threshold.valueChanged.connect(self.on_parameter_changed)
-        layout.addWidget(self.central_threshold, 1, 1, 1, 1)
+        # Threshold (Flow Reduction)
+        layout.addWidget(QLabel("Threshold:"), 1, 0, 1, 1)
+        self.threshold = QDoubleSpinBox()
+        self.threshold.setRange(1.0, 90.0)
+        self.threshold.setSingleStep(1.0)
+        self.threshold.setDecimals(0)
+        self.threshold.setValue(self.parameters['threshold'])
+        self.threshold.setSuffix(" %")
+        self.threshold.valueChanged.connect(self.on_parameter_changed)
+        layout.addWidget(self.threshold, 1, 1, 1, 1)
         
-        # Obstructive Apnea Threshold
-        layout.addWidget(QLabel("Obstructive Apnea Threshold:"), 2, 0, 1, 1)
-        self.obstructive_threshold = QDoubleSpinBox()
-        self.obstructive_threshold.setRange(0.0, 20.0)
-        self.obstructive_threshold.setSingleStep(0.1)
-        self.obstructive_threshold.setDecimals(1)
-        self.obstructive_threshold.setValue(self.parameters['obstructive_apnea_threshold'])
-        self.obstructive_threshold.setSuffix(" seconds")
-        self.obstructive_threshold.valueChanged.connect(self.on_parameter_changed)
-        layout.addWidget(self.obstructive_threshold, 2, 1, 1, 1)
+        # Range label
+        threshold_range_label = QLabel("[1-90]")
+        threshold_range_label.setStyleSheet("color: #64748b; font-size: 12px;")
+        layout.addWidget(threshold_range_label, 1, 2, 1, 1)
         
-        # Hypopnea Threshold
-        layout.addWidget(QLabel("Hypopnea Threshold:"), 3, 0, 1, 1)
-        self.hypopnea_threshold = QDoubleSpinBox()
-        self.hypopnea_threshold.setRange(0.0, 15.0)
-        self.hypopnea_threshold.setSingleStep(0.1)
-        self.hypopnea_threshold.setDecimals(1)
-        self.hypopnea_threshold.setValue(self.parameters['hypopnea_threshold'])
-        self.hypopnea_threshold.setSuffix(" seconds")
-        self.hypopnea_threshold.valueChanged.connect(self.on_parameter_changed)
-        layout.addWidget(self.hypopnea_threshold, 3, 1, 1, 1)
+        # Flow reduction label
+        flow_reduction_label = QLabel("Flow reduction: 80%")
+        flow_reduction_label.setStyleSheet("color: #64748b; font-size: 12px;")
+        layout.addWidget(flow_reduction_label, 1, 3, 1, 1)
         
-        # Desaturation Threshold
-        layout.addWidget(QLabel("Desaturation Threshold:"), 4, 0, 1, 1)
-        self.desaturation_threshold = QDoubleSpinBox()
-        self.desaturation_threshold.setRange(1.0, 10.0)
-        self.desaturation_threshold.setSingleStep(0.1)
-        self.desaturation_threshold.setDecimals(1)
-        self.desaturation_threshold.setValue(self.parameters['desaturation_threshold'])
-        self.desaturation_threshold.setSuffix(" %")
-        self.desaturation_threshold.valueChanged.connect(self.on_parameter_changed)
-        layout.addWidget(self.desaturation_threshold, 4, 1, 1, 1)
+        # Minimum Duration
+        layout.addWidget(QLabel("Min. duration:"), 2, 0, 1, 1)
+        self.min_duration = QDoubleSpinBox()
+        self.min_duration.setRange(1.0, 20.0)
+        self.min_duration.setSingleStep(1.0)
+        self.min_duration.setDecimals(0)
+        self.min_duration.setValue(self.parameters['min_duration'])
+        self.min_duration.setSuffix(" seconds")
+        self.min_duration.valueChanged.connect(self.on_parameter_changed)
+        layout.addWidget(self.min_duration, 2, 1, 1, 1)
         
-        # Apnea Index Calculation
-        layout.addWidget(QLabel("Apnea Index:"), 5, 0, 1, 1)
-        self.apnea_index_label = QLabel("0.0 events/hour")
-        self.apnea_index_label.setStyleSheet("font-weight: bold; color: #2563eb;")
-        layout.addWidget(self.apnea_index_label, 5, 1, 1, 1)
+        # Range label
+        min_duration_range_label = QLabel("[1-20]")
+        min_duration_range_label.setStyleSheet("color: #64748b; font-size: 12px;")
+        layout.addWidget(min_duration_range_label, 2, 2, 1, 1)
+        
+        # Maximum Duration
+        layout.addWidget(QLabel("Max. duration:"), 3, 0, 1, 1)
+        self.max_duration = QDoubleSpinBox()
+        self.max_duration.setRange(1.0, 100.0)
+        self.max_duration.setSingleStep(1.0)
+        self.max_duration.setDecimals(0)
+        self.max_duration.setValue(self.parameters['max_duration'])
+        self.max_duration.setSuffix(" seconds")
+        self.max_duration.valueChanged.connect(self.on_parameter_changed)
+        layout.addWidget(self.max_duration, 3, 1, 1, 1)
+        
+        # Range label
+        max_duration_range_label = QLabel("[1-100]")
+        max_duration_range_label.setStyleSheet("color: #64748b; font-size: 12px;")
+        layout.addWidget(max_duration_range_label, 3, 2, 1, 1)
+        
+        # Threshold for Obstructive Apnea
+        layout.addWidget(QLabel("Threshold for obstructive apnea:"), 4, 0, 1, 1)
+        self.obstructive_apnea_threshold = QDoubleSpinBox()
+        self.obstructive_apnea_threshold.setRange(0.0, 49.0)
+        self.obstructive_apnea_threshold.setSingleStep(1.0)
+        self.obstructive_apnea_threshold.setDecimals(0)
+        self.obstructive_apnea_threshold.setValue(self.parameters['obstructive_apnea_threshold'])
+        self.obstructive_apnea_threshold.setSuffix(" %")
+        self.obstructive_apnea_threshold.valueChanged.connect(self.on_parameter_changed)
+        layout.addWidget(self.obstructive_apnea_threshold, 4, 1, 1, 1)
+        
+        # Range label
+        obstructive_range_label = QLabel("[0-49]")
+        obstructive_range_label.setStyleSheet("color: #64748b; font-size: 12px;")
+        layout.addWidget(obstructive_range_label, 4, 2, 1, 1)
+        
+        # Threshold for Central Apnea
+        layout.addWidget(QLabel("Threshold for central apnea:"), 5, 0, 1, 1)
+        self.central_apnea_threshold = QDoubleSpinBox()
+        self.central_apnea_threshold.setRange(50.0, 80.0)
+        self.central_apnea_threshold.setSingleStep(1.0)
+        self.central_apnea_threshold.setDecimals(0)
+        self.central_apnea_threshold.setValue(self.parameters['central_apnea_threshold'])
+        self.central_apnea_threshold.setSuffix(" %")
+        self.central_apnea_threshold.valueChanged.connect(self.on_parameter_changed)
+        layout.addWidget(self.central_apnea_threshold, 5, 1, 1, 1)
+        
+        # Range label
+        central_range_label = QLabel("[50-80]")
+        central_range_label.setStyleSheet("color: #64748b; font-size: 12px;")
+        layout.addWidget(central_range_label, 5, 2, 1, 1)
+        
+        # Amplitude Threshold for Central Apnea
+        layout.addWidget(QLabel("Amplitude threshold for central apnea:"), 6, 0, 1, 1)
+        self.amplitude_threshold_central = QDoubleSpinBox()
+        self.amplitude_threshold_central.setRange(2.0, 30.0)
+        self.amplitude_threshold_central.setSingleStep(1.0)
+        self.amplitude_threshold_central.setDecimals(0)
+        self.amplitude_threshold_central.setValue(self.parameters['amplitude_threshold_central'])
+        self.amplitude_threshold_central.setSuffix(" %")
+        self.amplitude_threshold_central.valueChanged.connect(self.on_parameter_changed)
+        layout.addWidget(self.amplitude_threshold_central, 6, 1, 1, 1)
+        
+        # Range label
+        amplitude_range_label = QLabel("[2-30]")
+        amplitude_range_label.setStyleSheet("color: #64748b; font-size: 12px;")
+        layout.addWidget(amplitude_range_label, 6, 2, 1, 1)
         
         group.setLayout(layout)
         return group
@@ -793,65 +849,8 @@ class AnalysisParametersDialog(QDialog):
         
     def on_parameter_changed(self):
         """Handle parameter changes"""
-        self.update_apnea_index()
         self.parameters_changed.emit(self.get_current_parameters())
     
-    def update_apnea_index(self):
-        """Calculate and display real-time apnea index"""
-        if self.apnea_enabled.isChecked():
-            # Simulate apnea index calculation based on thresholds
-            central_events = 10.0 / self.central_threshold.value() if self.central_threshold.value() > 0 else 0
-            obstructive_events = 15.0 / self.obstructive_threshold.value() if self.obstructive_threshold.value() > 0 else 0
-            hypopnea_events = 8.0 / self.hypopnea_threshold.value() if self.hypopnea_threshold.value() > 0 else 0
-            
-            # Calculate total events per hour (simplified calculation)
-            total_events = central_events + obstructive_events + hypopnea_events
-            apnea_index = total_events * 0.8  # Adjust for sleep efficiency
-            
-            self.apnea_index_label.setText(f"{apnea_index:.1f} events/hour")
-            
-            # Color code based on severity
-            if apnea_index < 5:
-                color = "#10b981"  # Green - Normal
-            elif apnea_index < 15:
-                color = "#f59e0b"  # Yellow - Mild
-            elif apnea_index < 30:
-                color = "#ef4444"  # Orange - Moderate
-            else:
-                color = "#dc2626"  # Red - Severe
-            
-            self.apnea_index_label.setStyleSheet(f"font-weight: bold; color: {color};")
-        else:
-            self.apnea_index_label.setText("0.0 events/hour")
-            self.apnea_index_label.setStyleSheet("font-weight: bold; color: #6b7280;")
-        
-        # Update hypoapnea index
-        if self.hypoapnea_enabled.isChecked():
-            # Simulate hypoapnea index calculation
-            duration_factor = 8.0 / self.hypoapnea_duration.value() if self.hypoapnea_duration.value() > 0 else 0
-            airflow_factor = 30.0 / self.airflow_reduction.value() if self.airflow_reduction.value() > 0 else 0
-            desaturation_factor = 3.0 / self.oxygen_desaturation.value() if self.oxygen_desaturation.value() > 0 else 0
-            
-            total_hypoapnea_events = duration_factor + airflow_factor + desaturation_factor
-            hypoapnea_index = total_hypoapnea_events * 0.6  # Adjust for sleep efficiency
-            
-            self.hypoapnea_index_label.setText(f"{hypoapnea_index:.1f} events/hour")
-            
-            # Color code based on severity
-            if hypoapnea_index < 5:
-                color = "#10b981"  # Green - Normal
-            elif hypoapnea_index < 15:
-                color = "#f59e0b"  # Yellow - Mild
-            elif hypoapnea_index < 30:
-                color = "#ef4444"  # Orange - Moderate
-            else:
-                color = "#dc2626"  # Red - Severe
-            
-            self.hypoapnea_index_label.setStyleSheet(f"font-weight: bold; color: {color};")
-        else:
-            self.hypoapnea_index_label.setText("0.0 events/hour")
-            self.hypoapnea_index_label.setStyleSheet("font-weight: bold; color: #6b7280;")
-        
     def on_smoothing_changed(self, value):
         """Handle smoothing slider change"""
         smoothing_factor = value / 100.0
@@ -869,10 +868,12 @@ class AnalysisParametersDialog(QDialog):
         """Get current parameter values"""
         return {
             'apnea_detection': self.apnea_enabled.isChecked(),
-            'central_apnea_threshold': self.central_threshold.value(),
-            'obstructive_apnea_threshold': self.obstructive_threshold.value(),
-            'hypopnea_threshold': self.hypopnea_threshold.value(),
-            'desaturation_threshold': self.desaturation_threshold.value(),
+            'threshold': self.threshold.value(),
+            'min_duration': self.min_duration.value(),
+            'max_duration': self.max_duration.value(),
+            'obstructive_apnea_threshold': self.obstructive_apnea_threshold.value(),
+            'central_apnea_threshold': self.central_apnea_threshold.value(),
+            'amplitude_threshold_central': self.amplitude_threshold_central.value(),
             'hypoapnea_detection': self.hypoapnea_enabled.isChecked(),
             'hypoapnea_duration': self.hypoapnea_duration.value(),
             'airflow_reduction': self.airflow_reduction.value(),
