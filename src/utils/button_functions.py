@@ -268,12 +268,10 @@ class ButtonFunctions:
             menu.addAction('Edit event group', self.tools_edit_event_group)
             menu.addSeparator()
             settings_menu = menu.addMenu('Settings')
-            settings_menu.addAction('Select language', self.tools_settings_select_language)
             settings_menu.addAction('Signal view', self.tools_settings_signal_view)
             settings_menu.addAction('Report', self.tools_settings_report)
             settings_menu.addAction('Analysis parameters', self.tools_settings_analysis_parameters)
             settings_menu.addAction('EDF export', self.tools_settings_edf_export)
-            settings_menu.addAction('Device Configuration', self.tools_settings_device_configuration)
             menu.addAction('Send Event Log by email', self.tools_send_event_log_email)
             menu.addAction('Database Transfer', self.tools_database_transfer)
             
@@ -559,15 +557,7 @@ class ButtonFunctions:
         print("Tools -> Database Transfer clicked")
         # TODO: Implement database transfer functionality
     
-    def tools_settings_select_language(self):
-        """Select language"""
-        print("Tools -> Settings -> Select language clicked")
-        dialog = LanguageSelectionDialog(self.parent)
-        if dialog.exec_() == QDialog.Accepted:
-            selected_language = dialog.get_selected_language()
-            print(f"Selected language: {selected_language}")
-            # TODO: Apply language change to application
-    
+        
     def tools_settings_signal_view(self):
         """Signal view"""
         print("Tools -> Settings -> Signal view clicked")
@@ -598,14 +588,7 @@ class ButtonFunctions:
             print("EDF export settings applied")
             # TODO: Apply EDF export settings
     
-    def tools_settings_device_configuration(self):
-        """Device Configuration"""
-        print("Tools -> Settings -> Device Configuration clicked")
-        dialog = DeviceConfigurationDialog(self.parent)
-        if dialog.exec_() == QDialog.Accepted:
-            print("Device configuration settings applied")
-            # TODO: Apply device configuration settings
-    
+        
     def tools_reanalysis(self):
         """Reanalysis"""
         print("Tools -> Reanalysis clicked")
@@ -642,6 +625,12 @@ class ButtonFunctions:
     
     def file_database(self):
         """Open patient database window - same as red database button"""
+        # Check if parent has monitor chart with selection active and block if needed
+        if (hasattr(self.parent, 'monitor_chart') and 
+            hasattr(self.parent.monitor_chart, 'block_if_selection_active') and 
+            self.parent.monitor_chart.block_if_selection_active()):
+            return
+        
         # Call the same open_database method as the red toolbar button
         if hasattr(self.parent, 'open_database'):
             self.parent.open_database()
@@ -650,6 +639,12 @@ class ButtonFunctions:
     
     def file_open_archive(self):
         """Open archive window - same as blue archive button"""
+        # Check if parent has monitor chart with selection active and block if needed
+        if (hasattr(self.parent, 'monitor_chart') and 
+            hasattr(self.parent.monitor_chart, 'block_if_selection_active') and 
+            self.parent.monitor_chart.block_if_selection_active()):
+            return
+        
         # Call the same open_archive method as the blue toolbar button
         if hasattr(self.parent, 'open_archive'):
             self.parent.open_archive()
@@ -969,68 +964,6 @@ class ButtonFunctions:
 
     def view_quick_start(self):
         self._activate_view('quick_start', 'Quick start')
-
-
-class LanguageSelectionDialog(QDialog):
-    """Dialog for selecting application language"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.selected_language = "English"  # Default selection
-        self.setWindowTitle("Select Language")
-        self.setFixedSize(300, 400)
-        self.init_ui()
-    
-    def init_ui(self):
-        """Initialize the dialog UI"""
-        layout = QVBoxLayout()
-        
-        # Create language list
-        self.language_list = QListWidget()
-        languages = [
-            "Danish",
-            "Dutch", 
-            "English",
-            "French",
-            "German",
-            "Italian",
-            "Norwegian",
-            "Portuguese",
-            "Spanish",
-            "Swedish"
-        ]
-        
-        self.language_list.addItems(languages)
-        
-        # Select English by default
-        for i in range(self.language_list.count()):
-            if self.language_list.item(i).text() == "English":
-                self.language_list.setCurrentRow(i)
-                break
-        
-        # Create buttons
-        button_layout = QHBoxLayout()
-        ok_button = QPushButton("OK")
-        cancel_button = QPushButton("Cancel")
-        
-        ok_button.clicked.connect(self.accept)
-        cancel_button.clicked.connect(self.reject)
-        
-        button_layout.addWidget(ok_button)
-        button_layout.addWidget(cancel_button)
-        
-        # Add widgets to layout
-        layout.addWidget(self.language_list)
-        layout.addLayout(button_layout)
-        
-        self.setLayout(layout)
-    
-    def get_selected_language(self):
-        """Get the selected language"""
-        current_item = self.language_list.currentItem()
-        if current_item:
-            return current_item.text()
-        return "English"
 
 
 class SignalViewDialog(QDialog):
@@ -1376,82 +1309,6 @@ class EDFExportDialog(QDialog):
         }
 
 
-class DeviceConfigurationDialog(QDialog):
-    """Dialog for device configuration settings"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Test Complete - Default Settings")
-        self.setFixedSize(400, 250)
-        self.init_ui()
-    
-    def init_ui(self):
-        """Initialize the dialog UI"""
-        layout = QVBoxLayout()
-        
-        # Channels section
-        channels_group = QGroupBox("Channels")
-        channels_layout = QVBoxLayout()
-        
-        self.flow_radio = QRadioButton("Flow")
-        self.flow_oximetry_radio = QRadioButton("Flow + Oximetry")
-        self.flow_oximetry_radio.setChecked(True)
-        
-        channels_layout.addWidget(self.flow_radio)
-        channels_layout.addWidget(self.flow_oximetry_radio)
-        channels_group.setLayout(channels_layout)
-        
-        # Time section
-        time_group = QGroupBox("Time")
-        time_layout = QVBoxLayout()
-        
-        self.time_slider = QSlider()
-        self.time_slider.setOrientation(1)  # Horizontal
-        self.time_slider.setRange(1, 10)  # 1h to 10h
-        self.time_slider.setValue(4)  # Default to 4h
-        self.time_slider.setTickPosition(QSlider.TicksBelow)
-        self.time_slider.setTickInterval(1)
-        
-        # Time label
-        self.time_label = QLabel("4h")
-        self.time_label.setAlignment(Qt.AlignCenter)  # Center alignment
-        
-        # Connect slider to update label
-        self.time_slider.valueChanged.connect(self.update_time_label)
-        
-        time_layout.addWidget(self.time_slider)
-        time_layout.addWidget(self.time_label)
-        time_group.setLayout(time_layout)
-        
-        # Buttons
-        button_layout = QHBoxLayout()
-        ok_button = QPushButton("OK")
-        cancel_button = QPushButton("Cancel")
-        
-        ok_button.clicked.connect(self.accept)
-        cancel_button.clicked.connect(self.reject)
-        
-        button_layout.addWidget(ok_button)
-        button_layout.addWidget(cancel_button)
-        
-        # Add all to main layout
-        layout.addWidget(channels_group)
-        layout.addWidget(time_group)
-        layout.addStretch()
-        layout.addLayout(button_layout)
-        
-        self.setLayout(layout)
-    
-    def update_time_label(self, value):
-        """Update time label when slider changes"""
-        self.time_label.setText(f"{value}h")
-    
-    def get_configuration(self):
-        """Get current configuration settings"""
-        return {
-            'channels': 'flow' if self.flow_radio.isChecked() else 'flow_oximetry',
-            'time_hours': self.time_slider.value()
-        }
 
 
 class AnalysisParametersDialog(QDialog):

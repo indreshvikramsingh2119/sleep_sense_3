@@ -65,6 +65,7 @@ class SleepMonitorChart(QWidget):
         self.selection_end_scene = None
         self.is_selecting = False
         self.current_selection_chart = None
+        self.selection_active = False  # Global flag for modal interaction lock
         self.selection_labels = {}  # Store selection labels for each chart
         # Dynamic selections storage - store selections in absolute time coordinates
         self.dynamic_selections = {}  # {chart_name: [{'label': 'OSA', 'start_time': 123.5, 'end_time': 125.2, 'color': '#red'}]}
@@ -371,6 +372,9 @@ class SleepMonitorChart(QWidget):
     
     def navigate_backward(self):
         """Navigate backward in time"""
+        if self.block_if_selection_active():
+            return
+        
         if self.spo2_full_data and len(self.spo2_full_data[1]) > 0:
             # Calculate maximum possible time based on data length
             max_duration = len(self.spo2_full_data[1]) / 10.0  # 10 samples per second
@@ -382,6 +386,9 @@ class SleepMonitorChart(QWidget):
     
     def navigate_forward(self):
         """Navigate forward in time"""
+        if self.block_if_selection_active():
+            return
+        
         if self.spo2_full_data and len(self.spo2_full_data[1]) > 0:
             # Calculate maximum possible time based on data length
             max_duration = len(self.spo2_full_data[1]) / 10.0  # 10 samples per second
@@ -459,6 +466,21 @@ class SleepMonitorChart(QWidget):
                     if len(x) > 0 and len(y) > 0:
                         # Update normal line plot
                         plot_widget.plot_curve.setData(x, y)
+                        
+                        # Dynamic SpO2 Y-axis adjustment
+                        avg_spo2 = np.mean(y)
+                        if avg_spo2 > 95:
+                            # Adjust Y-axis to start from 90 when SpO2 is above 95
+                            new_y_min, new_y_max = 90, 100
+                        else:
+                            # Use standard medical range
+                            new_y_min, new_y_max = 70, 100
+                        
+                        try:
+                            plot_widget.setYRange(new_y_min, new_y_max)
+                        except TypeError:
+                            # Try alternative method for older pyqtgraph versions
+                            plot_widget.setRange(yRange=[new_y_min, new_y_max])
                         
                         # Update scatter plot markers if they exist (only in 10s-30s time window)
                         if (hasattr(plot_widget, 'scatter_item') and 
@@ -1169,12 +1191,19 @@ class SleepMonitorChart(QWidget):
         signal_name = name.strip()
         y_min, y_max = y_axis_ranges.get(signal_name, (0, 100))  # Default to 0-100 if not found
         
+        # Dynamic SpO2 Y-axis adjustment for main chart
+        if signal_name == "SpO2":
+            # For SpO2, we'll set initial range but adjust it dynamically when data is loaded
+            initial_y_min, initial_y_max = y_min, y_max
+        else:
+            initial_y_min, initial_y_max = y_min, y_max
+        
         # Set fixed Y-axis range based on medical standards
         try:
-            plot_widget.setYRange(y_min, y_max)
+            plot_widget.setYRange(initial_y_min, initial_y_max)
         except TypeError:
             # Try alternative method for older pyqtgraph versions
-            plot_widget.setRange(yRange=[y_min, y_max])
+            plot_widget.setRange(yRange=[initial_y_min, initial_y_max])
         
         # Restrict zoom to Y-axis only (amplitude zoom) - disable X-axis to prevent sliding
         plot_widget.setMouseEnabled(x=False, y=True)
@@ -1853,6 +1882,10 @@ class SleepMonitorChart(QWidget):
             return
         if plot_widget != self.current_selection_chart:
             return  # Only process for current chart
+        
+        # Prevent selection update if context menu is active
+        if hasattr(self, 'active_context_menu') and self.active_context_menu is not None:
+            return
         vb = plot_widget.getViewBox()
         mouse_point = vb.mapSceneToView(scene_pos)
         self.selection_end = mouse_point
@@ -1950,6 +1983,10 @@ class SleepMonitorChart(QWidget):
         if event.button() != Qt.LeftButton:
             return
             
+        # Prevent new selection if context menu is active
+        if hasattr(self, 'active_context_menu') and self.active_context_menu is not None:
+            return
+            
         # Handle left click directly
         widget_pos = event.pos()
         widget_rect = plot_widget.rect()
@@ -2015,6 +2052,9 @@ class SleepMonitorChart(QWidget):
                 vb = plot_widget.getViewBox()
                 mouse_point = vb.mapSceneToView(self.selection_end_scene)
                 self.selection_end = mouse_point
+
+                # Set selection active flag for modal interaction lock
+                self.selection_active = True
 
                 #  FORCE MENU OPEN
                 self.show_selection_menu()
@@ -2197,11 +2237,33 @@ class SleepMonitorChart(QWidget):
         global_cursor_pos = QCursor.pos()
         print(f"Cursor position: {global_cursor_pos}")
         print("Showing menu...")
+        
+        # Make menu truly modal - it won't close on outside clicks
+        # Remove minimize and maximize buttons, keep only close button
+        # Use stronger flags to completely disable maximize
+        menu.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint | Qt.WindowStaysOnTopHint)
+        menu.setFixedSize(menu.sizeHint())  # Prevent resizing/maximizing
+        menu.setWindowModality(Qt.ApplicationModal)
+        
+        # Store menu reference to prevent garbage collection
+        self.active_context_menu = menu
+        
         menu.exec_(global_cursor_pos)
         print("Menu exec called!")
+        
+        # Clear menu reference after it's closed
+        self.active_context_menu = None
     
     def apply_selection_label(self, label_type):
         """Apply the selected label to the area"""
+        # Clear selection active flag since selection is complete
+        self.selection_active = False
+        
+        # Close the context menu if it's still open
+        if hasattr(self, 'active_context_menu') and self.active_context_menu is not None:
+            self.active_context_menu.close()
+            self.active_context_menu = None
+        
         if not self.current_selection_chart or not self.selection_start or not self.selection_end:
             return
 
@@ -2446,6 +2508,14 @@ class SleepMonitorChart(QWidget):
     
     def clear_selection(self):
         """Clear the current selection but keep persistent overlays"""
+        # Clear selection active flag since selection is cleared
+        self.selection_active = False
+        
+        # Close the context menu if it's still open
+        if hasattr(self, 'active_context_menu') and self.active_context_menu is not None:
+            self.active_context_menu.close()
+            self.active_context_menu = None
+        
         if self.current_selection_chart and hasattr(self.current_selection_chart, 'selection_overlay'):
             self.current_selection_chart.selection_overlay.setVisible(False)
             # Reset overlay text and style for next use
@@ -2675,6 +2745,22 @@ Desaturations: {self.spo2_statistics['desaturation_events']}
         """Update SpO2 statistics overlay with current data - DISABLED"""
         # Statistics overlay disabled - no longer creating overlay
         pass
+    
+    def show_selection_warning(self):
+        """Show warning popup when user tries to interact during active selection"""
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Selection Required")
+        msg.setText("Please select an event (OSA/CSA/MSA/HSA) or clear the selection.")
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.exec_()
+    
+    def block_if_selection_active(self):
+        """Check if selection is active and show warning if needed"""
+        if hasattr(self, 'selection_active') and self.selection_active:
+            self.show_selection_warning()
+            return True   # 🚫 block 
+        return False      # ✅ allow 
     
     def resizeEvent(self, event):
         """Handle resize for watermark centering"""

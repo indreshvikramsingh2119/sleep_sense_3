@@ -334,7 +334,7 @@ class PatientRecordForm(QDialog):
         
         # DOB (Required)
         self.dob_edit = QDateEdit()
-        self.dob_edit.setDate(QDate(1967, 2, 14))
+        self.dob_edit.setDate(QDate(2000, 00, 00))
         self.dob_edit.setCalendarPopup(True)
         self.dob_edit.setStyleSheet("""
             QDateEdit {

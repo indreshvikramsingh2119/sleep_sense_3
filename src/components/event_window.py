@@ -7,7 +7,8 @@ from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QFrame, QSplitter, QGroupBox, QLineEdit, QCheckBox,
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
-    QToolBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QComboBox
+    QToolBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QComboBox,
+    QScrollBar, QSlider
 )
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont
@@ -24,6 +25,13 @@ class EventWindow(QDialog):
         self.setWindowTitle("Event Window")
         self.setFixedSize(1200, 800)
         self.monitor_chart = None
+        
+        # Scroll navigation variables
+        self.current_time_window = 60  # Default 60 seconds
+        self.current_time_offset = 0   # Current scroll position in seconds
+        self.max_data_duration = 21600  # 6 hours of data in seconds (21600s)
+        self.scroll_step = 30  # Scroll step in seconds
+        
         self.init_ui()
         self.connect_to_main_data()
         self.load_sample_data()
@@ -160,53 +168,7 @@ class EventWindow(QDialog):
         layout = QVBoxLayout(group)
         layout.setSpacing(5)
         
-        # Add time window dropdown above the table
-        time_window_layout = QHBoxLayout()
-        
-        time_window_label = QLabel("Time Window:")
-        time_window_label.setStyleSheet("""
-            QLabel {
-                font-weight: 600;
-                color: #34495e;
-                font-size: 12px;
-                padding: 5px;
-            }
-        """)
-        
-        self.time_window_combo = QComboBox()
-        self.time_window_options = ["10 sec", "30 sec", "60 sec", "120 sec", "300 sec"]
-        self.time_window_combo.addItems(self.time_window_options)
-        self.time_window_combo.setCurrentText("60 sec")  # Default to 60 seconds
-        self.time_window_combo.setStyleSheet("""
-            QComboBox {
-                border: 2px solid #d1e3f4;
-                border-radius: 6px;
-                padding: 5px 10px;
-                font-size: 12px;
-                background-color: #ffffff;
-                min-width: 100px;
-            }
-            QComboBox:focus {
-                border-color: #3498db;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox::down-arrow {
-                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iNiIgdmlld0JveD0iMCAwIDEwIDYiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTEgMUw1TDVMOSAxIiBzdHJva2U9IiMzNDk4ZGIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPg==);
-            }
-        """)
-        
-        # Connect time window change
-        self.time_window_combo.currentTextChanged.connect(self.on_time_window_changed)
-        
-        time_window_layout.addWidget(time_window_label)
-        time_window_layout.addWidget(self.time_window_combo)
-        time_window_layout.addStretch()
-        
-        layout.addLayout(time_window_layout)
-        
+                
         # Event list table
         self.event_list_table = QTableWidget()
         self.event_list_table.setColumnCount(5)
@@ -332,15 +294,147 @@ class EventWindow(QDialog):
             }
         """)
         
-        # Dynamic time label that updates based on dropdown selection
-        self.time_label = QLabel("60 sec.")
+        # Time window selector
+        self.time_window_combo = QComboBox()
+        self.time_window_combo.addItems(["30 sec.", "60 sec.", "2 min.", "5 min.", "10 min."])
+        self.time_window_combo.setCurrentText("60 sec.")
+        self.time_window_combo.setStyleSheet("""
+            QComboBox {
+                border: 2px solid #d1e3f4;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-size: 12px;
+                background-color: #ffffff;
+                min-width: 80px;
+            }
+            QComboBox:focus {
+                border-color: #3498db;
+            }
+        """)
+        
+        # Dynamic time label that updates based on current position
+        self.time_label = QLabel("00:00:00 - 00:01:00")
         self.time_label.setStyleSheet("QLabel { font-weight: 600; color: #34495e; font-size: 12px; padding: 5px; }")
         
         controls_layout.addWidget(self.event_type_combo)
+        controls_layout.addWidget(QLabel("Window:"))
+        controls_layout.addWidget(self.time_window_combo)
         controls_layout.addStretch()
         controls_layout.addWidget(self.time_label)
         
         layout.addLayout(controls_layout)
+        
+        # Scroll navigation controls
+        scroll_layout = QHBoxLayout()
+        
+        # Navigation buttons
+        self.back_button = QPushButton("◀ Back")
+        self.back_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 11px;
+                font-weight: 600;
+                min-width: 60px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:pressed {
+                background-color: #21618c;
+            }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
+        self.back_button.clicked.connect(self.navigate_backward)
+        
+        self.forward_button = QPushButton("Forward ▶")
+        self.forward_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 11px;
+                font-weight: 600;
+                min-width: 70px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:pressed {
+                background-color: #21618c;
+            }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
+        self.forward_button.clicked.connect(self.navigate_forward)
+        
+        # Professional scrollbar
+        self.scroll_slider = QSlider(Qt.Horizontal)
+        self.scroll_slider.setMinimum(0)
+        self.scroll_slider.setMaximum(int(self.max_data_duration))
+        self.scroll_slider.setValue(0)
+        self.scroll_slider.setTickPosition(QSlider.TicksBelow)
+        self.scroll_slider.setTickInterval(300)  # 5 minute intervals
+        self.scroll_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #d1e3f4;
+                height: 8px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #e8f4f8, stop:1 #ffffff);
+                border-radius: 4px;
+                margin: 2px 0;
+            }
+            QSlider::handle:horizontal {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3498db, stop:1 #2980b9);
+                border: 1px solid #21618c;
+                width: 18px;
+                margin: -2px 0;
+                border-radius: 9px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #5dade2, stop:1 #3498db);
+            }
+            QSlider::add-page:horizontal {
+                background: #ffffff;
+                border: 1px solid #d1e3f4;
+                border-radius: 4px;
+            }
+            QSlider::sub-page:horizontal {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #e3f2fd, stop:1 #bbdefb);
+                border: 1px solid #d1e3f4;
+                border-radius: 4px;
+            }
+            QSlider::tick:horizontal {
+                color: #7f8c8d;
+                width: 1px;
+                height: 4px;
+            }
+        """)
+        self.scroll_slider.valueChanged.connect(self.on_scroll_changed)
+        
+        # Position label
+        self.position_label = QLabel("Position: 0%")
+        self.position_label.setStyleSheet("QLabel { font-size: 11px; color: #7f8c8d; padding: 5px; }")
+        
+        scroll_layout.addWidget(self.back_button)
+        scroll_layout.addWidget(self.scroll_slider, stretch=1)
+        scroll_layout.addWidget(self.forward_button)
+        scroll_layout.addWidget(self.position_label)
+        
+        layout.addLayout(scroll_layout)
         
         # Create plot widget
         self.flow_plot = pg.PlotWidget()
@@ -390,12 +484,9 @@ class EventWindow(QDialog):
             
     def update_flow_graph_real_time(self):
         """Update graph with real-time data from main chart for selected graph type"""
-        if not self.monitor_chart:
-            return
-            
-        # Get current time window and offset
-        time_window = getattr(self.monitor_chart, 'current_time_window', 60)
-        time_offset = getattr(self.monitor_chart, 'current_time_offset', 0)
+        # Use local scroll position instead of monitor chart position
+        time_window = self.current_time_window
+        time_offset = self.current_time_offset
         
         # Get selected graph type
         selected_graph = self.event_type_combo.currentText()
@@ -415,6 +506,33 @@ class EventWindow(QDialog):
         # Get color for selected graph
         graph_color = self.get_graph_color(selected_graph)
         
+        # Set Y-axis range based on medical standards
+        y_axis_ranges = {
+            "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
+            "Airflow": (-2, 2),         # Respiratory airflow in normalized units
+            "Snoring": (0, 100),        # Snoring intensity percentage
+            "Thorax": (-100, 100),      # Chest respiratory effort movement
+            "Abdomen": (-100, 100),     # Abdominal respiratory effort movement
+            "SpO2": (70, 100),          # Medical SpO2 range (70-100%) - extended for hypoxia
+            "Pulse": (30, 250),         # Pulse rate in BPM - extended range
+            "Body Movement": (0, 100),   # Movement intensity percentage
+            "PR/HR": (30, 250)          # Pulse/Heart Rate in BPM - extended range
+        }
+        
+        # Dynamic SpO2 Y-axis adjustment
+        if selected_graph == "SpO2" and len(graph_data) > 0:
+            # Calculate average SpO2 value
+            avg_spo2 = np.mean(graph_data)
+            # If average SpO2 is above 95, adjust Y-axis to start from 90
+            if avg_spo2 > 95:
+                y_min, y_max = 90, 100
+            else:
+                y_min, y_max = y_axis_ranges["SpO2"]
+            self.flow_plot.setYRange(y_min, y_max, padding=0.02)
+        elif selected_graph in y_axis_ranges:
+            y_min, y_max = y_axis_ranges[selected_graph]
+            self.flow_plot.setYRange(y_min, y_max, padding=0.05)
+        
         # Plot the signal
         self.flow_plot.plot(time_points, graph_data, pen=pg.mkPen(graph_color, width=2), name=selected_graph)
         
@@ -428,6 +546,9 @@ class EventWindow(QDialog):
         
         # Format time axis to show actual time
         self.format_time_axis(time_offset)
+        
+        # Update time display label
+        self.update_time_display_label()
         
     def generate_realistic_flow_data(self, time_points):
         """Generate realistic flow data matching breathing patterns"""
@@ -452,17 +573,30 @@ class EventWindow(QDialog):
         
     def get_graph_data(self, graph_type, time_points, time_window, time_offset):
         """Get real-time data for the selected graph type"""
-        # Graph parameters from main dashboard
+        # Medical standard Y-axis ranges
+        y_axis_ranges = {
+            "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
+            "Airflow": (-2, 2),         # Respiratory airflow in normalized units
+            "Snoring": (0, 100),        # Snoring intensity percentage
+            "Thorax": (-100, 100),      # Chest respiratory effort movement
+            "Abdomen": (-100, 100),     # Abdominal respiratory effort movement
+            "SpO2": (70, 100),          # Medical SpO2 range (70-100%) - extended for hypoxia
+            "Pulse": (30, 250),         # Pulse rate in BPM - extended range
+            "Body Movement": (0, 100),   # Movement intensity percentage
+            "PR/HR": (30, 250)          # Pulse/Heart Rate in BPM - extended range
+        }
+        
+        # Graph parameters adjusted for medical standard ranges
         graph_params = {
-            "Body Position": {"freq": 0.5, "amp": 10, "offset": 50, "color": "#3b82f6"},
-            "Airflow": {"freq": 0.3, "amp": 15, "offset": 50, "color": "#8b5cf6"},
-            "Snoring": {"freq": 1.0, "amp": 8, "offset": 50, "color": "#ef4444"},
-            "Thorex": {"freq": 0.2, "amp": 5, "offset": 50, "color": "#f59e0b"},
-            "Abdomen": {"freq": 0.1, "amp": 2, "offset": 90, "color": "#10b981"},
-            "SpO2": {"freq": 1.5, "amp": 12, "offset": 50, "color": "#06b6d4"},
-            "Pulse": {"freq": 0.0, "amp": 0, "offset": 30, "color": "#f97316"},
-            "Body Movement": {"freq": 0.1, "amp": 5, "offset": 20, "color": "#8b5cf6"},
-            "PR/HR": {"freq": 0.1, "amp": 5, "offset": 20, "color": "#5c61f6"}
+            "Body Position": {"freq": 0.5, "amp": 2, "offset": 2, "range": y_axis_ranges["Body Position"], "color": "#3b82f6"},
+            "Airflow": {"freq": 0.3, "amp": 2, "offset": 0, "range": y_axis_ranges["Airflow"], "color": "#8b5cf6"},
+            "Snoring": {"freq": 1.0, "amp": 50, "offset": 50, "range": y_axis_ranges["Snoring"], "color": "#ef4444"},
+            "Thorex": {"freq": 0.2, "amp": 100, "offset": 0, "range": y_axis_ranges["Thorax"], "color": "#f59e0b"},
+            "Abdomen": {"freq": 0.1, "amp": 100, "offset": 0, "range": y_axis_ranges["Abdomen"], "color": "#10b981"},
+            "SpO2": {"freq": 1.5, "amp": 15, "offset": 85, "range": y_axis_ranges["SpO2"], "color": "#06b6d4"},
+            "Pulse": {"freq": 0.1, "amp": 60, "offset": 140, "range": y_axis_ranges["Pulse"], "color": "#f97316"},
+            "Body Movement": {"freq": 0.1, "amp": 50, "offset": 50, "range": y_axis_ranges["Body Movement"], "color": "#8b5cf6"},
+            "PR/HR": {"freq": 0.1, "amp": 60, "offset": 140, "range": y_axis_ranges["PR/HR"], "color": "#5c61f6"}
         }
         
         params = graph_params.get(graph_type, graph_params["Airflow"])
@@ -486,14 +620,14 @@ class EventWindow(QDialog):
             except:
                 pass  # Fall back to simulated data
         
-        # Generate simulated data with realistic characteristics
+        # Generate simulated data with realistic characteristics within medical ranges
         if graph_type == "Body Position":
             # Discrete positions (0=supine, 1=left, 2=right, 3=prone)
             np.random.seed(int(time_offset) % 1000)
             positions = np.random.choice([0, 1, 2, 3], len(time_points))
             # Add smooth transitions
             smoothed = np.convolve(positions, np.ones(5)/5, mode='same')
-            return smoothed * params["amp"] + params["offset"]
+            return np.clip(smoothed, params["range"][0], params["range"][1])
             
         elif graph_type == "Airflow":
             # Breathing pattern with occasional flow limitations
@@ -506,7 +640,8 @@ class EventWindow(QDialog):
                     start_idx = max(0, i - 5)
                     end_idx = min(len(time_points), i + 5)
                     flow_limitations[start_idx:end_idx] = -params["amp"] * 0.3
-            return base_flow + noise + flow_limitations + params["offset"]
+            flow_data = base_flow + noise + flow_limitations + params["offset"]
+            return np.clip(flow_data, params["range"][0], params["range"][1])
             
         elif graph_type == "Snoring":
             # Intermittent snoring events
@@ -517,15 +652,17 @@ class EventWindow(QDialog):
                     start_idx = max(0, i - 3)
                     end_idx = min(len(time_points), i + 3)
                     base_data[start_idx:end_idx] = params["offset"] + params["amp"] * np.random.random()
-            return base_data
+            return np.clip(base_data, params["range"][0], params["range"][1])
             
         elif graph_type == "Thorex":
             # Thoracic effort pattern
-            return params["amp"] * np.sin(2 * np.pi * params["freq"] * time_points) + params["offset"]
+            thorax_data = params["amp"] * np.sin(2 * np.pi * params["freq"] * time_points) + params["offset"]
+            return np.clip(thorax_data, params["range"][0], params["range"][1])
             
         elif graph_type == "Abdomen":
             # Abdominal effort pattern
-            return params["amp"] * np.sin(2 * np.pi * params["freq"] * time_points) + params["offset"]
+            abdomen_data = params["amp"] * np.sin(2 * np.pi * params["freq"] * time_points) + params["offset"]
+            return np.clip(abdomen_data, params["range"][0], params["range"][1])
             
         elif graph_type == "SpO2":
             # SpO2 with desaturation events
@@ -537,14 +674,15 @@ class EventWindow(QDialog):
                     start_idx = max(0, i - 10)
                     end_idx = min(len(time_points), i + 10)
                     base_spo2[start_idx:end_idx] -= np.random.uniform(5, 15)  # 5-15% drop
-            return np.clip(base_spo2, 70, 100)  # Keep within physiological range
+            return np.clip(base_spo2, params["range"][0], params["range"][1])  # Keep within medical range
             
         elif graph_type == "Pulse":
             # Heart rate with variability
-            base_hr = 60 + params["offset"]  # Base heart rate
-            hr_variability = 5 * np.sin(2 * np.pi * 0.1 * time_points)  # Respiratory sinus arrhythmia
-            noise = np.random.normal(0, 2, len(time_points))
-            return base_hr + hr_variability + noise
+            base_hr = params["offset"]  # Base heart rate
+            hr_variability = params["amp"] * 0.1 * np.sin(2 * np.pi * 0.1 * time_points)  # Respiratory sinus arrhythmia
+            noise = np.random.normal(0, params["amp"] * 0.03, len(time_points))
+            pulse_data = base_hr + hr_variability + noise
+            return np.clip(pulse_data, params["range"][0], params["range"][1])
             
         elif graph_type == "Body Movement":
             # Movement detection
@@ -555,18 +693,20 @@ class EventWindow(QDialog):
                     start_idx = max(0, i - 2)
                     end_idx = min(len(time_points), i + 2)
                     base_data[start_idx:end_idx] = params["offset"] + params["amp"] * np.random.random()
-            return base_data
+            return np.clip(base_data, params["range"][0], params["range"][1])
             
         elif graph_type == "PR/HR":
             # Pulse rate / Heart rate
             base_pr = params["offset"]
-            pr_variability = 3 * np.sin(2 * np.pi * 0.1 * time_points)
-            noise = np.random.normal(0, 1, len(time_points))
-            return base_pr + pr_variability + noise
+            pr_variability = params["amp"] * 0.05 * np.sin(2 * np.pi * 0.1 * time_points)
+            noise = np.random.normal(0, params["amp"] * 0.02, len(time_points))
+            pr_data = base_pr + pr_variability + noise
+            return np.clip(pr_data, params["range"][0], params["range"][1])
             
         else:
             # Default sinusoidal pattern
-            return params["amp"] * np.sin(2 * np.pi * params["freq"] * time_points) + params["offset"]
+            default_data = params["amp"] * np.sin(2 * np.pi * params["freq"] * time_points) + params["offset"]
+            return np.clip(default_data, params["range"][0], params["range"][1])
     
     def get_graph_color(self, graph_type):
         """Get the color for the selected graph type"""
@@ -862,32 +1002,7 @@ class EventWindow(QDialog):
         # Update the flow graph based on selected event type
         self.update_flow_graph_real_time()
         
-    def on_time_window_changed(self, time_window_text):
-        """Handle time window dropdown change"""
-        print(f"Time window changed to: {time_window_text}")
-        
-        # Convert time window text to seconds
-        time_window_map = {
-            "10 sec": 10,
-            "30 sec": 30,
-            "60 sec": 60,
-            "120 sec": 120,
-            "300 sec": 300
-        }
-        
-        new_time_window = time_window_map.get(time_window_text, 60)
-        
-        # Update monitor chart time window if available
-        if self.monitor_chart:
-            self.monitor_chart.current_time_window = new_time_window
-            self.monitor_chart.refresh_charts()
-        
-        # Update time label in graph section
-        self.time_label.setText(time_window_text)
-        
-        # Update event window display
-        self.update_time_display()
-        
+            
     def on_tree_item_clicked(self, item, column):
         """Handle tree item selection"""
         selected_item = item.text(column)
@@ -927,6 +1042,99 @@ class EventWindow(QDialog):
             self.event_list_table.setItem(row, 2, QTableWidgetItem(stop))
             self.event_list_table.setItem(row, 3, QTableWidgetItem(duration))
             self.event_list_table.setItem(row, 4, QTableWidgetItem(param))
+            
+    def load_sample_data(self):
+        """Load sample data for demonstration"""
+        # Sample events data
+        events = [
+            ["OSA", "00:01:23", "00:01:45", "22 sec", "SpO2 ↓ 88%"],
+            ["CSA", "00:03:12", "00:03:28", "16 sec", "No effort"],
+            ["MSA", "00:05:45", "00:06:02", "17 sec", "Mixed pattern"],
+            ["HSA", "00:08:34", "00:08:51", "17 sec", "Flow ↓ 50%"],
+            ["OSA", "00:12:18", "00:12:39", "21 sec", "SpO2 ↓ 85%"],
+        ]
+        
+        self.event_list_table.setRowCount(len(events))
+        for i, event in enumerate(events):
+            for j, value in enumerate(event):
+                self.event_list_table.setItem(i, j, QTableWidgetItem(value))
+        
+        # Connect event type change
+        self.event_type_combo.currentTextChanged.connect(self.on_graph_type_changed)
+        
+        # Initialize scroll position
+        self.update_scroll_limits()
+    
+    def on_time_window_changed(self, window_text):
+        """Handle time window change"""
+        window_map = {
+            "30 sec.": 30,
+            "60 sec.": 60,
+            "2 min.": 120,
+            "5 min.": 300,
+            "10 min.": 600
+        }
+        self.current_time_window = window_map.get(window_text, 60)
+        self.update_scroll_limits()
+        self.update_flow_graph_real_time()
+    
+    def on_graph_type_changed(self, graph_type):
+        """Handle graph type change"""
+        self.update_flow_graph_real_time()
+    
+    def update_scroll_limits(self):
+        """Update scroll limits based on current time window"""
+        max_offset = max(0, self.max_data_duration - self.current_time_window)
+        self.scroll_slider.setMaximum(int(max_offset))
+        self.update_navigation_buttons()
+    
+    def navigate_backward(self):
+        """Navigate backward in time"""
+        new_offset = max(0, self.current_time_offset - self.scroll_step)
+        self.current_time_offset = new_offset
+        self.scroll_slider.setValue(int(new_offset))
+        self.update_flow_graph_real_time()
+    
+    def navigate_forward(self):
+        """Navigate forward in time"""
+        max_offset = self.scroll_slider.maximum()
+        new_offset = min(max_offset, self.current_time_offset + self.scroll_step)
+        self.current_time_offset = new_offset
+        self.scroll_slider.setValue(int(new_offset))
+        self.update_flow_graph_real_time()
+    
+    def on_scroll_changed(self, value):
+        """Handle scroll slider change"""
+        self.current_time_offset = value
+        self.update_flow_graph_real_time()
+        self.update_navigation_buttons()
+        self.update_time_display_label()
+    
+    def update_navigation_buttons(self):
+        """Update navigation button states"""
+        can_go_back = self.current_time_offset > 0
+        can_go_forward = self.current_time_offset < self.scroll_slider.maximum()
+        
+        self.back_button.setEnabled(can_go_back)
+        self.forward_button.setEnabled(can_go_forward)
+    
+    def update_time_display_label(self):
+        """Update the time display label"""
+        start_time = self.format_time(self.current_time_offset)
+        end_time = self.format_time(self.current_time_offset + self.current_time_window)
+        self.time_label.setText(f"{start_time} - {end_time}")
+        
+        # Update position label
+        if self.max_data_duration > 0:
+            progress = (self.current_time_offset / self.max_data_duration) * 100
+            self.position_label.setText(f"Position: {progress:.1f}%")
+    
+    def format_time(self, seconds):
+        """Format time in seconds to HH:MM:SS"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
             
     def showEvent(self, event):
         """Override show event to update data when window is shown"""
