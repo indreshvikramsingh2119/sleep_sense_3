@@ -1,6 +1,6 @@
 """
-Patient Record Form - Full Page Patient Record Entry Form
-Creates a comprehensive patient record form matching the provided design
+Patient Report Card Form - Full Page Patient Details Entry Form
+Creates a comprehensive patient report card form matching the provided design
 """
 
 from PyQt5.QtWidgets import (
@@ -17,8 +17,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from src.utils.database_manager import DatabaseManager
 
 
-class PatientRecordForm(QDialog):
-    """Full Page Patient Record Form"""
+class PatientReportCardForm(QDialog):
+    """Full Page Patient Report Card Form"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -334,8 +334,19 @@ class PatientRecordForm(QDialog):
         
         # DOB (Required)
         self.dob_edit = QDateEdit()
-        self.dob_edit.setDate(QDate(2000, 00, 00))
+        self.dob_edit.setDate(QDate.currentDate().addYears(-30))  # Default to 30 years ago
         self.dob_edit.setCalendarPopup(True)
+        # Set year range from 1900 to current year (2026)
+        self.dob_edit.setMinimumDate(QDate(1900, 1, 1))
+        self.dob_edit.setMaximumDate(QDate.currentDate())
+        
+        # Configure calendar widget to show correct year range
+        calendar_widget = self.dob_edit.calendarWidget()
+        if calendar_widget:
+            calendar_widget.setMinimumDate(QDate(1900, 1, 1))
+            calendar_widget.setMaximumDate(QDate.currentDate())
+            # Set display format to show years properly
+            self.dob_edit.setDisplayFormat("dd-MM-yyyy")
         self.dob_edit.setStyleSheet("""
             QDateEdit {
                 background: qlineargradient(
@@ -524,7 +535,6 @@ class PatientRecordForm(QDialog):
         bp_layout.addWidget(self.bp_edit)
         bp_layout.addWidget(QLabel("mmHg"))
         bp_layout.setContentsMargins(0, 0, 0, 0)
-        
         layout.addWidget(QLabel("Syst./diast:"), 1, 2)
         layout.addLayout(bp_layout, 1, 3)
         
@@ -633,6 +643,7 @@ class PatientRecordForm(QDialog):
         self.cancel_button.clicked.connect(self.reject_form)
         self.cancel_button.setStyleSheet("""
             QPushButton#cancelBtn {
+        
                 background: qlineargradient(
                     x1: 0, y1: 0, x2: 0, y2: 1,
                     stop: 0 #dc3545,
@@ -692,7 +703,18 @@ class PatientRecordForm(QDialog):
         if patient_id:
             QMessageBox.information(self, "Success", f"Patient record saved successfully!\nDatabase ID: {patient_id}")
             print(f"Patient record saved with ID: {patient_id}")
+            
+            # Signal that database needs refresh
+            if self.parent() and hasattr(self.parent(), 'database_window') and self.parent().database_window:
+                self.parent().database_window.refresh_patients_list()
+            
+            # Close patient record form and open database window
             self.close()
+            
+            # Open database window automatically
+            if self.parent() and hasattr(self.parent(), 'open_database'):
+                self.parent().open_database()
+                print("Database window opened automatically after patient record save")
         else:
             QMessageBox.critical(self, "Error", "Failed to save patient record to database!")
     

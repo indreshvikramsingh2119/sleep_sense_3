@@ -409,7 +409,6 @@ class DatabaseWindow(QDialog):
         
         # Create buttons
         self.selection_btn = QPushButton("Selection")
-        self.view_btn = QPushButton("View")
         self.delete_btn = QPushButton("Delete")
         self.cancel_btn = QPushButton("Cancel")
         
@@ -474,13 +473,11 @@ class DatabaseWindow(QDialog):
         """
         
         self.selection_btn.setStyleSheet(button_style)
-        self.view_btn.setStyleSheet(button_style)
         self.delete_btn.setStyleSheet(delete_style)
         self.cancel_btn.setStyleSheet(cancel_style)
         
         # Add buttons to layout
         layout.addWidget(self.selection_btn)
-        layout.addWidget(self.view_btn)
         layout.addWidget(self.delete_btn)
         layout.addWidget(self.cancel_btn)
         
@@ -509,7 +506,6 @@ class DatabaseWindow(QDialog):
         
         # Connect button actions
         self.selection_btn.clicked.connect(self.handle_selection)
-        self.view_btn.clicked.connect(self.handle_view)
         self.delete_btn.clicked.connect(self.handle_delete)
         self.cancel_btn.clicked.connect(self.reject)  # Close dialog
         
@@ -533,7 +529,7 @@ class DatabaseWindow(QDialog):
             self.patients_table.setRowHidden(row, not visible)
             
     def handle_selection(self):
-        """Handle Selection button click"""
+        """Handle Selection button click - select patient and load their records"""
         selected_items = self.patients_table.selectedItems()
         if selected_items:
             # Get the first selected row
@@ -552,6 +548,10 @@ class DatabaseWindow(QDialog):
             
             if full_patient_data:
                 print(f"Selected patient: {full_patient_data['last_name']} {full_patient_data['first_name']} (DB ID: {patient_db_id})")
+                
+                # Load patient records and reports
+                self.load_patient_records(patient_db_id)
+                self.load_patient_reports(patient_db_id)
                 
                 # Set patient data in parent dashboard
                 if self.parent() and hasattr(self.parent(), 'load_patient_data'):
@@ -578,22 +578,175 @@ class DatabaseWindow(QDialog):
         else:
             print("No patients selected")
             
-    def handle_view(self):
-        """Handle View button click"""
-        selected_rows = []
-        if self.patients_table.selectedItems():
-            selected_rows = list(set(item.row() for item in self.patients_table.selectedItems()))
-        elif self.records_table.selectedItems():
-            selected_rows = list(set(item.row() for item in self.records_table.selectedItems()))
-        elif self.reports_table.selectedItems():
-            selected_rows = list(set(item.row() for item in self.reports_table.selectedItems()))
+                
+    def load_patient_records(self, patient_id):
+        """Load patient records into the records table"""
+        try:
+            # Get patient records from database
+            records = self.db_manager.get_records_by_patient(patient_id)
             
-        if selected_rows:
-            print(f"View: {len(selected_rows)} items selected")
-        else:
-            print("No items selected to view")
+            self.records_table.setRowCount(len(records))
+            for row, record in enumerate(records):
+                self.records_table.setItem(row, 0, QTableWidgetItem(record.get('last_name', '')))
+                self.records_table.setItem(row, 1, QTableWidgetItem(record.get('first_name', '')))
+                self.records_table.setItem(row, 2, QTableWidgetItem(record.get('recording_date', '')))
+                self.records_table.setItem(row, 3, QTableWidgetItem(record.get('start_time', '')))
+                self.records_table.setItem(row, 4, QTableWidgetItem(record.get('duration', '')))
+                archived_status = 'Yes' if record.get('archived', 0) else 'No'
+                self.records_table.setItem(row, 5, QTableWidgetItem(archived_status))
+                # Store record ID in the row for later retrieval
+                self.records_table.item(row, 0).setData(Qt.UserRole, record['id'])
+                    
+            print(f"Loaded {len(records)} records for patient {patient_id}")
             
+        except Exception as e:
+            print(f"Error loading patient records: {e}")
+            self.records_table.setRowCount(0)
+    
+    def load_patient_reports(self, patient_id):
+        """Load patient reports into the reports table"""
+        try:
+            # Get patient reports from database (placeholder method)
+            reports = self.db_manager.get_patient_reports(patient_id) if hasattr(self.db_manager, 'get_patient_reports') else []
+            
+            self.reports_table.setRowCount(len(reports))
+            for row, report in enumerate(reports):
+                self.reports_table.setItem(row, 0, QTableWidgetItem(report.get('date_time', '')))
+                self.reports_table.setItem(row, 1, QTableWidgetItem(report.get('analysis_status', 'Pending')))
+                self.reports_table.setItem(row, 2, QTableWidgetItem(report.get('manual_status', 'Pending')))
+                # Store report ID in the row for later retrieval
+                if 'id' in report:
+                    self.reports_table.item(row, 0).setData(Qt.UserRole, report['id'])
+                    
+            print(f"Loaded {len(reports)} reports for patient {patient_id}")
+            
+        except Exception as e:
+            print(f"Error loading patient reports: {e}")
+            self.reports_table.setRowCount(0)
+    
+    def refresh_patients_list(self):
+        """Refresh the patients list from database"""
+        print("Refreshing patients list...")
+        self.load_patients_from_database()
+    
     def handle_delete(self):
         """Handle Delete button click"""
         print("Delete action triggered")
-        # Implementation for delete functionality
+        
+        # Get selected patient
+        selected_items = self.patients_table.selectedItems()
+        if selected_items:
+            row = selected_items[0].row()
+            patient_db_id = self.patients_table.item(row, 0).data(Qt.UserRole)
+            last_name = self.patients_table.item(row, 0).text()
+            first_name = self.patients_table.item(row, 1).text()
+            
+            # Confirm deletion
+            from PyQt5.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self, 
+                'Confirm Delete',
+                f'Are you sure you want to delete patient "{last_name} {first_name}"?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                # Delete from database
+                success = self.db_manager.delete_patient(patient_db_id)
+                if success:
+                    print(f"Patient {last_name} {first_name} deleted successfully")
+                    # Refresh the patients list
+                    self.load_patients_from_database()
+                else:
+                    print("Failed to delete patient")
+        else:
+            print("No patient selected for deletion")
+        
+        # Check which table has selected items
+        selected_patients = []
+        selected_records = []
+        selected_reports = []
+        
+        # Get selected patients
+        if self.patients_table.selectedItems():
+            selected_rows = list(set(item.row() for item in self.patients_table.selectedItems()))
+            for row in selected_rows:
+                patient_id = self.patients_table.item(row, 0).data(Qt.UserRole)
+                patient_name = f"{self.patients_table.item(row, 0).text()} {self.patients_table.item(row, 1).text()}"
+                selected_patients.append({'id': patient_id, 'name': patient_name, 'row': row})
+        
+        # Get selected records
+        if self.records_table.selectedItems():
+            selected_rows = list(set(item.row() for item in self.records_table.selectedItems()))
+            for row in selected_rows:
+                record_id = self.records_table.item(row, 0).data(Qt.UserRole) if self.records_table.item(row, 0) else None
+                record_name = f"{self.records_table.item(row, 0).text()} {self.records_table.item(row, 1).text()}"
+                selected_records.append({'id': record_id, 'name': record_name, 'row': row})
+        
+        # Get selected reports
+        if self.reports_table.selectedItems():
+            selected_rows = list(set(item.row() for item in self.reports_table.selectedItems()))
+            for row in selected_rows:
+                report_id = self.reports_table.item(row, 0).data(Qt.UserRole) if self.reports_table.item(row, 0) else None
+                report_name = self.reports_table.item(row, 0).text()
+                selected_reports.append({'id': report_id, 'name': report_name, 'row': row})
+        
+        # Create confirmation message
+        delete_items = []
+        if selected_patients:
+            delete_items.append(f"{len(selected_patients)} patient(s)")
+        if selected_records:
+            delete_items.append(f"{len(selected_records)} record(s)")
+        if selected_reports:
+            delete_items.append(f"{len(selected_reports)} report(s)")
+        
+        if not delete_items:
+            QMessageBox.warning(self, "No Selection", "Please select items to delete.")
+            return
+        
+        # Confirm deletion
+        reply = QMessageBox.question(
+            self, 
+            "Confirm Delete", 
+            f"Are you sure you want to delete {', '.join(delete_items)}?\n\nThis action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                # Delete patients
+                for patient in selected_patients:
+                    success = self.db_manager.delete_patient(patient['id'])
+                    if success:
+                        self.patients_table.removeRow(patient['row'])
+                        print(f"Deleted patient: {patient['name']}")
+                    else:
+                        print(f"Failed to delete patient: {patient['name']}")
+                
+                # Delete records
+                for record in selected_records:
+                    if record['id']:
+                        success = self.db_manager.delete_record(record['id'])
+                        if success:
+                            self.records_table.removeRow(record['row'])
+                            print(f"Deleted record: {record['name']}")
+                        else:
+                            print(f"Failed to delete record: {record['name']}")
+                    else:
+                        # Remove from table if no ID
+                        self.records_table.removeRow(record['row'])
+                        print(f"Removed record from table: {record['name']}")
+                
+                # Delete reports (placeholder - reports table not implemented in database yet)
+                for report in selected_reports:
+                    # Remove from table only for now
+                    self.reports_table.removeRow(report['row'])
+                    print(f"Removed report from table: {report['name']} (database table not implemented)")
+                
+                QMessageBox.information(self, "Success", "Selected items have been deleted.")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete items: {str(e)}")
+                print(f"Delete error: {e}")
