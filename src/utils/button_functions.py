@@ -267,8 +267,14 @@ class ButtonFunctions:
             menu.addAction('Import Data', self.tools_import_data)
             menu.addAction('Data Analysis', self.tools_data_analysis)
             menu.addAction('Analysis Parameters', self.tools_analysis_parameters)
-            menu.addAction('Reanalysis', self.tools_reanalysis)
-            menu.addAction('Generate Report', self.tools_generate_report)
+            settings_menu = menu.addMenu('Settings')
+            settings_menu.addAction('General', self.tools_settings_general)
+            settings_menu.addAction('Data', self.tools_settings_data)
+            settings_menu.addAction('Display', self.tools_settings_display)
+            settings_menu.addAction('Export', self.tools_settings_export)
+            settings_menu.addAction('EDF export', self.tools_settings_edf_export)
+            menu.addAction('Send Event Log by email', self.tools_send_event_log_email)
+            menu.addAction('Database Transfer', self.tools_database_transfer)
             
         elif menu_type == 'help':
             menu.addAction('Documentation', self.help_documentation, 'F1')
@@ -521,6 +527,69 @@ class ButtonFunctions:
         dialog = AnalysisParametersDialog(self.parent)
         dialog.exec_()
     
+    def tools_reanalyze(self):
+        """Re-analyze"""
+        print("Tools -> Re-analyze clicked")
+        # TODO: Implement re-analyze functionality
+    
+    def tools_new_event_group(self):
+        """New event group"""
+        print("Tools -> New event group clicked")
+        # TODO: Implement new event group functionality
+    
+    def tools_delete_event_group(self):
+        """Delete event group"""
+        print("Tools -> Delete event group clicked")
+        # TODO: Implement delete event group functionality
+    
+    def tools_edit_event_group(self):
+        """Edit event group"""
+        print("Tools -> Edit event group clicked")
+        # TODO: Implement edit event group functionality
+    
+    def tools_send_event_log_email(self):
+        """Send Event Log by email"""
+        print("Tools -> Send Event Log by email clicked")
+        # TODO: Implement send event log by email functionality
+    
+    def tools_database_transfer(self):
+        """Database Transfer"""
+        print("Tools -> Database Transfer clicked")
+        # TODO: Implement database transfer functionality
+    
+        
+    def tools_settings_signal_view(self):
+        """Signal view"""
+        print("Tools -> Settings -> Signal view clicked")
+        dialog = SignalViewDialog(self.parent)
+        if dialog.exec_() == QDialog.Accepted:
+            print("Signal view settings applied")
+            # TODO: Apply signal view settings
+    
+    def tools_settings_report(self):
+        """Report"""
+        print("Tools -> Settings -> Report clicked")
+        dialog = ReportSettingsDialog(self.parent)
+        if dialog.exec_() == QDialog.Accepted:
+            print("Report settings applied")
+            # TODO: Apply report settings
+    
+    def tools_settings_analysis_parameters(self):
+        """Analysis parameters"""
+        print("Tools -> Settings -> Analysis parameters clicked")
+        dialog = AnalysisParametersDialog(self.parent)
+        dialog.exec_()
+    
+    def tools_settings_edf_export(self):
+        """EDF export"""
+        print("Tools -> Settings -> EDF export clicked")
+        dialog = EDFExportDialog(self.parent)
+        if dialog.exec_() == QDialog.Accepted:
+            print("EDF export settings applied")
+            # TODO: Apply EDF export settings
+    
+        
+>>>>>>> cd24ba84d1097c999ababa4e5359ef4c504b8276
     def tools_reanalysis(self):
         """Reanalysis"""
         print("Tools -> Reanalysis clicked")
@@ -537,6 +606,12 @@ class ButtonFunctions:
     
     def file_database(self):
         """Open patient database window - same as red database button"""
+        # Check if parent has monitor chart with selection active and block if needed
+        if (hasattr(self.parent, 'monitor_chart') and 
+            hasattr(self.parent.monitor_chart, 'block_if_selection_active') and 
+            self.parent.monitor_chart.block_if_selection_active()):
+            return
+        
         # Call the same open_database method as the red toolbar button
         if hasattr(self.parent, 'open_database'):
             self.parent.open_database()
@@ -545,6 +620,12 @@ class ButtonFunctions:
     
     def file_open_archive(self):
         """Open archive window - same as blue archive button"""
+        # Check if parent has monitor chart with selection active and block if needed
+        if (hasattr(self.parent, 'monitor_chart') and 
+            hasattr(self.parent.monitor_chart, 'block_if_selection_active') and 
+            self.parent.monitor_chart.block_if_selection_active()):
+            return
+        
         # Call the same open_archive method as the blue toolbar button
         if hasattr(self.parent, 'open_archive'):
             self.parent.open_archive()
@@ -863,3 +944,781 @@ class ButtonFunctions:
 
     def view_quick_start(self):
         self._activate_view('quick_start', 'Quick start')
+
+
+class SignalViewDialog(QDialog):
+    """Dialog for customizing signal view settings"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Customize signal view")
+        self.setFixedSize(400, 300)
+        self.init_ui()
+    
+    def init_ui(self):
+        """Initialize the dialog UI"""
+        layout = QVBoxLayout()
+        
+        # Create Only window group
+        only_window_group = QGroupBox("Only window")
+        only_window_layout = QGridLayout()
+        
+        # Resolution dropdown
+        resolution_label = QLabel("Resolution:")
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.addItems(["10 sec.", "20 sec.", "30 sec.", "60 sec."])
+        self.resolution_combo.setCurrentText("10 sec.")
+        
+        # Channels and Events buttons
+        channels_button = QPushButton("Channels...")
+        events_button = QPushButton("Events...")
+        
+        only_window_layout.addWidget(resolution_label, 0, 0)
+        only_window_layout.addWidget(self.resolution_combo, 0, 1)
+        only_window_layout.addWidget(channels_button, 1, 0)
+        only_window_layout.addWidget(events_button, 1, 1)
+        
+        only_window_group.setLayout(only_window_layout)
+        
+        # Checkboxes
+        self.signal_cursor_checkbox = QCheckBox("Signal cursor")
+        self.hide_channels_checkbox = QCheckBox("Hide channels with no data")
+        self.hide_channels_checkbox.setChecked(True)
+        
+        # Bottom buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        standard_values_button = QPushButton("Standard values")
+        
+        ok_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        standard_values_button.clicked.connect(self.reset_to_standard_values)
+        
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(standard_values_button)
+        
+        # Add all to main layout
+        layout.addWidget(only_window_group)
+        layout.addWidget(self.signal_cursor_checkbox)
+        layout.addWidget(self.hide_channels_checkbox)
+        layout.addStretch()
+        layout.addLayout(button_layout)
+        
+        self.setLayout(layout)
+    
+    def reset_to_standard_values(self):
+        """Reset to standard values"""
+        self.resolution_combo.setCurrentText("10 sec.")
+        self.signal_cursor_checkbox.setChecked(False)
+        self.hide_channels_checkbox.setChecked(True)
+    
+    def get_settings(self):
+        """Get current settings"""
+        return {
+            'resolution': self.resolution_combo.currentText(),
+            'signal_cursor': self.signal_cursor_checkbox.isChecked(),
+            'hide_channels': self.hide_channels_checkbox.isChecked()
+        }
+
+
+class ReportSettingsDialog(QDialog):
+    """Dialog for customizing report settings"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Report")
+        self.setFixedSize(500, 600)
+        self.init_ui()
+    
+    def init_ui(self):
+        """Initialize the dialog UI"""
+        layout = QVBoxLayout()
+        
+        # Measurement system group
+        measurement_group = QGroupBox("Measurement system")
+        measurement_layout = QVBoxLayout()
+        
+        self.metric_radio = QRadioButton("Metric")
+        self.imperial_radio = QRadioButton("Imperial")
+        self.metric_radio.setChecked(True)
+        
+        measurement_layout.addWidget(self.metric_radio)
+        measurement_layout.addWidget(self.imperial_radio)
+        measurement_group.setLayout(measurement_layout)
+        
+        # Logo settings
+        logo_group = QGroupBox("Show logo on report")
+        logo_layout = QHBoxLayout()
+        
+        self.show_logo_checkbox = QCheckBox()
+        logo_file_button = QPushButton("Select file")
+        
+        logo_layout.addWidget(self.show_logo_checkbox)
+        logo_layout.addWidget(logo_file_button)
+        logo_group.setLayout(logo_layout)
+        
+        # Print settings
+        print_group = QGroupBox("Print several reports")
+        print_layout = QHBoxLayout()
+        
+        self.print_checkbox = QCheckBox()
+        self.print_spinbox = QSpinBox()
+        self.print_spinbox.setRange(1, 100)
+        self.print_spinbox.setValue(1)
+        
+        print_layout.addWidget(self.print_checkbox)
+        print_layout.addWidget(self.print_spinbox)
+        print_group.setLayout(print_layout)
+        
+        # Extended report
+        self.extended_report_checkbox = QCheckBox("Extended report")
+        
+        # Desaturation settings
+        desat_group = QGroupBox("Display value for")
+        desat_layout = QVBoxLayout()
+        
+        self.desat_88_checkbox = QCheckBox("'Desaturation below 88%'")
+        self.desat_89_checkbox = QCheckBox("'Desaturation below 89%'")
+        
+        desat_layout.addWidget(self.desat_88_checkbox)
+        desat_layout.addWidget(self.desat_89_checkbox)
+        desat_group.setLayout(desat_layout)
+        
+        # Template settings
+        self.prescription_checkbox = QCheckBox("Add prescription template")
+        
+        referral_group = QGroupBox("Add referral template")
+        referral_layout = QVBoxLayout()
+        
+        self.referral_checkbox = QCheckBox()
+        referral_radio_layout = QHBoxLayout()
+        
+        self.referral_always_radio = QRadioButton("always")
+        self.referral_ahi_radio = QRadioButton("AHI >= 5")
+        self.referral_always_radio.setChecked(True)
+        
+        referral_radio_layout.addWidget(self.referral_always_radio)
+        referral_radio_layout.addWidget(self.referral_ahi_radio)
+        
+        referral_layout.addWidget(self.referral_checkbox)
+        referral_layout.addLayout(referral_radio_layout)
+        referral_group.setLayout(referral_layout)
+        
+        # Quick buttons
+        self.quick_buttons_checkbox = QCheckBox("Show quick buttons in report view")
+        
+        # Physician info
+        physician_group = QGroupBox("Name of physician (to be referred to ...)")
+        physician_layout = QVBoxLayout()
+        
+        physician_input_layout = QHBoxLayout()
+        self.physician_text = QLineEdit()
+        select_doctor_button = QPushButton("Select doctor")
+        
+        physician_input_layout.addWidget(self.physician_text)
+        physician_input_layout.addWidget(select_doctor_button)
+        
+        physician_layout.addLayout(physician_input_layout)
+        physician_group.setLayout(physician_layout)
+        
+        # Bottom buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        advanced_button = QPushButton("Advanced settings")
+        
+        ok_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        advanced_button.clicked.connect(self.show_advanced_settings)
+        
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(advanced_button)
+        
+        # Add all to main layout
+        layout.addWidget(measurement_group)
+        layout.addWidget(logo_group)
+        layout.addWidget(print_group)
+        layout.addWidget(self.extended_report_checkbox)
+        layout.addWidget(desat_group)
+        layout.addWidget(self.prescription_checkbox)
+        layout.addWidget(referral_group)
+        layout.addWidget(self.quick_buttons_checkbox)
+        layout.addWidget(physician_group)
+        layout.addStretch()
+        layout.addLayout(button_layout)
+        
+        self.setLayout(layout)
+    
+    def show_advanced_settings(self):
+        """Show advanced settings dialog"""
+        QMessageBox.information(self, "Advanced Settings", "Advanced settings dialog would open here")
+    
+    def get_settings(self):
+        """Get current report settings"""
+        return {
+            'measurement_system': 'metric' if self.metric_radio.isChecked() else 'imperial',
+            'show_logo': self.show_logo_checkbox.isChecked(),
+            'print_reports': self.print_checkbox.isChecked(),
+            'print_count': self.print_spinbox.value(),
+            'extended_report': self.extended_report_checkbox.isChecked(),
+            'desat_88': self.desat_88_checkbox.isChecked(),
+            'desat_89': self.desat_89_checkbox.isChecked(),
+            'prescription': self.prescription_checkbox.isChecked(),
+            'referral': self.referral_checkbox.isChecked(),
+            'referral_condition': 'always' if self.referral_always_radio.isChecked() else 'ahi_5',
+            'quick_buttons': self.quick_buttons_checkbox.isChecked(),
+            'physician_name': self.physician_text.text()
+        }
+
+
+class EDFExportDialog(QDialog):
+    """Dialog for EDF export settings"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("EDF export")
+        self.setFixedSize(600, 700)
+        self.init_ui()
+    
+    def init_ui(self):
+        """Initialize dialog UI"""
+        main_layout = QVBoxLayout()
+        
+        # --- Choose channels for export ---
+        channels_group = QGroupBox("Choose channels for export")
+        channels_layout = QVBoxLayout()
+        channels_grid_layout = QGridLayout()
+        
+        self.channel_checkboxes = {}
+        channels = ["Battery", "Flow", "Snoring", "Effort", "Pulse", "Saturation"]
+        for i, channel in enumerate(channels):
+            checkbox = QCheckBox(channel)
+            checkbox.setChecked(True)
+            self.channel_checkboxes[channel] = checkbox
+            channels_grid_layout.addWidget(checkbox, i // 3, i % 3)
+        
+        channels_buttons_layout = QHBoxLayout()
+        channels_buttons_layout.addStretch()
+        choose_all_channels_button = QPushButton("choose all")
+        choose_all_channels_button.clicked.connect(lambda: self._set_all_checkboxes(self.channel_checkboxes, True))
+        channels_buttons_layout.addWidget(choose_all_channels_button)
+        
+        channels_layout.addLayout(channels_grid_layout)
+        channels_layout.addLayout(channels_buttons_layout)
+        channels_group.setLayout(channels_layout)
+        main_layout.addWidget(channels_group)
+        
+        # --- Choose events for export ---
+        events_group = QGroupBox("Choose events for export")
+        events_layout = QVBoxLayout()
+        events_grid_layout = QGridLayout()
+        
+        self.event_checkboxes = {}
+        events = [
+            "Recording interruption", "Flowlimitation & Snoring", "Desaturation",
+            "Start of evaluation", "Cheyne Stokes Respiration", "Analysis exclusion saturation",
+            "End of evaluation", "Missing finger sensor", "Start of evaluation saturation",
+            "Signal too small", "Missing XPod", "Start of evaluation pulse",
+            "Unclassified apnea", "Invalid data XPod", "Mixed apnea",
+            "Hypopnea", "Invalid data battery", "Central apnea",
+            "Flow limitation", "Invalid data flow", "Obstructive apnea",
+            "Snoring", "Invalid data pulse", "Signal too small (effort)",
+            "Inspiratory flow", "Invalid data saturation", "Invalid Data Effort",
+            "Analysis exclusion flow", "Baseline Saturation", "Analysis exclusion saturation",
+            "Start of evaluation saturation", "Start of evaluation pulse", ""
+        ]
+        
+        for i, event in enumerate(events):
+            if event:  # Skip empty string
+                checkbox = QCheckBox(event)
+                checkbox.setChecked(True)
+                self.event_checkboxes[event] = checkbox
+                events_grid_layout.addWidget(checkbox, i // 3, i % 3)
+        
+        events_buttons_layout = QHBoxLayout()
+        events_buttons_layout.addStretch()
+        choose_all_events_button = QPushButton("choose all")
+        choose_all_events_button.clicked.connect(lambda: self._set_all_checkboxes(self.event_checkboxes, True))
+        events_buttons_layout.addWidget(choose_all_events_button)
+        
+        events_layout.addLayout(events_grid_layout)
+        events_layout.addLayout(events_buttons_layout)
+        events_group.setLayout(events_layout)
+        main_layout.addWidget(events_group)
+        
+        # --- Bottom buttons ---
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        standard_parameter_button = QPushButton("Standard parameter")
+        
+        ok_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        standard_parameter_button.clicked.connect(self.load_standard_parameters)
+        
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(standard_parameter_button)
+        
+        main_layout.addStretch()
+        main_layout.addLayout(button_layout)
+        
+        self.setLayout(main_layout)
+    
+    def _set_all_checkboxes(self, checkbox_dict, checked):
+        """Set all checkboxes to checked/unchecked"""
+        for checkbox in checkbox_dict.values():
+            checkbox.setChecked(checked)
+    
+    def load_standard_parameters(self):
+        """Load standard parameters"""
+        self._set_all_checkboxes(self.channel_checkboxes, True)
+        self._set_all_checkboxes(self.event_checkboxes, True)
+        QMessageBox.information(self, "Standard Parameters", "Standard parameters loaded")
+    
+    def get_export_settings(self):
+        """Get current export settings"""
+        selected_channels = [ch for ch, cb in self.channel_checkboxes.items() if cb.isChecked()]
+        selected_events = [ev for ev, cb in self.event_checkboxes.items() if cb.isChecked()]
+        return {
+            'channels': selected_channels,
+            'events': selected_events
+        }
+
+
+
+
+class AnalysisParametersDialog(QDialog):
+    """Dialog for analysis parameters settings"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Analysis parameters")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(400)
+        self.init_ui()
+    
+    def init_ui(self):
+        """Initialize the dialog UI"""
+        main_layout = QVBoxLayout(self)
+        
+        # Tab Widget
+        self.tab_widget = QTabWidget(self)
+        main_layout.addWidget(self.tab_widget)
+        
+        # Create tabs
+        self.apnea_tab = QWidget()
+        self.hypopnea_tab = QWidget()
+        self.snoring_tab = QWidget()
+        self.desaturation_tab = QWidget()
+        self.csr_tab = QWidget()
+        
+        self.tab_widget.addTab(self.apnea_tab, "Apnea")
+        self.tab_widget.addTab(self.hypopnea_tab, "Hypopnea")
+        self.tab_widget.addTab(self.snoring_tab, "Snoring")
+        self.tab_widget.addTab(self.desaturation_tab, "Desaturation")
+        self.tab_widget.addTab(self.csr_tab, "CSR")
+        
+        # Setup Apnea tab (main tab with all fields from image)
+        self.setup_apnea_tab()
+        self.setup_hypopnea_tab()
+        self.setup_snoring_tab()
+        self.setup_desaturation_tab()
+        self.setup_csr_tab()
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(self.accept)
+        button_layout.addWidget(ok_button)
+        
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
+        
+        standard_button = QPushButton("standard parameter")
+        standard_button.clicked.connect(self.standard_parameter)
+        button_layout.addWidget(standard_button)
+        
+        main_layout.addLayout(button_layout)
+    
+    def setup_apnea_tab(self):
+        layout = QVBoxLayout(self.apnea_tab)
+
+        # -------- Top Threshold Row --------
+        top_row = QHBoxLayout()
+
+        top_row.addWidget(QLabel("Threshold:"))
+
+        self.classic_threshold = QLineEdit("20")
+        self.classic_threshold.setFixedWidth(50)
+        top_row.addWidget(self.classic_threshold)
+
+        top_row.addWidget(QLabel("% [1-90]   = flow reduction of"))
+
+        self.classic_flow_reduction = QLineEdit("80")
+        self.classic_flow_reduction.setFixedWidth(50)
+        top_row.addWidget(self.classic_flow_reduction)
+
+        top_row.addWidget(QLabel("%"))
+        top_row.addStretch()
+
+        layout.addLayout(top_row)
+
+        # -------- Duration --------
+        duration_layout = QVBoxLayout()
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Min. duration:"))
+
+        self.min_duration = QLineEdit("10")
+        self.min_duration.setFixedWidth(50)
+        row1.addWidget(self.min_duration)
+
+        row1.addWidget(QLabel("s  [1-20]"))
+        row1.addStretch()
+
+        duration_layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Max. duration:"))
+
+        self.max_duration = QLineEdit("80")
+        self.max_duration.setFixedWidth(50)
+        row2.addWidget(self.max_duration)
+
+        row2.addWidget(QLabel("s  [1-100]"))
+        row2.addStretch()
+
+        duration_layout.addLayout(row2)
+
+        layout.addLayout(duration_layout)
+
+        # -------- Separator Line --------
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(line)
+
+        # -------- Apnea Type Section --------
+        section_label = QLabel("Determining the apnea type in conjunction with the respiratory drive signal:")
+        layout.addWidget(section_label)
+
+        # Row 1
+        row3 = QHBoxLayout()
+        row3.addSpacing(20)
+        row3.addWidget(QLabel("Threshold for obstructive apnea:"))
+
+        self.obstructive_threshold = QLineEdit("20")
+        self.obstructive_threshold.setFixedWidth(50)
+        row3.addWidget(self.obstructive_threshold)
+
+        row3.addWidget(QLabel("% [0-49]"))
+        row3.addStretch()
+
+        layout.addLayout(row3)
+
+        # Row 2
+        row4 = QHBoxLayout()
+        row4.addSpacing(20)
+        row4.addWidget(QLabel("Threshold for central apnea:"))
+
+        self.central_threshold = QLineEdit("60")
+        self.central_threshold.setFixedWidth(50)
+        row4.addWidget(self.central_threshold)
+
+        row4.addWidget(QLabel("% [50-80]"))
+        row4.addStretch()
+
+        layout.addLayout(row4)
+
+        # Row 3
+        row5 = QHBoxLayout()
+        row5.addSpacing(20)
+        row5.addWidget(QLabel("Amplitude threshold for central apnea:"))
+
+        self.central_amplitude = QLineEdit("8")
+        self.central_amplitude.setFixedWidth(50)
+        row5.addWidget(self.central_amplitude)
+
+        row5.addWidget(QLabel("% [2-30]"))
+        row5.addStretch()
+
+        layout.addLayout(row5)
+
+        layout.addStretch()
+    
+    def setup_hypopnea_tab(self):
+        """Setup Hypopnea tab EXACT like reference UI"""
+        layout = QVBoxLayout(self.hypopnea_tab)
+
+        # -------- Classic Definition --------
+        classic_group = QGroupBox("Classic definition")
+        classic_layout = QVBoxLayout()
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Threshold:"))
+        self.hypopnea_classic_threshold = QLineEdit("50")
+        self.hypopnea_classic_threshold.setFixedWidth(50)
+        row1.addWidget(self.hypopnea_classic_threshold)
+
+        row1.addWidget(QLabel("%  [1-90]   = flow reduction of"))
+
+        self.hypopnea_classic_flow_reduction = QLineEdit("50")
+        self.hypopnea_classic_flow_reduction.setFixedWidth(50)
+        row1.addWidget(self.hypopnea_classic_flow_reduction)
+
+        row1.addWidget(QLabel("%"))
+        row1.addStretch()
+
+        classic_layout.addLayout(row1)
+        classic_group.setLayout(classic_layout)
+        layout.addWidget(classic_group)
+
+        # -------- AASM Definition --------
+        aasm_group = QGroupBox("")
+        aasm_layout = QVBoxLayout()
+
+        row2 = QHBoxLayout()
+
+        self.hypopnea_aasm_checkbox = QCheckBox("AASM definition")
+        self.hypopnea_aasm_checkbox.setChecked(True)
+        row2.addWidget(self.hypopnea_aasm_checkbox)
+
+        row2.addSpacing(20)
+
+        row2.addWidget(QLabel("Threshold:"))
+        self.hypopnea_aasm_threshold = QLineEdit("70")
+        self.hypopnea_aasm_threshold.setFixedWidth(50)
+        row2.addWidget(self.hypopnea_aasm_threshold)
+
+        row2.addWidget(QLabel("%  [1-90]   = flow reduction of"))
+
+        self.hypopnea_aasm_flow_reduction = QLineEdit("30")
+        self.hypopnea_aasm_flow_reduction.setFixedWidth(50)
+        row2.addWidget(self.hypopnea_aasm_flow_reduction)
+
+        row2.addWidget(QLabel("%"))
+        row2.addStretch()
+
+        aasm_layout.addLayout(row2)
+
+        # Signal quality row
+        row3 = QHBoxLayout()
+        row3.addSpacing(30)
+        row3.addWidget(QLabel("Signal quality switch:"))
+
+        self.hypopnea_aasm_signal_quality = QLineEdit("5")
+        self.hypopnea_aasm_signal_quality.setFixedWidth(50)
+        row3.addWidget(self.hypopnea_aasm_signal_quality)
+
+        row3.addWidget(QLabel("[0-20]"))
+        row3.addStretch()
+
+        aasm_layout.addLayout(row3)
+
+        aasm_group.setLayout(aasm_layout)
+        layout.addWidget(aasm_group)
+
+        # -------- Duration --------
+        duration_group = QGroupBox("")
+        duration_layout = QHBoxLayout()
+
+        duration_layout.addWidget(QLabel("Min. duration:"))
+        self.hypopnea_min_duration = QLineEdit("10")
+        self.hypopnea_min_duration.setFixedWidth(50)
+        duration_layout.addWidget(self.hypopnea_min_duration)
+
+        duration_layout.addWidget(QLabel("s  [1-20]"))
+
+        duration_layout.addSpacing(30)
+
+        duration_layout.addWidget(QLabel("Max. duration:"))
+        self.hypopnea_max_duration = QLineEdit("100")
+        self.hypopnea_max_duration.setFixedWidth(50)
+        duration_layout.addWidget(self.hypopnea_max_duration)
+
+        duration_layout.addWidget(QLabel("s  [1-120]"))
+
+        duration_layout.addStretch()
+
+        duration_group.setLayout(duration_layout)
+        layout.addWidget(duration_group)
+
+        # -------- Respiratory --------
+        resp_group = QGroupBox("")
+        resp_layout = QHBoxLayout()
+
+        resp_layout.addWidget(QLabel("Maximum respiratory mean time when linking apneas/hypopneas:"))
+
+        self.hypopnea_respiratory_mean_time = QLineEdit("1.0")
+        self.hypopnea_respiratory_mean_time.setFixedWidth(60)
+        resp_layout.addWidget(self.hypopnea_respiratory_mean_time)
+
+        resp_layout.addWidget(QLabel("s  [0.0 - 1.5]"))
+        resp_layout.addStretch()
+
+        resp_group.setLayout(resp_layout)
+        layout.addWidget(resp_group)
+
+        # Footer note
+        note = QLabel("Time value of 0 means linking is turned off")
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(note)
+
+        layout.addStretch()
+    
+    def setup_snoring_tab(self):
+        layout = QVBoxLayout(self.snoring_tab)
+
+        main_row = QHBoxLayout()
+
+        # -------- LEFT COLUMN --------
+        left_col = QVBoxLayout()
+
+        # Row 1
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Threshold for\n-> snoring:"))
+
+        self.snoring_threshold = QLineEdit("6.0")
+        self.snoring_threshold.setFixedWidth(50)
+        row1.addWidget(self.snoring_threshold)
+
+        row1.addWidget(QLabel("%  [1.5 - 10.0]"))
+        row1.addStretch()
+        left_col.addLayout(row1)
+
+        # Row 2
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Min. length of a\nsnoring event:"))
+
+        self.snoring_min_duration = QLineEdit("0.3")
+        self.snoring_min_duration.setFixedWidth(50)
+        row2.addWidget(self.snoring_min_duration)
+
+        row2.addWidget(QLabel("s  [0.3 - 0.9]"))
+        row2.addStretch()
+        left_col.addLayout(row2)
+
+        # -------- RIGHT COLUMN --------
+        right_col = QVBoxLayout()
+
+        # Row 3
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Max. duration of a\nsnoring event:"))
+
+        self.snoring_max_duration = QLineEdit("3.5")
+        self.snoring_max_duration.setFixedWidth(50)
+        row3.addWidget(self.snoring_max_duration)
+
+        row3.addWidget(QLabel("s  [2.0 - 5.0]"))
+        row3.addStretch()
+        right_col.addLayout(row3)
+
+        # Row 4
+        row4 = QHBoxLayout()
+        row4.addWidget(QLabel("Max. resp. snoring\nmean time:"))
+
+        self.snoring_mean_time = QLineEdit("0.5")
+        self.snoring_mean_time.setFixedWidth(50)
+        row4.addWidget(self.snoring_mean_time)
+
+        row4.addWidget(QLabel("s  [0.0 - 2.0]"))
+        row4.addStretch()
+        right_col.addLayout(row4)
+
+        # Add both columns
+        main_row.addLayout(left_col)
+        main_row.addSpacing(40)
+        main_row.addLayout(right_col)
+
+        layout.addLayout(main_row)
+
+        # -------- Bottom Note --------
+        note = QLabel("Time value of 0 means linking is turned off")
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(note)
+
+        layout.addStretch()
+    
+    def setup_desaturation_tab(self):
+        layout = QVBoxLayout(self.desaturation_tab)
+
+        main_row = QHBoxLayout()
+
+        # Multi-line label
+        label = QLabel("Threshold for oxygen\ndesaturation:")
+        main_row.addWidget(label)
+
+        # Input box
+        self.desaturation_threshold = QLineEdit("4")
+        self.desaturation_threshold.setFixedWidth(50)
+        main_row.addWidget(self.desaturation_threshold)
+
+        # Unit + range
+        main_row.addWidget(QLabel("%  [3 - 5]"))
+
+        main_row.addStretch()
+
+        layout.addLayout(main_row)
+        layout.addStretch()
+    
+    def setup_csr_tab(self):
+        layout = QVBoxLayout(self.csr_tab)
+
+        # Checkbox (top)
+        self.csr_checkbox = QCheckBox("Run CSR analysis")
+        self.csr_checkbox.setChecked(True)
+        layout.addWidget(self.csr_checkbox)
+
+        main_row = QHBoxLayout()
+
+        # Label (single line like image)
+        label = QLabel("Threshold for CSR detection")
+        main_row.addWidget(label)
+
+        # Input box (value corrected)
+        self.csr_threshold = QLineEdit("0.5")
+        self.csr_threshold.setFixedWidth(50)
+        main_row.addWidget(self.csr_threshold)
+
+        # Range text
+        range_label = QLabel("[0.2 - 0.8]")
+        main_row.addWidget(range_label)
+
+        # Push everything left like image
+        main_row.addStretch()
+
+        layout.addLayout(main_row)
+        layout.addStretch()
+    
+    def standard_parameter(self):
+        """Load standard parameters"""
+        # Set default ResMed values
+        self.classic_threshold.setText("20")
+        self.classic_flow_reduction.setText("80")
+        self.min_duration.setText("10")
+        self.max_duration.setText("80")
+        self.obstructive_threshold.setText("20")
+        self.central_threshold.setText("60")
+        self.central_amplitude.setText("8")
+        
+        QMessageBox.information(self, "ResMed Parameters", "ResMed standard parameters loaded")
+    
+    def get_parameters(self):
+        """Get current analysis parameters"""
+        return {
+            'classic_threshold': self.classic_threshold.text(),
+            'classic_flow_reduction': self.classic_flow_reduction.text(),
+            'min_duration': self.min_duration.text(),
+            'max_duration': self.max_duration.text(),
+            'obstructive_threshold': self.obstructive_threshold.text(),
+            'central_threshold': self.central_threshold.text(),
+            'central_amplitude': self.central_amplitude.text()
+        }
+>>>>>>> cd24ba84d1097c999ababa4e5359ef4c504b8276

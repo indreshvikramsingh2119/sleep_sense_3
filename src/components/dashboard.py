@@ -538,6 +538,10 @@ class SleepSenseDashboard(QMainWindow):
         
     def slider_navigate_backward(self):
         """Navigate backward using slider buttons"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
         if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
             # Step size equals the current time window size
             step_size = self.monitor_chart.current_time_window  
@@ -552,6 +556,10 @@ class SleepSenseDashboard(QMainWindow):
     
     def slider_navigate_forward(self):
         """Navigate forward using slider buttons"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
         if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
             # Step size equals the current time window size
             step_size = self.monitor_chart.current_time_window  
@@ -762,11 +770,19 @@ class SleepSenseDashboard(QMainWindow):
     
     def download_data(self):
         """Download data from device"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
         print("Download Data button clicked")
         # TODO: Implement data download logic
     
     def open_database(self):
         """Open patient database as modeless window and show extended buttons"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
         print("Database button clicked")
         # Show extended buttons immediately
         self.action_patient_record.setVisible(True)
@@ -784,6 +800,10 @@ class SleepSenseDashboard(QMainWindow):
     
     def open_archive(self):
         """Access archived records as modal dialog"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
         print("Archive button clicked")
         self.hide_extended_buttons()
         self.archive_window = ArchiveWindow(self)
@@ -791,6 +811,10 @@ class SleepSenseDashboard(QMainWindow):
     
     def open_report_view(self):
         """View ECG/Sleep reports - Opens Patient Record Form as modal dialog"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
         print("Report View button clicked")
         # Import the patient record form
         from .patient_record_form import PatientRecordForm
@@ -823,11 +847,19 @@ class SleepSenseDashboard(QMainWindow):
     
     def open_signal_view(self):
         """View live physiological signals"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
         print("Signal View button clicked")
         # TODO: Implement signal view logic
     
     def open_event_list(self):
         """View detected events"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
         print("Event List button clicked")
         self.event_window = EventWindow(self)
         self.event_window.exec_()  # Modal dialog
