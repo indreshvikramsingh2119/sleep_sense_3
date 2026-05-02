@@ -24,7 +24,7 @@ class DatabaseManager:
     def get_connection(self):
         """Get database connection"""
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row  
+        conn.row_factory = sqlite3.Row  # Enable row factory for dict-like access
         return conn
     
     def init_database(self):
@@ -80,23 +80,6 @@ class DatabaseManager:
                 duration TEXT,
                 archived BOOLEAN DEFAULT 0,
                 file_path TEXT,
-                FOREIGN KEY (patient_id) REFERENCES patients(id)
-            )
-        """)
-        
-        # Create events table for sleep events
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                patient_id INTEGER,
-                event_type TEXT,
-                event_name TEXT,
-                start_time TEXT,
-                end_time TEXT,
-                duration TEXT,
-                parameter TEXT,
-                recording_date TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (patient_id) REFERENCES patients(id)
             )
         """)
@@ -169,7 +152,7 @@ class DatabaseManager:
             cursor.execute("""
                 SELECT id, last_name, first_name, dob, patient_id
                 FROM patients
-                ORDER BY created_at DESC
+                ORDER BY last_name, first_name
             """)
             
             patients = []
@@ -277,156 +260,11 @@ class DatabaseManager:
             
             records = []
             for row in cursor.fetchall():
-                records.append({
-                    'id': row['id'],
-                    'patient_id': row['patient_id'],
-                    'last_name': row['last_name'],
-                    'first_name': row['first_name'],
-                    'recording_date': row['recording_date'],
-                    'start_time': row['start_time'],
-                    'duration': row['duration'],
-                    'archived': row['archived'],
-                    'file_path': row['file_path']
-                })
+                records.append(dict(row))
             
             return records
         except Exception as e:
             print(f"Error getting records: {e}")
             return []
-        finally:
-            conn.close()
-    
-    def delete_patient(self, patient_id):
-        """Delete a patient and their associated records"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        try:
-            # First delete associated records
-            cursor.execute("DELETE FROM records WHERE patient_id = ?", (patient_id,))
-            
-            # Then delete the patient
-            cursor.execute("DELETE FROM patients WHERE id = ?", (patient_id,))
-            
-            conn.commit()
-            print(f"Patient {patient_id} and associated records deleted successfully")
-            return True
-        except Exception as e:
-            conn.rollback()
-            print(f"Error deleting patient: {e}")
-            return False
-        finally:
-            conn.close() 
-    
-    def delete_record(self, record_id):
-        """Delete a specific record"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute("DELETE FROM records WHERE id = ?", (record_id,))
-            conn.commit()
-            print(f"Record {record_id} deleted successfully")
-            return True
-        except Exception as e:
-            conn.rollback()
-            print(f"Error deleting record: {e}")
-            return False
-        finally:
-            conn.close()
-    
-    def save_event(self, event_data):
-        """Save sleep event to database"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute("""
-                INSERT INTO events (
-                    patient_id, event_type, event_name, start_time, end_time,
-                    duration, parameter, recording_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                event_data.get('patient_id'),
-                event_data.get('event_type', 'General'),
-                event_data.get('event_name', ''),
-                event_data.get('start_time', ''),
-                event_data.get('end_time', ''),
-                event_data.get('duration', ''),
-                event_data.get('parameter', ''),
-                event_data.get('recording_date', '')
-            ))
-            
-            conn.commit()
-            event_id = cursor.lastrowid
-            print(f"Event saved with ID: {event_id}")
-            return event_id
-        except Exception as e:
-            conn.rollback()
-            print(f"Error saving event: {e}")
-            return None
-        finally:
-            conn.close()
-    
-    def get_events_by_patient(self, patient_id):
-        """Get all events for a specific patient"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute("""
-                SELECT * FROM events 
-                WHERE patient_id = ? 
-                ORDER BY recording_date DESC, start_time DESC
-            """, (patient_id,))
-            
-            events = []
-            for row in cursor.fetchall():
-                events.append(dict(row))
-            
-            return events
-        except Exception as e:
-            print(f"Error getting events: {e}")
-            return []
-        finally:
-            conn.close()
-    
-    def get_events_by_type(self, patient_id, event_type):
-        """Get events for a specific patient filtered by type"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute("""
-                SELECT * FROM events 
-                WHERE patient_id = ? AND event_type = ?
-                ORDER BY recording_date DESC, start_time DESC
-            """, (patient_id, event_type))
-            
-            events = []
-            for row in cursor.fetchall():
-                events.append(dict(row))
-            
-            return events
-        except Exception as e:
-            print(f"Error getting events by type: {e}")
-            return []
-        finally:
-            conn.close()
-    
-    def delete_event(self, event_id):
-        """Delete a specific event"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute("DELETE FROM events WHERE id = ?", (event_id,))
-            conn.commit()
-            print(f"Event {event_id} deleted successfully")
-            return True
-        except Exception as e:
-            conn.rollback()
-            print(f"Error deleting event: {e}")
-            return False
         finally:
             conn.close()

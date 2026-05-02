@@ -8,36 +8,33 @@ from PyQt5.QtWidgets import (
     QLabel, QFrame, QSplitter, QGroupBox, QLineEdit, QCheckBox,
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
     QToolBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QComboBox,
-    QMessageBox, QScrollBar, QSlider
+    QScrollBar, QSlider
 )
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont
 import pyqtgraph as pg
 import numpy as np
-from src.utils.database_manager import DatabaseManager
-from datetime import datetime
 
 
 class EventWindow(QDialog):
     """Event Window matching the reference image design exactly"""
     
-    def __init__(self, parent=None, patient_data=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setModal(False)
+        self.setModal(True)
         self.setWindowTitle("Event Window")
         self.setFixedSize(1200, 800)
         self.monitor_chart = None
-        self.patient_data = patient_data
-        self.db_manager = DatabaseManager()
         
         # Scroll navigation variables
         self.current_time_window = 60  # Default 60 seconds
         self.current_time_offset = 0   # Current scroll position in seconds
         self.max_data_duration = 21600  # 6 hours of data in seconds (21600s)
         self.scroll_step = 30  # Scroll step in seconds
+        
         self.init_ui()
         self.connect_to_main_data()
-        self.load_patient_events()
+        self.load_sample_data()
         self.setup_real_time_updates()
         
     def init_ui(self):
@@ -273,7 +270,7 @@ class EventWindow(QDialog):
             "PR/HR"
         ]
         self.event_type_combo.addItems(self.graph_types)
-        self.event_type_combo.setCurrentText("Airflow")  
+        self.event_type_combo.setCurrentText("Airflow")  # Default to airflow like original
         self.event_type_combo.setStyleSheet("""
             QComboBox {
                 border: 2px solid #d1e3f4;
@@ -673,7 +670,7 @@ class EventWindow(QDialog):
             np.random.seed(int(time_offset) % 1000)
             # Add desaturation events
             for i in range(len(time_points)):
-                if np.random.random() < 0.03:  
+                if np.random.random() < 0.03:  # 3% chance of desaturation
                     start_idx = max(0, i - 10)
                     end_idx = min(len(time_points), i + 10)
                     base_spo2[start_idx:end_idx] -= np.random.uniform(5, 15)  # 5-15% drop
@@ -959,23 +956,10 @@ class EventWindow(QDialog):
             secs = int(seconds % 60)
             return f"0:{minutes:02d}:{secs:02d}"
         
-    def load_patient_events(self):
-        """Load events from database for the current patient"""
+    def load_sample_data(self):
+        """Load initial data and setup real-time updates"""
         # Event tree data
         self.populate_event_tree()
-        
-        # Load patient-specific events from database
-        if self.patient_data:
-            patient_id = self.patient_data.get('id')
-            if patient_id:
-                self.db_events = self.db_manager.get_events_by_patient(patient_id)
-                print(f"Loaded {len(self.db_events)} events for patient {patient_id}")
-            else:
-                self.db_events = []
-                print("No patient ID found, using sample data")
-        else:
-            self.db_events = []
-            print("No patient data provided, using sample data")
         
         # Initialize with real-time data
         self.update_time_display()
@@ -1030,23 +1014,11 @@ class EventWindow(QDialog):
             
     def filter_events_by_type(self, event_type):
         """Filter events in the list based on selected tree item"""
-        # Use database events first, fallback to simulated events
-        if hasattr(self, 'db_events') and self.db_events:
-            all_events = []
-            for event in self.db_events:
-                # Convert database event to table format
-                all_events.append([
-                    event.get('event_name', 'Unknown'),
-                    event.get('start_time', ''),
-                    event.get('end_time', ''),
-                    event.get('duration', ''),
-                    event.get('parameter', '')
-                ])
-        else:
-            # Fallback to simulated events
-            time_window = getattr(self.monitor_chart, 'current_time_window', 60)
-            time_offset = getattr(self.monitor_chart, 'current_time_offset', 0)
-            all_events = self.detect_current_events(time_window, time_offset)
+        time_window = getattr(self.monitor_chart, 'current_time_window', 60)
+        time_offset = getattr(self.monitor_chart, 'current_time_offset', 0)
+        
+        # Get all events
+        all_events = self.detect_current_events(time_window, time_offset)
         
         # Filter based on selection
         filtered_events = []
@@ -1070,132 +1042,6 @@ class EventWindow(QDialog):
             self.event_list_table.setItem(row, 2, QTableWidgetItem(stop))
             self.event_list_table.setItem(row, 3, QTableWidgetItem(duration))
             self.event_list_table.setItem(row, 4, QTableWidgetItem(param))
-    
-    def detect_events_from_device_data(self, device_data):
-        """Detect events from real device data"""
-        detected_events = []
-        
-        if not device_data or not self.patient_data:
-            return detected_events
-        
-        patient_id = self.patient_data.get('id')
-        current_time = datetime.now().strftime('%H:%M:%S')
-        recording_date = datetime.now().strftime('%Y-%m-%d')
-        
-        # Example event detection algorithms for real device data
-        try:
-            # Apnea detection from airflow data
-            if 'airflow' in device_data:
-                airflow_data = device_data['airflow']
-                if self.detect_apnea_event(airflow_data):
-                    event_data = {
-                        'patient_id': patient_id,
-                        'event_type': 'OSA',
-                        'event_name': 'Apnea Event',
-                        'start_time': current_time,
-                        'end_time': current_time,
-                        'duration': '10s',
-                        'parameter': 'Airflow',
-                        'recording_date': recording_date
-                    }
-                    detected_events.append(event_data)
-                    # Save to database
-                    self.db_manager.save_event(event_data)
-            
-            # SpO2 desaturation detection
-            if 'spo2' in device_data:
-                spo2_data = device_data['spo2']
-                if self.detect_desaturation_event(spo2_data):
-                    event_data = {
-                        'patient_id': patient_id,
-                        'event_type': 'Oximetry',
-                        'event_name': 'SpO2 Desaturation',
-                        'start_time': current_time,
-                        'end_time': current_time,
-                        'duration': '15s',
-                        'parameter': 'SpO2',
-                        'recording_date': recording_date
-                    }
-                    detected_events.append(event_data)
-                    # Save to database
-                    self.db_manager.save_event(event_data)
-            
-            # Pulse rate anomaly detection
-            if 'pulse' in device_data:
-                pulse_data = device_data['pulse']
-                if self.detect_pulse_anomaly(pulse_data):
-                    event_data = {
-                        'patient_id': patient_id,
-                        'event_type': 'Oximetry',
-                        'event_name': 'Pulse Anomaly',
-                        'start_time': current_time,
-                        'end_time': current_time,
-                        'duration': '8s',
-                        'parameter': 'Pulse',
-                        'recording_date': recording_date
-                    }
-                    detected_events.append(event_data)
-                    # Save to database
-                    self.db_manager.save_event(event_data)
-            
-            # Refresh events list if new events detected
-            if detected_events:
-                self.load_patient_events()
-                print(f"Detected and saved {len(detected_events)} new events from device data")
-                
-        except Exception as e:
-            print(f"Error detecting events from device data: {e}")
-        
-        return detected_events
-    
-    def detect_apnea_event(self, airflow_data):
-        """Simple apnea detection from airflow data"""
-        if not airflow_data or len(airflow_data) < 10:
-            return False
-        
-        # Check for prolonged low airflow (apnea)
-        threshold = 0.2  # 20% of normal airflow
-        recent_data = airflow_data[-10:]  # Last 10 data points
-        
-        low_airflow_count = sum(1 for value in recent_data if value < threshold)
-        
-        # Apnea if 80% of recent readings are below threshold
-        return low_airflow_count >= 8
-    
-    def detect_desaturation_event(self, spo2_data):
-        """Detect SpO2 desaturation events"""
-        if not spo2_data or len(spo2_data) < 5:
-            return False
-        
-        # Check for SpO2 drop below 90%
-        recent_data = spo2_data[-5:]
-        avg_spo2 = sum(recent_data) / len(recent_data)
-        
-        return avg_spo2 < 90.0
-    
-    def detect_pulse_anomaly(self, pulse_data):
-        """Detect pulse rate anomalies"""
-        if not pulse_data or len(pulse_data) < 5:
-            return False
-        
-        recent_data = pulse_data[-5:]
-        avg_pulse = sum(recent_data) / len(recent_data)
-        
-        # Detect bradycardia (<50) or tachycardia (>120)
-        return avg_pulse < 50 or avg_pulse > 120
-    
-    def connect_to_device_stream(self):
-        """Interface for connecting to real device data stream"""
-        # This method would connect to actual device hardware
-        # For now, it's a placeholder for future implementation
-        print("Device stream connection - ready for real device integration")
-        
-        # Example of how it would work:
-        # device_stream = DeviceDataStream(port="/dev/ttyUSB0")
-        # device_stream.data_received.connect(self.detect_events_from_device_data)
-        # device_stream.start()
-        
-        return True
             
     def load_sample_data(self):
         """Load sample data for demonstration"""

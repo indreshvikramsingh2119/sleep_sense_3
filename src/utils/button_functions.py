@@ -12,8 +12,11 @@ import json
 import csv
 import platform
 from PyQt5.QtWidgets import (
-    QFileDialog, QMessageBox, QInputDialog, QLineEdit, QPushButton, QMenu, QAction, QWidget
+    QFileDialog, QMessageBox, QInputDialog, QLineEdit, QPushButton, QMenu, QAction, QWidget,
+    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, QComboBox, QCheckBox, QGroupBox, QGridLayout, QSpacerItem, QSizePolicy,
+    QRadioButton, QButtonGroup, QSpinBox, QTextEdit, QSlider, QTabWidget, QFormLayout, QFrame
 )
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QTextDocument
 from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
 
@@ -248,37 +251,36 @@ class ButtonFunctions:
             menu.addAction('Paste', self.edit_paste, 'Ctrl+V')
             
         elif menu_type == 'view':
-            fullscreen_action = menu.addAction('Fullscreen', self.view_fullscreen, 'F11')
-            fullscreen_action.setCheckable(True)
-            fullscreen_action.setChecked(self.parent.isFullScreen())
-            menu.addSeparator()
-            menu.addAction('Zoom In', self.view_zoom_in, 'Ctrl++')
-            menu.addAction('Zoom Out', self.view_zoom_out, 'Ctrl+-')
-            menu.addAction('Reset Zoom', self.view_reset_zoom, 'Ctrl+0')
-            menu.addSeparator()
-            menu.addAction('Report view', self.view_report_view)
-            menu.addAction('Signal view', self.view_signal_view)
-            menu.addAction('Event list', self.view_event_list)
-            menu.addAction('Quick start', self.view_quick_start)
+            # Add Quick start with house icon
+            quick_start_action = menu.addAction('Quick start', self.view_quick_start)
+            # Load and set icon
+            from PyQt5.QtGui import QIcon
+            from PyQt5.QtCore import QFile
+            icon_path = os.path.join(os.path.dirname(__file__), '..', '..', 'icons', 'home.svg')
+            if os.path.exists(icon_path):
+                quick_start_action.setIcon(QIcon(icon_path))
             
         elif menu_type == 'tools':
-            menu.addAction('Settings', self.tools_settings, 'Ctrl+,')
+            menu.addAction('Re-analyze', self.tools_reanalyze)
             menu.addSeparator()
-            menu.addAction('Import Data', self.tools_import_data)
-            menu.addAction('Data Analysis', self.tools_data_analysis)
-            menu.addAction('Analysis Parameters', self.tools_analysis_parameters)
+            menu.addAction('New event group', self.tools_new_event_group)
+            menu.addAction('Delete event group', self.tools_delete_event_group)
+            menu.addAction('Edit event group', self.tools_edit_event_group)
+            menu.addSeparator()
             settings_menu = menu.addMenu('Settings')
-            settings_menu.addAction('General', self.tools_settings_general)
-            settings_menu.addAction('Data', self.tools_settings_data)
-            settings_menu.addAction('Display', self.tools_settings_display)
-            settings_menu.addAction('Export', self.tools_settings_export)
+            settings_menu.addAction('Signal view', self.tools_settings_signal_view)
+            settings_menu.addAction('Report', self.tools_settings_report)
+            settings_menu.addAction('Analysis parameters', self.tools_settings_analysis_parameters)
             settings_menu.addAction('EDF export', self.tools_settings_edf_export)
             menu.addAction('Send Event Log by email', self.tools_send_event_log_email)
             menu.addAction('Database Transfer', self.tools_database_transfer)
             
         elif menu_type == 'help':
-            menu.addAction('Documentation', self.help_documentation, 'F1')
-            menu.addAction('About', self.help_about)
+            menu.addAction('Clinical Guide', self.help_clinical_guide)
+            menu.addAction('Patient instructions', self.help_patient_instructions)
+            menu.addAction('Program info', self.help_program_info)
+            menu.addAction('Recording info', self.help_recording_info)
+            menu.addAction('Device info', self.help_device_info)
         
         # Show menu below the button with correct positioning
         button_rect = button.rect()
@@ -523,9 +525,7 @@ class ButtonFunctions:
     def tools_analysis_parameters(self):
         """Analysis Parameters"""
         print("Tools -> Analysis Parameters clicked")
-        from src.components.analysis_parameters_dialog import AnalysisParametersDialog
-        dialog = AnalysisParametersDialog(self.parent)
-        dialog.exec_()
+        # TODO: Implement analysis parameters functionality
     
     def tools_reanalyze(self):
         """Re-analyze"""
@@ -589,13 +589,32 @@ class ButtonFunctions:
             # TODO: Apply EDF export settings
     
         
->>>>>>> cd24ba84d1097c999ababa4e5359ef4c504b8276
     def tools_reanalysis(self):
         """Reanalysis"""
         print("Tools -> Reanalysis clicked")
         # TODO: Implement reanalysis functionality
     
     # Help Menu Actions
+    def help_clinical_guide(self):
+        print("Help -> Clinical Guide clicked")
+        # TODO: Open clinical guide
+    
+    def help_patient_instructions(self):
+        print("Help -> Patient instructions clicked")
+        # TODO: Open patient instructions
+    
+    def help_program_info(self):
+        print("Help -> Program info clicked")
+        # TODO: Show program information
+    
+    def help_recording_info(self):
+        print("Help -> Recording info clicked")
+        # TODO: Show recording information
+    
+    def help_device_info(self):
+        print("Help -> Device info clicked")
+        # TODO: Show device information
+    
     def help_documentation(self):
         print("Help -> Documentation clicked")
         # TODO: Open documentation
@@ -754,6 +773,7 @@ class ButtonFunctions:
             QMessageBox.information(self.parent, "Duplicate", f"Created duplicate:\n{dest}")
         except Exception as e:
             QMessageBox.critical(self.parent, "Duplicate Error", str(e))
+
     
     def file_export(self, fmt='csv'):
         """Export current dataset as CSV or JSON if parent exposes get_current_data()"""
@@ -1721,4 +1741,3 @@ class AnalysisParametersDialog(QDialog):
             'central_threshold': self.central_threshold.text(),
             'central_amplitude': self.central_amplitude.text()
         }
->>>>>>> cd24ba84d1097c999ababa4e5359ef4c504b8276
