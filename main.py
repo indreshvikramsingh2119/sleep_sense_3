@@ -12,7 +12,7 @@ from src.components.dashboard import SleepSenseDashboard
 ## Testing Comment
    
 
-def main  ():
+def main():
     """Main function to run the Sleep Sense Dashboard application"""
     app = QApplication(sys.argv)
     app.setApplicationName("Sleep Sense")
@@ -25,7 +25,7 @@ def main  ():
     window = SleepSenseDashboard()
     window.show()
     
-    # Start the application event loop 
+    # Start the application event loop
     sys.exit(app.exec_())
 
  
@@ -43,7 +43,7 @@ if __name__ == '__main__':
 
 
 
- 
+
 
 
 
