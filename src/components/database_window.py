@@ -630,8 +630,38 @@ class DatabaseWindow(QDialog):
         self.load_patients_from_database()
     
     def handle_delete(self):
-        """Handle Delete button click - delete selected records"""
-        from PyQt5.QtWidgets import QMessageBox
+        """Handle Delete button click"""
+        print("Delete action triggered")
+        
+        # Get selected patient
+        selected_items = self.patients_table.selectedItems()
+        if selected_items:
+            row = selected_items[0].row()
+            patient_db_id = self.patients_table.item(row, 0).data(Qt.UserRole)
+            last_name = self.patients_table.item(row, 0).text()
+            first_name = self.patients_table.item(row, 1).text()
+            
+            # Confirm deletion
+            from PyQt5.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self, 
+                'Confirm Delete',
+                f'Are you sure you want to delete patient "{last_name} {first_name}"?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                # Delete from database
+                success = self.db_manager.delete_patient(patient_db_id)
+                if success:
+                    print(f"Patient {last_name} {first_name} deleted successfully")
+                    # Refresh the patients list
+                    self.load_patients_from_database()
+                else:
+                    print("Failed to delete patient")
+        else:
+            print("No patient selected for deletion")
         
         # Check which table has selected items
         selected_patients = []

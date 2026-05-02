@@ -271,13 +271,23 @@ class DatabaseManager:
         try:
             cursor.execute("""
                 SELECT * FROM records 
-                WHERE patient_id = ? 
+                WHERE patient_id = ?
                 ORDER BY recording_date DESC
             """, (patient_db_id,))
             
             records = []
             for row in cursor.fetchall():
-                records.append(dict(row))
+                records.append({
+                    'id': row['id'],
+                    'patient_id': row['patient_id'],
+                    'last_name': row['last_name'],
+                    'first_name': row['first_name'],
+                    'recording_date': row['recording_date'],
+                    'start_time': row['start_time'],
+                    'duration': row['duration'],
+                    'archived': row['archived'],
+                    'file_path': row['file_path']
+                })
             
             return records
         except Exception as e:

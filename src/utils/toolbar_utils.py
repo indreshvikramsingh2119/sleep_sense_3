@@ -111,8 +111,8 @@ def get_icon_definitions():
         {
             "name": "report_view",
             "icon": "icons/report_view.svg",
-            "tooltip": "Report View",
-            "status_tip": "View ECG/Sleep reports",
+            "tooltip": "Patient Record",
+            "status_tip": "Open Patient Record Form",
             "callback_name": "open_report_view"
         },
         {

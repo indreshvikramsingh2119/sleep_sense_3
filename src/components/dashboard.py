@@ -568,6 +568,27 @@ class SleepSenseDashboard(QMainWindow):
             
             # Move forward by step size
             self.monitor_chart.current_time_offset = min(max_offset, self.monitor_chart.current_time_offset + step_size)
+            
+            # ✅ FORCE VIEWBOX UPDATE AND PLOT REDRAW
+            for i in range(self.monitor_chart.charts_layout.count()):
+                container = self.monitor_chart.charts_layout.itemAt(i).widget()
+                if hasattr(container, 'plot_widget'):
+                    pw = container.plot_widget
+                    
+                    # Force X-axis range update
+                    start = 0
+                    end = self.monitor_chart.current_time_window
+                    pw.setXRange(start, end, padding=0)
+                    
+                    # Force redraw
+                    pw.getViewBox().update()
+                    pw.repaint()
+                    print(f"Updated ViewBox range to {start} → {end} for {pw.chart_name}")
+            
+            # ✅ DELAYED OVERLAY RENDER (IMPORTANT)
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, self.monitor_chart.render_dynamic_selections)
+            
             self.monitor_chart.refresh_charts()
             self.update_slider_position()
             
@@ -709,21 +730,21 @@ class SleepSenseDashboard(QMainWindow):
         # Extended Database Options (initially hidden - using QAction)
         from PyQt5.QtGui import QIcon
         
-        self.action_patient_record = QAction(QIcon(os.path.join(script_dir, icons[4]["icon"])), "Patient Record Card", self)
+        self.action_patient_record = QAction(QIcon(os.path.join(script_dir, "icons/patient_report_card.svg")), "Patient Record Card", self)
         self.action_patient_record.setToolTip("Patient Record Card")
-        self.action_patient_record.setStatusTip("View patient record card")
-        self.action_patient_record.triggered.connect(self.open_report_view)
+        self.action_patient_record.setStatusTip("Open Patient Record Card Form")
+        self.action_patient_record.triggered.connect(self.open_patient_report_card)
         self.action_patient_record.setVisible(False)
         self.action_patient_record.setEnabled(True)
         toolbar.addAction(self.action_patient_record)
-        
-        self.action_report_view = QAction(QIcon(os.path.join(script_dir, icons[5]["icon"])), "Report View", self)
-        self.action_report_view.setToolTip("Report View")
-        self.action_report_view.setStatusTip("View ECG/Sleep reports")
-        self.action_report_view.triggered.connect(self.open_report_view)
-        self.action_report_view.setVisible(False)
-        self.action_report_view.setEnabled(True)
-        toolbar.addAction(self.action_report_view)
+                
+        self.action_medical_report = QAction(QIcon(os.path.join(script_dir, "icons/medical_report.svg")), "Medical Report", self)
+        self.action_medical_report.setToolTip("Medical Report")
+        self.action_medical_report.setStatusTip("Open Medical Report Form")
+        self.action_medical_report.triggered.connect(self.open_medical_report)
+        self.action_medical_report.setVisible(False)
+        self.action_medical_report.setEnabled(True)
+        toolbar.addAction(self.action_medical_report)
         
         self.action_event_list = QAction(QIcon(os.path.join(script_dir, icons[7]["icon"])), "Event List", self)
         self.action_event_list.setToolTip("Event List")
@@ -786,7 +807,7 @@ class SleepSenseDashboard(QMainWindow):
         print("Database button clicked")
         # Show extended buttons immediately
         self.action_patient_record.setVisible(True)
-        self.action_report_view.setVisible(True)
+        self.action_medical_report.setVisible(True)
         self.action_event_list.setVisible(True)
         # Open database window as modeless (non-blocking)
         self.database_window = DatabaseWindow(self)
@@ -795,7 +816,7 @@ class SleepSenseDashboard(QMainWindow):
     def hide_extended_buttons(self):
         """Hide extended database buttons"""
         self.action_patient_record.setVisible(False)
-        self.action_report_view.setVisible(False)
+        self.action_medical_report.setVisible(False)
         self.action_event_list.setVisible(False)  
     
     def open_archive(self):
@@ -809,7 +830,7 @@ class SleepSenseDashboard(QMainWindow):
         self.archive_window = ArchiveWindow(self)
         self.archive_window.exec_()  # Modal dialog
     
-    def open_report_view(self):
+def open_report_view(self):
         """View ECG/Sleep reports - Opens Patient Record Form as modal dialog"""
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
@@ -822,6 +843,26 @@ class SleepSenseDashboard(QMainWindow):
         # Create and show the patient record form as modal dialog
         self.patient_record_form = PatientRecordForm(self)
         self.patient_record_form.exec_()  # Modal dialog
+    
+    def open_patient_report_card(self):
+        """Open Patient Report Card Form as modal dialog"""
+        print("Patient Report Card button clicked")
+        # Import the patient report card form
+        from .patient_report_card_form import PatientReportCardForm
+        
+        # Create and show the patient report card form as modal dialog
+        self.patient_report_card_form = PatientReportCardForm(self)
+        self.patient_report_card_form.exec_()  # Modal dialog
+    
+    def open_medical_report(self):
+        """Open Medical Report Form as modal dialog"""
+        print("Medical Report button clicked")
+        # Import the medical report form
+        from .medical_report_form import MedicalReportForm
+        
+        # Create and show the medical report form as modal dialog
+        self.medical_report_form = MedicalReportForm(self)
+        self.medical_report_form.exec_()  # Modal dialog
     
     def load_patient_data(self, patient_data):
         """Load patient data from database and display in dashboard"""
