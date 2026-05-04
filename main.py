@@ -22,7 +22,7 @@ def main  ():
     app.setFont(font)
     
     # Create and show the main dashboard window
-    window = SleepSenseDashboard()
+    window = SleepSenseDashboard() 
     window.show()
     
     # Start the application event loop 
@@ -45,5 +45,5 @@ if __name__ == '__main__':
  
 
 
-
-  
+     
+    

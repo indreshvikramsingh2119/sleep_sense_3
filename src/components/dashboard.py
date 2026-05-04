@@ -119,6 +119,9 @@ class SleepSenseDashboard(QMainWindow):
         self.monitor_chart.set_patient_id("--------")
         self.monitor_chart.raw_data_saved.connect(self.patient_info.add_saved_raw_file)
         
+        # Auto-load SpO2 data for playback testing
+        self.auto_load_spo2_data()
+        
         # Connect monitor chart reference to patient info for save functionality
         self.patient_info.monitor_chart = self.monitor_chart
         
@@ -963,11 +966,22 @@ class SleepSenseDashboard(QMainWindow):
         event_list_action = QAction('Event list', self)
         event_list_action.triggered.connect(self.button_functions.view_event_list)
         view_menu.addAction(event_list_action)
-
-        quick_start_action = QAction('Quick start', self)
-        quick_start_action.triggered.connect(self.button_functions.view_quick_start)
-        view_menu.addAction(quick_start_action)
-        
-        return menubar
+    
+    def auto_load_spo2_data(self):
+        """Automatically load SpO2 data for playback testing"""
+        import os
+        try:
+            # Try to load the sample SpO2 data file
+            csv_path = os.path.join(os.getcwd(), "extracted_data", "spo2_6hr_10Hz_data (1).csv")
+            if os.path.exists(csv_path):
+                print(f"🎬 Auto-loading SpO2 data from: {csv_path}")
+                self.monitor_chart.load_spo2_data(csv_path)
+                print("✅ SpO2 data loaded successfully - Playback ready!")
+            else:
+                print(f"⚠️ Sample data file not found: {csv_path}")
+                print("💡 Playback controls will work but need data to be loaded manually")
+        except Exception as e:
+            print(f"❌ Error auto-loading SpO2 data: {e}")
+            print("💡 Use File → Load Data to load SpO2 data for playback")
 
 

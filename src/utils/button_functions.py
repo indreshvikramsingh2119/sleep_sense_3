@@ -12,7 +12,9 @@ import json
 import csv
 import platform
 from PyQt5.QtWidgets import (
-QFileDialog, QMessageBox, QInputDialog, QLineEdit, QPushButton, QMenu, QAction, QWidget, QDialog
+QFileDialog, QMessageBox, QInputDialog, QLineEdit, QPushButton, QMenu, QAction, QWidget, QDialog, QVBoxLayout,
+QHBoxLayout, QListWidget, QLabel, QComboBox, QCheckBox, QGroupBox, QGridLayout, QSpacerItem, QSizePolicy,
+QRadioButton, QButtonGroup, QSpinBox, QTextEdit, QSlider, QTabWidget, QFormLayout, QFrame
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QTextDocument
@@ -585,6 +587,26 @@ class ButtonFunctions:
         if dialog.exec_() == QDialog.Accepted:
             print("EDF export settings applied")
             # TODO: Apply EDF export settings
+    
+    def tools_settings_general(self):
+        """General settings"""
+        print("Tools -> Settings -> General clicked")
+        # TODO: Implement general settings dialog
+    
+    def tools_settings_data(self):
+        """Data settings"""
+        print("Tools -> Settings -> Data clicked")
+        # TODO: Implement data settings dialog
+    
+    def tools_settings_display(self):
+        """Display settings"""
+        print("Tools -> Settings -> Display clicked")
+        # TODO: Implement display settings dialog
+    
+    def tools_settings_export(self):
+        """Export settings"""
+        print("Tools -> Settings -> Export clicked")
+        # TODO: Implement export settings dialog
     
     def tools_settings_general(self):
         """General settings"""

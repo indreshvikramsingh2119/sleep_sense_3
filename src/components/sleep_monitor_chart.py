@@ -34,6 +34,10 @@ class SleepMonitorChart(QWidget):
         self.is_playing = False
         self.playback_speed = 1.0
         self.play_pause_btn = None  # Initialize button reference
+        
+        # Playback timer for movie-like data scrolling
+        self.playback_timer = QTimer()
+        self.playback_timer.timeout.connect(self.update_playback)
         self.hidden_graphs_dropdown = None  # Initialize dropdown reference
         self.hidden_graphs = {}  # Store hidden graph data: {name: {container, plot_curve, color, frequency, amplitude, offset, position}}
         self.graph_order = []  # Track original order of graphs: [name1, name2, ...]
@@ -400,6 +404,88 @@ class SleepMonitorChart(QWidget):
                 self.update_time_position_label()
                 print(f"Navigated forward to: {self.current_time_offset}s (max: {max_duration:.1f}s)")
     
+    def start_playback(self):
+        """Start movie-like playback of recorded data"""
+        print(f"🎬 start_playback called - data available: {self.spo2_full_data is not None}")
+        
+        if self.block_if_selection_active():
+            print("🎬 Blocked by selection active")
+            return
+        
+        if not self.spo2_full_data or len(self.spo2_full_data[1]) == 0:
+            print("No data available for playback")
+            return
+        
+        self.is_playing = True
+        print(f"🎬 Timer starting... is_playing: {self.is_playing}")
+        self.playback_timer.start(100)  # 100ms = smooth playback (10Hz)
+        print(f"🎬 Timer started - Timer active: {self.playback_timer.isActive()}")
+        print("▶️ Playback started")
+        
+        # Update button if it exists
+        if self.play_pause_btn:
+            self.play_pause_btn.setText("⏸ Pause")
+    
+    def pause_playback(self):
+        """Pause the playback"""
+        self.is_playing = False
+        self.playback_timer.stop()
+        print("⏸ Playback paused")
+        
+        # Update button if it exists
+        if self.play_pause_btn:
+            self.play_pause_btn.setText("▶ Play")
+    
+    def update_playback(self):
+        """Main playback logic - auto-scroll data like a movie"""
+        print(f"🎬 update_playback called - is_playing: {self.is_playing}")
+        
+        if not self.is_playing:
+            return
+        
+        if not self.spo2_full_data or len(self.spo2_full_data[1]) == 0:
+            self.pause_playback()
+            return
+        
+        # Move forward in time (0.1 sec per tick = 10Hz sync)
+        self.current_time_offset += 0.1 * self.playback_speed
+        
+        # Calculate maximum time based on data length
+        max_time = len(self.spo2_full_data[1]) / 10.0  # 10Hz data
+        
+        # Check if we've reached the end
+        if self.current_time_offset >= max_time:
+            self.pause_playback()
+            print(f"🎬 Playback completed at {max_time:.1f}s")
+            return
+        
+        # Update all charts with new time position
+        self.refresh_charts()
+        self.update_time_position_label()
+        
+        # Print progress for debugging (every 10 ticks = 1 second)
+        if int(self.current_time_offset * 10) % 10 == 0:
+            progress_percent = (self.current_time_offset / max_time) * 100
+            print(f"🎬 AUTO-SCROLL: {self.current_time_offset:.1f}s / {max_time:.1f}s ({progress_percent:.1f}%)")
+    
+    def toggle_playback(self):
+        """Toggle between play and pause states"""
+        if self.is_playing:
+            self.pause_playback()
+        else:
+            self.start_playback()
+    
+    def change_playback_speed(self, speed_text):
+        """Change playback speed from dropdown"""
+        speed_map = {
+            "0.5x": 0.5,
+            "1.0x": 1.0,
+            "2.0x": 2.0,
+            "4.0x": 4.0
+        }
+        self.playback_speed = speed_map.get(speed_text, 1.0)
+        print(f"🎬 Playback speed changed to {speed_text} ({self.playback_speed}x)")
+    
     def update_time_position_label(self):
         """Update the time position label"""
         hours = int(self.current_time_offset // 3600)
@@ -606,7 +692,7 @@ class SleepMonitorChart(QWidget):
         self._delayed_restore_expanded_states()
     
     def create_status_bar(self):
-        """Create bottom status bar"""
+        """Create bottom status bar with professional playback controls"""
         frame = QFrame()
         frame.setObjectName("statusBar")
         frame.setMinimumHeight(44)
@@ -614,6 +700,161 @@ class SleepMonitorChart(QWidget):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(20, 0, 20, 0)
         layout.setSpacing(15)
+        
+        # Playback Controls Container - Professional styling like dashboard
+        controls_container = QFrame()
+        controls_container.setObjectName("playbackControlsContainer")
+        controls_container.setStyleSheet("""
+            QFrame#playbackControlsContainer {
+                background-color: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                padding: 4px;
+            }
+        """)
+        
+        controls_layout = QHBoxLayout(controls_container)
+        controls_layout.setContentsMargins(8, 4, 8, 4)
+        controls_layout.setSpacing(8)
+        
+        # Play/Pause Button - Dashboard style
+        self.play_pause_btn = QPushButton("▶ Play")
+        self.play_pause_btn.setObjectName("playbackPlayButton")
+        self.play_pause_btn.clicked.connect(self.toggle_playback)
+        self.play_pause_btn.setFixedHeight(24)
+        self.play_pause_btn.setMinimumWidth(70)
+        self.play_pause_btn.setStyleSheet("""
+            QPushButton#playbackPlayButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #3b82f6, stop: 1 #2563eb
+                );
+                color: white;
+                border: 1px solid #1d4ed8;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 4px 8px;
+            }
+            QPushButton#playbackPlayButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #2563eb, stop: 1 #1d4ed8
+                );
+                border: 1px solid #1e40af;
+            }
+            QPushButton#playbackPlayButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #1d4ed8, stop: 1 #1e40af
+                );
+            }
+        """)
+        
+        # Time Label - Dashboard style
+        time_label = QLabel("Position:")
+        time_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        controls_layout.addWidget(time_label)
+        
+        # Time Position Display - Clear professional display
+        self.time_position_label = QLabel("00:00:00")
+        self.time_position_label.setObjectName("timePositionLabel")
+        self.time_position_label.setFixedHeight(22)
+        self.time_position_label.setMinimumWidth(70)
+        self.time_position_label.setStyleSheet("""
+            QLabel#timePositionLabel {
+                background-color: #f0f9ff;
+                color: #1e40af;
+                border: 1px solid #93c5fd;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+                font-weight: 600;
+                font-size: 11px;
+            }
+        """)
+        
+        # Speed Label - Dashboard style
+        self.speed_label = QLabel("Speed:")
+        self.speed_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        
+        # Speed Dropdown - Dashboard style
+        self.speed_combo = QComboBox()
+        self.speed_combo.setObjectName("speedCombo")
+        self.speed_combo.addItems(["0.5x", "1.0x", "2.0x", "4.0x"])
+        self.speed_combo.setCurrentIndex(1)  # Default to 1.0x
+        self.speed_combo.currentTextChanged.connect(self.change_playback_speed)
+        self.speed_combo.setFixedHeight(22)
+        self.speed_combo.setMinimumWidth(80)  # Increased width for better visibility
+        self.speed_combo.setStyleSheet("""
+            QComboBox {
+                background: #ffffff;
+                color: #374151;
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 11px;
+                font-weight: 500;
+                min-width: 80px;
+            }
+            QComboBox:hover {
+                border: 1px solid #9ca3af;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 3px solid transparent;
+                border-right: 3px solid transparent;
+                border-top: 3px solid #6b7280;
+                margin-right: 4px;
+            }
+            QComboBox QAbstractItemView {
+                background: #ffffff;
+                border: 1px solid #d1d5db;
+                selection-background-color: #eff6ff;
+                selection-color: #1e40af;
+                min-width: 80px;
+                padding: 4px 8px;
+                font-size: 11px;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 4px 12px;
+                min-height: 20px;
+                border: none;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #eff6ff;
+                color: #1e40af;
+            }
+        """)
+        
+        # Add all controls to container
+        controls_layout.addWidget(self.play_pause_btn)
+        controls_layout.addWidget(self.time_position_label)
+        
+        # Add divider
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFrameShadow(QFrame.Sunken)
+        divider.setStyleSheet("""
+            QFrame {
+                background-color: #d1d5db;
+                color: #d1d5db;
+                max-width: 1px;
+                min-width: 1px;
+            }
+        """)
+        controls_layout.addWidget(divider)
+        
+        controls_layout.addWidget(self.speed_label)
+        controls_layout.addWidget(self.speed_combo)
+        
+        # Add controls container to main layout
+        layout.addWidget(controls_container)
+        layout.addStretch()
         
         return frame
     
@@ -695,6 +936,17 @@ class SleepMonitorChart(QWidget):
             time_data = df['time_seconds'].values
             spo2_data = df['spo2'].values
             
+            # Convert SpO2 data to numeric if it's not already
+            spo2_data = pd.to_numeric(spo2_data, errors='coerce')
+            
+            # Remove NaN values and check how many were removed
+            nan_count = np.sum(np.isnan(spo2_data))
+            if nan_count > 0:
+                print(f"Warning: Found {nan_count} NaN values in SpO2 data, removing them")
+                valid_indices = ~np.isnan(spo2_data)
+                spo2_data = spo2_data[valid_indices]
+                time_data = time_data[valid_indices]
+            
             # Validate SpO2 data range (should be reasonable values)
             invalid_spo2 = np.sum((spo2_data < 0) | (spo2_data > 100))
             if invalid_spo2 > 0:
@@ -774,7 +1026,6 @@ class SleepMonitorChart(QWidget):
     
     def create_signal_chart(self, name, color, frequency, amplitude, offset):
         """Create a single signal trace chart with side label"""
-        print(f"Debug: create_signal_chart called for '{name}' - creating new container with 120px height")
         
         container = QWidget()
         container.setObjectName("signalChartContainer")
@@ -1807,24 +2058,7 @@ class SleepMonitorChart(QWidget):
         else:
             self.start_playback()
     
-    def start_playback(self):
-        """Start playback"""
-        print("Starting playback")
-        self.is_playing = True
-        self.play_pause_btn.setText("⏸")
-        # Start timer
-        self.timer.start(1000)
-        print(f"Playback started - Timer active: {self.timer.isActive()}")
-    
-    def pause_playback(self):
-        """Pause playback"""
-        print("Pausing playback")
-        self.is_playing = False
-        self.play_pause_btn.setText("▶")
-        # Stop timer
-        self.timer.stop()
-        print(f"Playback paused - Timer active: {self.timer.isActive()}")
-    
+        
     def forward_playback(self):
         """Fast forward playback"""
         print(f"Forward button clicked - Playing: {self.is_playing}")
@@ -1868,7 +2102,9 @@ class SleepMonitorChart(QWidget):
     
     def update_time_display(self):
         """Update time display without adding seconds"""
-        self.current_time_label.setText(f"Current: {self.current_time.toString('HH:mm:ss')}")
+        # Use the time_position_label instead of current_time_label
+        if hasattr(self, 'time_position_label'):
+            self.time_position_label.setText(f"Current: {self.current_time.toString('HH:mm:ss')}")
     
     def update_time(self):
         """Update current time display"""
@@ -2163,6 +2399,59 @@ class SleepMonitorChart(QWidget):
             }
         """)
     
+    def get_spo2_selection_info(self):
+        """Get SpO2 values at selection start and end positions"""
+        if not self.spo2_full_data or len(self.spo2_full_data[0]) == 0:
+            return None
+        
+        if not self.selection_start or not self.selection_end:
+            return None
+        
+        try:
+            # Get SpO2 data
+            time_data, spo2_data = self.spo2_full_data
+            
+            # Convert selection positions to time values (QPointF objects)
+            start_time = self.selection_start.x()  # x-coordinate in data space
+            end_time = self.selection_end.x()      # x-coordinate in data space
+            
+            # Add current time offset to get absolute time
+            start_absolute_time = start_time + self.current_time_offset
+            end_absolute_time = end_time + self.current_time_offset
+            
+            # Find closest data points
+            start_idx = np.argmin(np.abs(time_data - start_absolute_time))
+            end_idx = np.argmin(np.abs(time_data - end_absolute_time))
+            
+            # Get SpO2 values at those positions
+            start_spo2 = spo2_data[start_idx]
+            end_spo2 = spo2_data[end_idx]
+            
+            # Calculate difference
+            difference = end_spo2 - start_spo2
+            
+            return {
+                'start_value': start_spo2,
+                'end_value': end_spo2,
+                'difference': difference,
+                'start_time': start_absolute_time,
+                'end_time': end_absolute_time,
+                'point_difference': abs(end_idx - start_idx)
+            }
+            
+        except Exception as e:
+            print(f"Error calculating SpO2 selection info: {e}")
+            return None
+    
+    def get_most_recent_label(self, chart_name):
+        """Get the most recently applied label for a chart"""
+        if chart_name not in self.selection_labels or not self.selection_labels[chart_name]:
+            return None
+        
+        # Get the last (most recent) label
+        recent_selection = self.selection_labels[chart_name][-1]
+        return recent_selection.get('label', None)
+    
     def show_selection_menu(self):
         """Show dropdown menu with different options based on chart type"""
         print("show_selection_menu called!")
@@ -2199,6 +2488,18 @@ class SleepMonitorChart(QWidget):
         chart_name = self.current_selection_chart.chart_name.strip()
         if "SpO2" in chart_name:
             menu.setTitle("Select Event")
+            
+            # No temporary SpO2 values during dragging - only show after selection is saved
+            
+            # Check if there's a recent label for this chart and show it
+            current_label = self.get_most_recent_label(chart_name)
+            if current_label:
+                label_action = QAction(f"Applied: {current_label}", self)
+                label_action.setEnabled(False)  # Make it non-clickable info text
+                # Style it differently to show it's the current label
+                label_action.setStyleSheet("color: #2563eb; font-weight: bold;")
+                menu.addAction(label_action)
+                menu.addSeparator()
             
             # Add simple desaturation option for SpO2
             saturation_action = QAction("Desaturation", self)
@@ -2253,6 +2554,11 @@ class SleepMonitorChart(QWidget):
         
         # Clear menu reference after it's closed
         self.active_context_menu = None
+        
+        # Clear selection if no label was applied (menu cancelled)
+        if self.selection_active:
+            print("Menu cancelled - clearing selection")
+            self.clear_selection()
     
     def apply_selection_label(self, label_type):
         """Apply the selected label to the area"""
@@ -2283,17 +2589,52 @@ class SleepMonitorChart(QWidget):
 
         selection_data = {
             'label': label_type,
-            'start': self.selection_start,
-            'end': self.selection_end,
+            'start': start_time_abs,
+            'end': end_time_abs,
+            'start_time': start_time_abs,
+            'end_time': end_time_abs,
             'color': self.get_label_color(label_type)
         }
+
+        # Calculate SpO2 info for SpO2 chart only
+        spo2_info = ""
+        if "SpO2" in chart_name and self.spo2_full_data:
+            try:
+                # Get SpO2 data
+                time_data, spo2_data = self.spo2_full_data
+                
+                # Calculate indices
+                sampling_rate = 10
+                start_index = int(start_time_abs * sampling_rate)
+                end_index = int(end_time_abs * sampling_rate)
+                
+                # Safety checks
+                start_index = max(0, start_index)
+                end_index = min(len(spo2_data) - 1, end_index)
+                
+                if start_index > end_index:
+                    start_index, end_index = end_index, start_index
+                
+                # Get values
+                start_val = spo2_data[start_index]
+                end_val = spo2_data[end_index]
+                diff = end_val - start_val
+                
+                # Prepare SpO2 text in exact format requested
+                arrow = "↓" if diff < 0 else "↑" if diff > 0 else "→"
+                spo2_info = f"{int(start_val)} → {int(end_val)} ({arrow} {abs(diff)})"
+                
+            except Exception as e:
+                print(f"Error calculating SpO2 info: {e}")
+                spo2_info = ""
 
         # Store in dynamic selections with absolute time coordinates
         dynamic_selection_data = {
             'label': label_type,
             'start_time': start_time_abs,
             'end_time': end_time_abs,
-            'color': self.get_label_color(label_type)
+            'color': self.get_label_color(label_type),
+            'spo2_info': spo2_info  # Store SpO2 info for display
         }
 
         self.selection_labels[chart_name].append(selection_data)
@@ -2317,8 +2658,12 @@ class SleepMonitorChart(QWidget):
     
     def handle_overlay_click(self, event, overlay, chart_name):
         """Handle right click on overlay"""
+        print(f"handle_overlay_click called - button: {event.button()}, chart: {chart_name}")
         if event.button() == Qt.RightButton:
+            print("Right button detected, showing overlay menu")
             self.show_overlay_menu(event.globalPos(), overlay, chart_name)
+        else:
+            print(f"Left button clicked on overlay for {chart_name}")
     
     def handle_overlay_double_click(self, event, overlay, chart_name):
         """Double click = quick remove option"""
@@ -2326,13 +2671,50 @@ class SleepMonitorChart(QWidget):
     
     def show_overlay_menu(self, global_pos, overlay, chart_name):
         """Show remove menu for overlay"""
+        print(f"show_overlay_menu called for chart: {chart_name}")
         menu = QMenu(self)
 
         remove_action = QAction("Remove Selection", self)
         remove_action.triggered.connect(lambda: self.delete_overlay(overlay, chart_name))
         menu.addAction(remove_action)
+        
+        # Find the label index for this overlay
+        label_index = self._find_label_index_for_overlay(overlay, chart_name)
+        print(f"Found label_index: {label_index} for overlay")
+        if label_index is not None:
+            # Add Change Label option
+            print("Adding Change Label option to menu")
+            menu.addSeparator()
+            change_action = QAction("Change Label...", self)
+            change_action.triggered.connect(lambda: self.change_label(chart_name, label_index))
+            menu.addAction(change_action)
+        else:
+            print("No label_index found, not adding Change Label option")
 
+        print(f"Showing menu with {len(menu.actions())} actions")
         menu.exec_(global_pos)
+    
+    def _find_label_index_for_overlay(self, overlay, chart_name):
+        """Find the label index for a given overlay"""
+        overlay_id = getattr(overlay, 'selection_id', None)
+        print(f"Overlay selection_id: {overlay_id}")
+        if overlay_id is None:
+            print("Overlay has no selection_id")
+            return None
+            
+        if chart_name not in self.selection_labels:
+            print(f"No selections found for chart: {chart_name}")
+            return None
+            
+        print(f"Checking {len(self.selection_labels[chart_name])} selections for {chart_name}")
+        for i, selection_data in enumerate(self.selection_labels[chart_name]):
+            selection_id = self._get_selection_id(selection_data)
+            print(f"  Selection {i}: {selection_id}")
+            if selection_id == overlay_id:
+                print(f"  MATCH found at index {i}")
+                return i
+        print("No matching selection found")
+        return None
     
     def delete_overlay(self, overlay, chart_name):
         """Delete selected overlay with data sync"""
@@ -2444,7 +2826,7 @@ class SleepMonitorChart(QWidget):
         return False
     
     def show_remove_menu(self, plot_widget, chart_name, label_index, selection_data, scene_pos):
-        """Show menu to remove or modify existing label"""
+        """Show menu to remove existing label"""
         menu = QMenu(self)
         menu.setTitle(f"Label: {selection_data['label']}")
         
@@ -2452,12 +2834,6 @@ class SleepMonitorChart(QWidget):
         remove_action = QAction(f"Remove '{selection_data['label']}'", self)
         remove_action.triggered.connect(lambda: self.remove_label(chart_name, label_index))
         menu.addAction(remove_action)
-        
-        # Change label action
-        menu.addSeparator()
-        change_action = QAction("Change Label...", self)
-        change_action.triggered.connect(lambda: self.change_label(chart_name, label_index))
-        menu.addAction(change_action)
         
         # Show menu at click position
         widget_pos = plot_widget.mapFromScene(scene_pos)
@@ -2470,6 +2846,18 @@ class SleepMonitorChart(QWidget):
             removed_label = self.selection_labels[chart_name].pop(label_index)
             print(f"Removed label '{removed_label['label']}' from {chart_name}")
             
+            # Also remove from dynamic_selections to prevent overlay issues
+            if chart_name in self.dynamic_selections:
+                # Find and remove the corresponding dynamic selection
+                removed_id = self._get_selection_id(removed_label)
+                self.dynamic_selections[chart_name] = [
+                    sel for sel in self.dynamic_selections[chart_name] 
+                    if self._get_selection_id(sel) != removed_id
+                ]
+            
+            # Re-render selections to update overlays
+            self.render_dynamic_selections()
+            
             # Hide overlay if no more labels
             if not self.selection_labels[chart_name]:
                 # Find the plot widget and hide overlay
@@ -2481,19 +2869,30 @@ class SleepMonitorChart(QWidget):
                             if hasattr(plots[0], 'selection_overlay'):
                                 plots[0].selection_overlay.setVisible(False)
                             break
-    
+        
     def change_label(self, chart_name, label_index):
-        """Change an existing label to a different type"""
+        """Change an existing label by opening the event selection menu"""
         if chart_name in self.selection_labels and 0 <= label_index < len(self.selection_labels[chart_name]):
             # Store the selection data for re-application
             old_selection = self.selection_labels[chart_name][label_index]
             
+            # Convert float coordinates back to QPointF objects
+            from PyQt5.QtCore import QPointF
+            start_point = QPointF(old_selection['start'], 0)  # y=0 for time coordinate
+            end_point = QPointF(old_selection['end'], 0)
+            
+            # Preserve selection data BEFORE removing the old label
+            self.selection_start = start_point
+            self.selection_end = end_point
+            
             # Remove the old label
             self.remove_label(chart_name, label_index)
             
-            # Set up for new label selection
-            self.selection_start = old_selection['start']
-            self.selection_end = old_selection['end']
+            # Restore selection for new label
+            self.current_selection = {
+                "start": start_point,
+                "end": end_point
+            }
             
             # Find the plot widget
             for i in range(self.charts_layout.count()):
@@ -2622,7 +3021,21 @@ class SleepMonitorChart(QWidget):
                                 start_str = self.format_timestamp(start_time_abs)
                                 duration_str = self.format_duration(duration)
                                 
-                                overlay.setText(f"{selection_data['label']}\n{start_str}\n{duration_str}")
+                                # Prepare full text with SpO2 info if available
+                                full_text = f"{selection_data['label']}\n{start_str}\n{duration_str}"
+                                
+                                # Add SpO2 info if available (only for SpO2 chart)
+                                if 'spo2_info' in selection_data and selection_data['spo2_info']:
+                                    full_text = f"""
+{selection_data['label']}
+
+{start_str}
+{duration_str}
+
+{selection_data['spo2_info']}
+"""
+                                
+                                overlay.setText(full_text)
                                 overlay.setStyleSheet(f"""
                                     background-color: {selection_data['color']};
                                     border: 2px solid {selection_data['color'].replace('0.2', '0.8')};
