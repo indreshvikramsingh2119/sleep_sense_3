@@ -18,7 +18,7 @@ def main  ():
     app.setApplicationName("Sleep Sense")
     
     # Set default font
-    font = QFont("Segoe UI", 10)
+    font = QFont("Segoe UI", 10) 
     app.setFont(font)
     
     # Create and show the main dashboard window

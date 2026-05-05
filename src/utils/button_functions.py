@@ -12,9 +12,9 @@ import json
 import csv
 import platform
 from PyQt5.QtWidgets import (
-QFileDialog, QMessageBox, QInputDialog, QLineEdit, QPushButton, QMenu, QAction, QWidget, QDialog, QVBoxLayout,
-QHBoxLayout, QListWidget, QLabel, QComboBox, QCheckBox, QGroupBox, QGridLayout, QSpacerItem, QSizePolicy,
-QRadioButton, QButtonGroup, QSpinBox, QTextEdit, QSlider, QTabWidget, QFormLayout, QFrame
+    QFileDialog, QMessageBox, QInputDialog, QLineEdit, QPushButton, QMenu, QAction, QWidget, QDialog, QVBoxLayout,
+    QHBoxLayout, QListWidget, QLabel, QComboBox, QCheckBox, QGroupBox, QGridLayout, QSpacerItem, QSizePolicy,
+    QRadioButton, QButtonGroup, QSpinBox, QTextEdit, QSlider, QTabWidget, QFormLayout, QFrame
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QTextDocument
@@ -396,6 +396,8 @@ class ButtonFunctions:
         report_view_action.triggered.connect(self.view_report_view)
         view_menu.addAction(report_view_action)
 
+        
+
         signal_view_action = QAction('Signal view', self.parent)
         signal_view_action.setStatusTip('Show signal view')
         signal_view_action.triggered.connect(self.view_signal_view)
@@ -410,7 +412,7 @@ class ButtonFunctions:
         quick_start_action.setStatusTip('Show quick start')
         quick_start_action.triggered.connect(self.view_quick_start)
         view_menu.addAction(quick_start_action)
-        
+         
         # Tools Menu
         tools_menu = menubar.addMenu('Tools')
         
@@ -608,27 +610,6 @@ class ButtonFunctions:
         print("Tools -> Settings -> Export clicked")
         # TODO: Implement export settings dialog
     
-    def tools_settings_general(self):
-        """General settings"""
-        print("Tools -> Settings -> General clicked")
-        # TODO: Implement general settings dialog
-    
-    def tools_settings_data(self):
-        """Data settings"""
-        print("Tools -> Settings -> Data clicked")
-        # TODO: Implement data settings dialog
-    
-    def tools_settings_display(self):
-        """Display settings"""
-        print("Tools -> Settings -> Display clicked")
-        # TODO: Implement display settings dialog
-    
-    def tools_settings_export(self):
-        """Export settings"""
-        print("Tools -> Settings -> Export clicked")
-        # TODO: Implement export settings dialog
-        
-        
     def tools_reanalysis(self):
         """Reanalysis"""
         print("Tools -> Reanalysis clicked")

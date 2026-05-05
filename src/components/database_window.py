@@ -409,7 +409,6 @@ class DatabaseWindow(QDialog):
         
         # Create buttons
         self.selection_btn = QPushButton("Selection")
-        self.view_btn = QPushButton("View")
         self.delete_btn = QPushButton("Delete")
         self.cancel_btn = QPushButton("Cancel")
         
@@ -474,13 +473,11 @@ class DatabaseWindow(QDialog):
         """
         
         self.selection_btn.setStyleSheet(button_style)
-        self.view_btn.setStyleSheet(button_style)
         self.delete_btn.setStyleSheet(delete_style)
         self.cancel_btn.setStyleSheet(cancel_style)
         
         # Add buttons to layout
         layout.addWidget(self.selection_btn)
-        layout.addWidget(self.view_btn)
         layout.addWidget(self.delete_btn)
         layout.addWidget(self.cancel_btn)
         
@@ -498,9 +495,10 @@ class DatabaseWindow(QDialog):
             # Store patient ID in the row for later retrieval
             self.patients_table.item(row, 0).setData(Qt.UserRole, patient['id'])
         
-        # Clear records and reports tables for now
+        # Clear records table for now
         self.records_table.setRowCount(0)
-        self.reports_table.setRowCount(0)
+        # Load reports for patients
+        self.load_reports_from_database()
         
         # Connect search functionality
         self.search_input.textChanged.connect(self.filter_patients)
@@ -509,7 +507,6 @@ class DatabaseWindow(QDialog):
         
         # Connect button actions
         self.selection_btn.clicked.connect(self.handle_selection)
-        self.view_btn.clicked.connect(self.handle_view)
         self.delete_btn.clicked.connect(self.handle_delete)
         self.cancel_btn.clicked.connect(self.reject)  # Close dialog
         
@@ -596,4 +593,51 @@ class DatabaseWindow(QDialog):
     def handle_delete(self):
         """Handle Delete button click"""
         print("Delete action triggered")
-        # Implementation for delete functionality
+        
+        # Get selected patient
+        selected_items = self.patients_table.selectedItems()
+        if not selected_items:
+            print("No patient selected for deletion")
+            return
+            
+        # Get patient data
+        row = selected_items[0].row()
+        patient_db_id = self.patients_table.item(row, 0).data(Qt.UserRole)
+        last_name = self.patients_table.item(row, 0).text()
+        first_name = self.patients_table.item(row, 1).text()
+        
+        # Confirm deletion
+        from PyQt5.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, 
+            'Confirm Delete',
+            f'Are you sure you want to delete patient "{last_name} {first_name}"?',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Delete from database
+            success = self.db_manager.delete_patient(patient_db_id)
+            if success:
+                print(f"Patient {last_name} {first_name} deleted successfully")
+                # Refresh the patients list and reports
+                self.load_patients_from_database()
+                self.load_reports_from_database()
+            else:
+                print("Failed to delete patient")
+        else:
+            print("Delete cancelled")
+    
+    def load_reports_from_database(self):
+        """Load reports from database"""
+        reports = self.db_manager.get_all_reports()
+        
+        self.reports_table.setRowCount(len(reports))
+        for row, report in enumerate(reports):
+            self.reports_table.setItem(row, 0, QTableWidgetItem(report['patient_name']))
+            self.reports_table.setItem(row, 1, QTableWidgetItem(report['report_date']))
+            self.reports_table.setItem(row, 2, QTableWidgetItem(report['doctor_name']))
+            self.reports_table.setItem(row, 3, QTableWidgetItem(report['specialization']))
+            # Store report ID in row for later retrieval
+            self.reports_table.item(row, 0).setData(Qt.UserRole, report['id'])
