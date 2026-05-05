@@ -12,13 +12,15 @@ import pandas as pd
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog
+    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog, QApplication, QDialog
 )
 from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QPoint, QRect, QMimeData, QPointF
 from PyQt5.QtGui import QPixmap, QScreen
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen
 import pyqtgraph as pg
 from .custom_viewbox import CustomViewBox
+from .amplitude_axis_properties_dialog import AmplitudeAxisPropertiesDialog
+
 
 
 class SleepMonitorChart(QWidget):
@@ -552,33 +554,61 @@ class SleepMonitorChart(QWidget):
                     if len(x) > 0 and len(y) > 0:
                         # Update normal line plot
                         plot_widget.plot_curve.setData(x, y)
+                        # Ensure no fill for SpO2 graph
+                        plot_widget.plot_curve.opts['fill'] = None
                         
-                        # Dynamic SpO2 Y-axis adjustment
-                        avg_spo2 = np.mean(y)
-                        if avg_spo2 > 95:
-                            # Adjust Y-axis to start from 90 when SpO2 is above 95
-                            new_y_min, new_y_max = 90, 100
-                        else:
-                            # Use standard medical range
-                            new_y_min, new_y_max = 70, 100
-                        
-                        try:
-                            plot_widget.setYRange(new_y_min, new_y_max)
-                        except TypeError:
-                            # Try alternative method for older pyqtgraph versions
-                            plot_widget.setRange(yRange=[new_y_min, new_y_max])
-                        
-                        # Update scatter plot markers if they exist (only in 10s-30s time window)
-                        if (hasattr(plot_widget, 'scatter_item') and 
-                            plot_widget.scatter_item is not None and
-                            10 <= self.current_time_window <= 30):
-                            # Update scatter plot with new data
-                            plot_widget.scatter_item.setData(x, y)
+                        # Check if custom axis properties are set, if yes, use them instead of dynamic adjustment
+                        if hasattr(plot_widget, 'axis_properties'):
+                            # Apply scaling first, then set the range
+                            properties = plot_widget.axis_properties
+                            low_value = properties.get('low_value', 35.0)
+                            high_value = properties.get('high_value', 100.0)
                             
-                            # Update hover data with new values
-                            plot_widget.hover_data = {'x': x, 'y': y}
-                             
-                            print(f"Updated SpO2 markers with {len(x)} points for time offset {self.current_time_offset}s")
+                            # Scale the data to fit within the custom range
+                            y_min_orig = np.min(y)
+                            y_max_orig = np.max(y)
+                            y_range_orig = y_max_orig - y_min_orig
+                            
+                            if y_range_orig > 0:
+                                y_range_new = high_value - low_value
+                                y_scaled = ((y - y_min_orig) / y_range_orig) * y_range_new + low_value
+                                plot_widget.plot_curve.setData(x, y_scaled)
+                                print(f"Scaled SpO2 data from {y_min_orig:.2f}-{y_max_orig:.2f} to {low_value:.2f}-{high_value:.2f}")
+                            
+                            # Set the range
+                            try:
+                                plot_widget.setYRange(low_value, high_value, padding=0)
+                            except TypeError:
+                                plot_widget.setRange(yRange=[low_value, high_value], padding=0)
+                        else:
+                            # Dynamic SpO2 Y-axis adjustment (only if no custom properties)
+                            avg_spo2 = np.mean(y)
+                            if avg_spo2 > 95:
+                                # Adjust Y-axis to start from 90 when SpO2 is above 95
+                                new_y_min, new_y_max = 90, 100
+                            else:
+                                # Use standard medical range
+                                new_y_min, new_y_max = 70, 100
+                            
+                            try:
+                                plot_widget.setYRange(new_y_min, new_y_max)
+                            except TypeError:
+                                # Try alternative method for older pyqtgraph versions
+                                plot_widget.setRange(yRange=[new_y_min, new_y_max])
+                        
+                        # Handle value labels for SpO2 (only in 10s-30s time window)
+                        if 10 <= self.current_time_window <= 30:
+                            # Always update value labels dynamically for real-time navigation
+                            print(f"Creating/Updating SpO2 value labels for {self.current_time_window}s time window")
+                            self.create_spo2_markers_and_labels(plot_widget, x, y)
+                            print(f"Updated SpO2 value labels with {len(x)} points for time offset {self.current_time_offset}s")
+                        else:
+                            # Time window is outside 10s-30s range, remove value labels if they exist
+                            if hasattr(plot_widget, 'value_labels'):
+                                for label in plot_widget.value_labels:
+                                    plot_widget.removeItem(label)
+                                plot_widget.value_labels = []
+                            print(f"Removed SpO2 value labels for {self.current_time_window}s time window")
                 else:
                     # Update simulated data for ALL other signals
                     time_points = int(self.current_time_window * 10)
@@ -587,7 +617,32 @@ class SleepMonitorChart(QWidget):
                     amp = plot_widget.graph_amplitude
                     offset = plot_widget.graph_offset
                     y = np.sin(x * freq * 2 * np.pi) * amp + offset + (np.random.rand(time_points) - 0.5) * amp * 0.1
+                    y = self.smooth_data(x, y, window_size=5)
                     plot_widget.plot_curve.setData(x, y)
+                    
+                    # Apply custom axis properties if they exist
+                    if hasattr(plot_widget, 'axis_properties'):
+                        # Apply scaling first, then set the range
+                        properties = plot_widget.axis_properties
+                        low_value = properties.get('low_value', 35.0)
+                        high_value = properties.get('high_value', 100.0)
+                        
+                        # Scale the data to fit within the custom range
+                        y_min_orig = np.min(y)
+                        y_max_orig = np.max(y)
+                        y_range_orig = y_max_orig - y_min_orig
+                        
+                        if y_range_orig > 0:
+                            y_range_new = high_value - low_value
+                            y_scaled = ((y - y_min_orig) / y_range_orig) * y_range_new + low_value
+                            plot_widget.plot_curve.setData(x, y_scaled)
+                            print(f"Scaled {chart_name} data from {y_min_orig:.2f}-{y_max_orig:.2f} to {low_value:.2f}-{high_value:.2f}")
+                        
+                        # Set the range
+                        try:
+                            plot_widget.setYRange(low_value, high_value, padding=0)
+                        except TypeError:
+                            plot_widget.setRange(yRange=[low_value, high_value], padding=0)
                     
                     print(f"Updated {chart_name} with {time_points} points for {self.current_time_window}s window")
         
@@ -624,8 +679,8 @@ class SleepMonitorChart(QWidget):
                     dropdown.setCurrentIndex(i)
                     break
             
-            # Update charts with new time window
-            self.update_charts_for_time_window(seconds)
+            # Update charts with new time window (refresh data only, don't recreate charts)
+            self.refresh_charts()
             self.restore_all_selections()
             print(f"Time window set to: {seconds} seconds")
 
@@ -976,6 +1031,39 @@ class SleepMonitorChart(QWidget):
                 f"Data points: {len(time_data)}\n"
                 f"Duration: {time_data[-1]/3600:.1f} hours")
     
+    def smooth_data(self, x_data, y_data, window_size=5):
+        """Apply smoothing to data using moving average for medical-grade smoothness"""
+        if len(y_data) < window_size:
+            # If data is too short, return original data
+            return y_data
+        
+        try:
+            # Use moving average for smooth medical data
+            window_size = min(window_size, len(y_data))
+            if window_size >= 3:
+                # Create weights for weighted moving average (center-weighted)
+                weights = np.ones(window_size)
+                weights[window_size//2] = 2.0  # Center point gets more weight
+                weights = weights / weights.sum()
+                
+                # Apply convolution with 'valid' mode to prevent edge artifacts, then pad
+                y_smooth_valid = np.convolve(y_data, weights, mode='valid')
+                
+                # Pad the smoothed data to match original length using original edge values
+                pad_size = (len(y_data) - len(y_smooth_valid)) // 2
+                y_smooth = np.concatenate([
+                    y_data[:pad_size],  # Keep original edge values
+                    y_smooth_valid,     # Use smoothed middle section
+                    y_data[-pad_size:]  # Keep original edge values
+                ])
+                
+                return y_smooth
+            else:
+                return y_data
+        except:
+            # Fallback to original data if smoothing fails
+            return y_data
+    
     def get_spo2_data_for_window(self, time_window_seconds, time_offset=0):
         """Get SpO2 data filtered for specific time window"""
         if self.spo2_full_data is None or len(self.spo2_full_data[0]) == 0:
@@ -1002,6 +1090,9 @@ class SleepMonitorChart(QWidget):
         
         # Generate time points: 0, 0.1, 0.2, ... up to time_window_seconds
         window_time = np.arange(num_samples) / samples_per_second
+        
+        # Apply gentle smoothing to SpO2 data for better visual appearance while preserving real patterns
+        window_spo2 = self.smooth_data(window_time, window_spo2, window_size=5)
         
         # Calculate SpO2 statistics for this window
         self.calculate_spo2_statistics(window_spo2)
@@ -1089,6 +1180,8 @@ class SleepMonitorChart(QWidget):
         label.setObjectName("chartSideLabel")
         label.setWordWrap(True)
         label.setAlignment(Qt.AlignCenter)
+        # Make label clickable
+        label.setCursor(Qt.PointingHandCursor)
         label.setStyleSheet("""
             QLabel#chartSideLabel {
                 font-size: 11px;
@@ -1116,6 +1209,8 @@ class SleepMonitorChart(QWidget):
                 color: #1e40af;
             }
         """)
+        # Add click event handler to hide/show graph
+        label.mousePressEvent = lambda event: self.toggle_graph_visibility(name, container, label)
         label_layout.addWidget(label)
         
         container_layout.addWidget(label_frame)
@@ -1410,6 +1505,8 @@ class SleepMonitorChart(QWidget):
         # Remove all grid lines for clean white background
         plot_widget.showGrid(x=False, y=False)
         
+        # Remove right-click context menu
+        
         # Apply professional medical styling to plot widget
         plot_widget.setStyleSheet("""
             QFrame {
@@ -1523,61 +1620,40 @@ class SleepMonitorChart(QWidget):
                 x = np.linspace(0, self.current_time_window, time_points)
                 y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
             else:
-                # Center the SpO2 data around mean (baseline correction)
-                y_mean = np.mean(y)
-                y_centered = y - y_mean
-                y = y_centered + 90  # Center around 90% (medical baseline)
+                # Use real SpO2 data as-is (no artificial baseline correction)
+                print(f"Using real SpO2 data: {len(y)} points, range: {np.min(y):.1f}-{np.max(y):.1f}")
         else:
             # Generate simulated data for other signals based on time window
             time_points = int(self.current_time_window * 10)  # 10 Hz sampling rate
             x = np.linspace(0, self.current_time_window, time_points)
             y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
+            
+            # Apply smoothing to all graph data for professional appearance
+            y = self.smooth_data(x, y, window_size=5)
         
         # Plot the signal andltore reference for line visibility control
         pen = pg.mkPen(color=color, width=1.5)
         
-        # Plot all graphs as normal line plots (no step ladder)
-        plot_curve = plot_widget.plot(x, y, pen=pen)
+        # Plot all graphs as normal line plots (no step ladder, no fill)
+        plot_curve = plot_widget.plot(x, y, pen=pen, fill=None)
 
-        # Add hover functionality for SpO2 graph - only in 10s-30s time window
+        # Add value labels for SpO2 graph - only in 10s-30s time window
         if name.strip() == "SpO2" and len(x) > 0 and len(y) > 0:
             # Check if current time window is between 10s and 30s
             if 10 <= self.current_time_window <= 30:
-                # Create scatter plot for data points
-                scatter = pg.ScatterPlotItem(
-                    x=x, y=y, 
-                    size=8,  # Size of the dots
-                    brush=pg.mkBrush(color=color),  # Same color as the line
-                    pen=pg.mkPen(color=color, width=1)
-                )
-                plot_widget.addItem(scatter)
+                # Add value labels on the graph (positioned exactly on data points)
+                self.add_spo2_value_labels(plot_widget, x, y, self.current_time_window)
                 
-                # Store scatter item for hover detection
-                plot_widget.scatter_item = scatter
-                
-                # Create tooltip label for hover display
-                tooltip_label = pg.TextItem(
-                    text="", 
-                    color='white',
-                    fill=(0, 0, 0, 180)  # Semi-transparent black background
-                )
-                plot_widget.addItem(tooltip_label)
-                tooltip_label.setVisible(False)
-                plot_widget.tooltip_label = tooltip_label
-                
-                # Store data for hover calculations
-                plot_widget.hover_data = {'x': x, 'y': y}
-                
-                # Connect hover event
-                plot_widget.scene().sigMouseMoved.connect(lambda pos, pw=plot_widget: self.on_sp02_hover(pos, pw))
-                
-                print(f"SpO2 markers enabled for {self.current_time_window}s time window")
+                print(f"SpO2 value labels enabled for {self.current_time_window}s time window")
             else:
-                # Time window is outside 10s-30s range, no markers
-                plot_widget.scatter_item = None
-                plot_widget.tooltip_label = None
-                plot_widget.hover_data = None
-                print(f"SpO2 markers disabled for {self.current_time_window}s time window")
+                # Time window is outside 10s-30s range, no value labels
+                # Clear value labels if they exist
+                if hasattr(plot_widget, 'value_labels'):
+                    for label in plot_widget.value_labels:
+                        plot_widget.removeItem(label)
+                    plot_widget.value_labels = []
+                
+                print(f"SpO2 value labels disabled for {self.current_time_window}s time window")
 
         plot_widget.graph_name = name
         plot_widget.graph_color = color
@@ -1599,12 +1675,10 @@ class SleepMonitorChart(QWidget):
         vb = plot_widget.getViewBox()
         vb.sigResized.connect(lambda pw=plot_widget: self.on_plot_resized(pw))
         
-        # Add click event handler to label for line visibility
-        label.mousePressEvent = lambda event: self.toggle_graph_visibility(label, name, plot_curve, container, plot_widget)
-                
-        # Enable drag and drop for entire container (only for reordering)
+        # Remove click event handler to prevent graph hiding - disable mouse press on container
         container.setAcceptDrops(True)
-        container.mousePressEvent = lambda event: self.start_drag(event, name, container)
+        # Remove mouse press event to prevent graph hiding
+        # container.mousePressEvent = lambda event: self.start_drag(event, name, container)
         container.mouseMoveEvent = lambda event: self.continue_drag(event, name)
         container.mouseReleaseEvent = lambda event: self.end_drag(event, name)
         
@@ -1671,6 +1745,129 @@ class SleepMonitorChart(QWidget):
         
         return container
     
+        
+    def toggle_graph_visibility(self, graph_name, container, label):
+        """Toggle graph visibility - hide graph and add to hidden graphs dropdown"""
+        if graph_name in self.hidden_graphs:
+            # Graph is already hidden, restore it
+            self.restore_hidden_graph(graph_name)
+        else:
+            # Hide the graph and add to hidden graphs
+            self.hide_graph(graph_name, container, label)
+    
+    def hide_graph(self, graph_name, container, label):
+        """Hide a graph and store its data for later restoration"""
+        # Store graph data before hiding
+        plot_widget = container.plot_widget
+        
+        self.hidden_graphs[graph_name] = {
+            'container': container,
+            'plot_widget': plot_widget,
+            'plot_curve': plot_widget.plot_curve,
+            'color': plot_widget.graph_color if hasattr(plot_widget, 'graph_color') else '#000000',
+            'frequency': plot_widget.graph_frequency if hasattr(plot_widget, 'graph_frequency') else 1.0,
+            'amplitude': plot_widget.graph_amplitude if hasattr(plot_widget, 'graph_amplitude') else 1.0,
+            'offset': plot_widget.graph_offset if hasattr(plot_widget, 'graph_offset') else 0,
+            'position': self.charts_layout.indexOf(container)
+        }
+        
+        # Hide the container
+        container.hide()
+        
+        # Update label to show it's hidden
+        label.setText(f"{graph_name} (Hidden)")
+        label.setStyleSheet("""
+            QLabel#chartSideLabel {
+                font-size: 11px;
+                font-weight: 700;
+                color: #6b7280;
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #f9fafb,
+                    stop: 0.5 #f3f4f6,
+                    stop: 1 #e5e7eb
+                );
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                padding: 6px 4px;
+                text-align: center;
+            }
+        """)
+        
+        # Update hidden graphs dropdown
+        self.update_hidden_graphs_dropdown()
+        
+        print(f"Graph '{graph_name}' hidden and added to hidden graphs")
+    
+    def restore_hidden_graph(self, graph_name):
+        """Restore a hidden graph"""
+        if graph_name not in self.hidden_graphs:
+            return
+        
+        graph_data = self.hidden_graphs[graph_name]
+        container = graph_data['container']
+        
+        # Show the container
+        container.show()
+        
+        # Find and update the label
+        label = container.findChild(QLabel, "chartSideLabel")
+        if label:
+            label.setText(graph_name)
+            label.setStyleSheet("""
+                QLabel#chartSideLabel {
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: #1e293b;
+                    background: qlineargradient(
+                        x1: 0, y1: 0, x2: 0, y2: 1,
+                        stop: 0 #ffffff,
+                        stop: 0.5 #f8fafc,
+                        stop: 1 #f1f5f9
+                    );
+                    border: 1px solid #cbd5e1;
+                    border-radius: 6px;
+                    padding: 6px 4px;
+                    text-align: center;
+                }
+                QLabel#chartSideLabel:hover {
+                    background: qlineargradient(
+                        x1: 0, y1: 0, x2: 0, y2: 1,
+                        stop: 0 #ffffff,
+                        stop: 0.5 #dbeafe,
+                        stop: 1 #bfdbfe
+                    );
+                    border: 1px solid #3b82f6;
+                    color: #1e40af;
+                }
+            """)
+        
+        # Remove from hidden graphs
+        del self.hidden_graphs[graph_name]
+        
+        # Update hidden graphs dropdown
+        self.update_hidden_graphs_dropdown()
+        
+        print(f"Graph '{graph_name}' restored")
+    
+    def update_hidden_graphs_dropdown(self):
+        """Update the hidden graphs dropdown with current hidden graphs"""
+        hidden_dropdown = getattr(self, 'dashboard_hidden_graphs_dropdown', None) or getattr(self, 'hidden_graphs_dropdown', None)
+        if hidden_dropdown:
+            # Clear current items
+            hidden_dropdown.clear()
+            
+            if self.hidden_graphs:
+                # Add hidden graphs to dropdown
+                hidden_dropdown.addItem("Select to restore...")
+                for graph_name in sorted(self.hidden_graphs.keys()):
+                    hidden_dropdown.addItem(graph_name)
+                hidden_dropdown.setEnabled(True)
+            else:
+                # No hidden graphs
+                hidden_dropdown.addItem("No hidden graphs")
+                hidden_dropdown.setEnabled(False)
+    
     def start_manual_drag(self, graph_name, container):
         """Toggle manual drag resizing when drag button is clicked"""
         # Check if this container is already in manual drag mode
@@ -1693,6 +1890,10 @@ class SleepMonitorChart(QWidget):
             container.mousePressEvent = lambda event: self.manual_drag_mouse_press(event, graph_name, container)
             container.mouseMoveEvent = lambda event: self.manual_drag_mouse_move(event, graph_name)
             container.mouseReleaseEvent = lambda event: self.manual_drag_mouse_release(event, graph_name)
+            
+            # Force immediate expansion to larger size
+            container.setMinimumHeight(300)  # Set expanded height
+            container.updateGeometry()
             
             print(f"Manual drag mode enabled for graph '{graph_name}'")
     
@@ -1818,48 +2019,7 @@ class SleepMonitorChart(QWidget):
         # If below all, insert at end
         return self.charts_layout.count()
     
-    def toggle_graph_visibility(self, label, chart_name, plot_curve, container, plot_widget):
-        """Toggle visibility of entire graph row when label is clicked"""
-        # Check if the graph is currently hidden
-        if chart_name in self.hidden_graphs:
-            # Graph is already hidden, this shouldn't happen normally
-            return
-        
-        # Hide the entire graph row and store its data
-        print(f"Hiding graph '{chart_name}'")
-        
-        # Find the original position of this graph
-        original_position = self.graph_order.index(chart_name)
-        
-        # Store graph data for restoration
-        self.hidden_graphs[chart_name] = {
-            'container': container,
-            'plot_curve': plot_curve,
-            'color': plot_widget.graph_color,
-            'frequency': plot_widget.graph_frequency,
-            'amplitude': plot_widget.graph_amplitude,
-            'offset': plot_widget.graph_offset,
-            'position': original_position
-        }
-        
-        # Remove the container from the layout safely
-        self.charts_layout.removeWidget(container)
-        container.setParent(None)
-        container.setVisible(False)
-        
-        # Add to dropdown
-        hidden_dropdown = getattr(self, 'dashboard_hidden_graphs_dropdown', None) or getattr(self, 'hidden_graphs_dropdown', None)
-        if hidden_dropdown:
-            hidden_dropdown.addItem(chart_name)
-            hidden_dropdown.setEnabled(True)
-            
-            # Reset dropdown to placeholder if this was the first hidden graph
-            if len(self.hidden_graphs) == 1:
-                hidden_dropdown.setCurrentIndex(0)
-        
-        print(f"Graph '{chart_name}' hidden and added to dropdown")
-    
-    def restore_hidden_graph(self, index):
+    def restore_hidden_graph_from_dropdown(self, index):
         """Restore a hidden graph when selected from dropdown"""
         # Ignore the placeholder item (index 0)
         if index == 0:
@@ -1872,92 +2032,12 @@ class SleepMonitorChart(QWidget):
             
         graph_name = hidden_dropdown.itemText(index)
         
-        # Check if graph exists in hidden graphs
-        if graph_name not in self.hidden_graphs:
-            print(f"Graph '{graph_name}' not found in hidden graphs")
-            return
+        # Use the new restore functionality
+        self.restore_hidden_graph(graph_name)
         
-        # Block signals to prevent multiple calls
-        hidden_dropdown.blockSignals(True)
-        
-        try:
-            # Get stored graph data
-            graph_data = self.hidden_graphs[graph_name]
-            old_container = graph_data['container']
-            
-            # Create a completely fresh container with same properties as new graphs
-            new_container = self.create_signal_chart(
-                graph_name,
-                graph_data['color'],
-                graph_data['frequency'],
-                graph_data['amplitude'],
-                graph_data['offset']
-            )
-            
-            # Find the plot widget in the new container and replace it with the stored one
-            old_plot_widget = None
-            for i in range(new_container.layout().count()):
-                widget = new_container.layout().itemAt(i).widget()
-                if isinstance(widget, pg.PlotWidget):
-                    old_plot_widget = widget
-                    break
-            
-            # Find the stored plot widget in the old container
-            stored_plot_widget = None
-            for i in range(old_container.layout().count()):
-                widget = old_container.layout().itemAt(i).widget()
-                if isinstance(widget, pg.PlotWidget):
-                    stored_plot_widget = widget
-                    break
-            
-            # If we found both plot widgets, replace the new one with the stored one
-            if old_plot_widget and stored_plot_widget:
-                # Copy properties from stored plot widget
-                old_plot_widget.graph_name = stored_plot_widget.graph_name
-                old_plot_widget.graph_color = stored_plot_widget.graph_color
-                old_plot_widget.graph_frequency = stored_plot_widget.graph_frequency
-                old_plot_widget.graph_amplitude = stored_plot_widget.graph_amplitude
-                old_plot_widget.graph_offset = stored_plot_widget.graph_offset
-                
-                # Copy plot data
-                old_plot_widget.clear()
-                for item in stored_plot_widget.listDataItems():
-                    old_plot_widget.addItem(item)
-            
-            # Remove from hidden graphs dictionary first
-            del self.hidden_graphs[graph_name]
-            
-            # Remove from dropdown
-            hidden_dropdown.removeItem(index)
-            
-            # Find the correct position to insert this graph
-            insert_position = graph_data['position']
-            
-            # Re-insert the container at the correct position
-            self.charts_layout.insertWidget(insert_position, new_container)
-            
-            # Update graph_order list
-            self.graph_order.insert(insert_position, graph_name)
-            
-            # Update all position indices for graphs that come after the inserted one
-            for i in range(insert_position + 1, len(self.graph_order)):
-                other_graph_name = self.graph_order[i]
-                if other_graph_name in self.hidden_graphs:
-                    self.hidden_graphs[other_graph_name]['position'] = i
-            
-            # Disable dropdown if no more hidden graphs
-            if len(self.hidden_graphs) == 0:
-                hidden_dropdown.setEnabled(False)
-            else:
-                # Reset to placeholder
-                hidden_dropdown.setCurrentIndex(0)
-            
-            print(f"Graph '{graph_name}' restored")
-        
-        finally:
-            # Unblock signals
-            hidden_dropdown.blockSignals(False)
-    
+        # Reset dropdown to placeholder
+        hidden_dropdown.setCurrentIndex(0)
+                    
     def toggle_line_visibility(self, label, chart_name, plot_curve):
         """Toggle visibility of graph line when label is clicked"""
         # Check if the line is currently hidden
@@ -2180,6 +2260,70 @@ class SleepMonitorChart(QWidget):
             if hasattr(plot_widget, 'scatter_item'):
                 plot_widget.scatter_item.setSize([8] * len(x_data))
     
+    def create_spo2_markers_and_labels(self, plot_widget, x_data, y_data):
+        """Create value labels for SpO2 when they don't exist (no scatter plot dots)"""
+        print(f"DEBUG: create_spo2_markers_and_labels called with {len(x_data)} points")
+        
+        # Add value labels on the graph (positioned exactly on data points)
+        self.add_spo2_value_labels(plot_widget, x_data, y_data, self.current_time_window)
+        
+        print(f"Created SpO2 value labels for {self.current_time_window}s time window")
+    
+    def add_spo2_value_labels(self, plot_widget, x_data, y_data, time_window):
+        """Add value labels on SpO2 graph at regular intervals like in the image"""
+        # Clear existing value labels if any
+        if hasattr(plot_widget, 'value_labels'):
+            for label in plot_widget.value_labels:
+                plot_widget.removeItem(label)
+        plot_widget.value_labels = []
+        
+        # Get the actual displayed data (scaled if axis properties are applied)
+        if hasattr(plot_widget, 'axis_properties'):
+            # Use scaled data positions when axis properties are applied
+            current_data = plot_widget.plot_curve.getData()
+            if current_data[0] is not None and len(current_data[0]) > 0:
+                x_displayed, y_displayed = current_data
+            else:
+                x_displayed, y_displayed = x_data, y_data
+        else:
+            # Use original data when no axis properties
+            x_displayed, y_displayed = x_data, y_data
+        
+        # Show labels on all data points for 10s and 30s windows
+        if time_window == 10 or time_window == 30:
+            # Add value labels for ALL data points
+            for i in range(len(x_displayed)):
+                x_pos = x_displayed[i]
+                y_pos = y_displayed[i]
+                
+                # Get the original SpO2 value for display (not the scaled value)
+                original_y = y_data[min(i, len(y_data)-1)]
+                
+                # Create text item with value
+                text_item = pg.TextItem(
+                    text=f"{int(original_y)}",  # Display original SpO2 value
+                    color=(255, 0, 0),  # Bright red color
+                    anchor=(0.5, 1.0)  # Bottom center anchor to position on top of line
+                )
+                
+                # Set font for better visibility while maintaining positioning
+                from PyQt5.QtGui import QFont
+                font = QFont()
+                font.setPointSize(6)  # Smaller font to fit all labels
+                font.setBold(True)
+                text_item.setFont(font)
+                
+                # Position the text slightly above the displayed data point to sit on top
+                offset_above = 0.2  # Small offset to sit on top of the line
+                text_item.setPos(x_pos, y_pos + offset_above)
+                
+                # Set anchor to bottom center to position on top of the line
+                text_item.setAnchor((0.5, 1.0))  # Bottom center anchor
+                
+                # Add to plot and store reference
+                plot_widget.addItem(text_item)
+                plot_widget.value_labels.append(text_item)
+    
     
     def on_mouse_clicked(self, event, plot_widget):
         """Handle mouse click for area selection and label removal"""
@@ -2215,6 +2359,11 @@ class SleepMonitorChart(QWidget):
     
     def custom_mouse_press(self, event, plot_widget):
         """Custom mouse press handler for better selection handling"""
+        # Handle right mouse button for y-axis context menu
+        if event.button() == Qt.RightButton:
+            self.handle_right_click(event, plot_widget)
+            return
+            
         # Only handle left mouse button for area selection
         if event.button() != Qt.LeftButton:
             return
@@ -2254,6 +2403,327 @@ class SleepMonitorChart(QWidget):
         self.selection_end_scene = None
         # Keep preview overlay hidden, don't touch persistent overlays
         print(f"Started selection on {plot_widget.chart_name}")
+    
+    def handle_right_click(self, event, plot_widget):
+        """Handle right-click events on y-axis to show image options context menu"""
+        widget_pos = event.pos()
+        widget_rect = plot_widget.rect()
+        
+        if not widget_rect.contains(widget_pos):
+            return
+        
+        # Check if click is on y-axis area (left side of the plot)
+        y_axis_width = 60  # Approximate width of y-axis area in pixels
+        if widget_pos.x() <= y_axis_width:
+            self.show_graph_image_menu(event.globalPos(), plot_widget)
+            print(f"Right-click on y-axis detected for {plot_widget.chart_name}")
+    
+    def show_graph_image_menu(self, global_pos, plot_widget):
+        """Show context menu with image options for the specific graph"""
+        menu = QMenu(self)
+        menu.setTitle(f"Image Options - {plot_widget.chart_name}")
+        
+        # Save as PNG action
+        save_png_action = QAction("Save as PNG", self)
+        save_png_action.triggered.connect(lambda: self.save_graph_as_image(plot_widget, "PNG"))
+        menu.addAction(save_png_action)
+        
+        # Save as JPG action
+        save_jpg_action = QAction("Save as JPG", self)
+        save_jpg_action.triggered.connect(lambda: self.save_graph_as_image(plot_widget, "JPG"))
+        menu.addAction(save_jpg_action)
+        
+        # Copy to clipboard action
+        copy_clipboard_action = QAction("Copy to Clipboard", self)
+        copy_clipboard_action.triggered.connect(lambda: self.copy_graph_to_clipboard(plot_widget))
+        menu.addAction(copy_clipboard_action)
+        
+        menu.addSeparator()
+        
+        # Export with high resolution action
+        export_hd_action = QAction("Export High Resolution", self)
+        export_hd_action.triggered.connect(lambda: self.export_graph_hd(plot_widget))
+        menu.addAction(export_hd_action)
+        
+        menu.addSeparator()
+        
+        # Amplitude Axis Properties action
+        amplitude_properties_action = QAction("Amplitude Axis Properties", self)
+        amplitude_properties_action.triggered.connect(lambda: self.show_amplitude_axis_properties(plot_widget))
+        menu.addAction(amplitude_properties_action)
+        
+        # Show the menu at the cursor position
+        self.active_context_menu = menu
+        menu.exec_(global_pos)
+        self.active_context_menu = None
+    
+    def save_graph_as_image(self, plot_widget, format_type):
+        """Save individual graph as image"""
+        try:
+            # Get the plot widget's view box
+            vb = plot_widget.getViewBox()
+            
+            # Export the plot to an image
+            exporter = pg.exporters.ImageExporter(vb)
+            
+            # Generate filename with timestamp and graph name
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_graph_name = plot_widget.chart_name.strip().replace(" ", "_").replace("/", "_")
+            filename = f"{safe_graph_name}_{timestamp}.{format_type.lower()}"
+            
+            # Show save dialog
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                f"Save {plot_widget.chart_name} as {format_type}",
+                filename,
+                f"{format_type} Files (*.{format_type.lower()});;All Files (*)"
+            )
+            
+            if file_path:
+                exporter.export(file_path)
+                QMessageBox.information(self, "Image Saved", 
+                                   f"{plot_widget.chart_name} saved as:\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", 
+                               f"Failed to save {plot_widget.chart_name}:\n{str(e)}")
+    
+    def copy_graph_to_clipboard(self, plot_widget):
+        """Copy graph to clipboard"""
+        try:
+            # Get the plot widget's view box
+            vb = plot_widget.getViewBox()
+            
+            # Export the plot to an image in memory
+            exporter = pg.exporters.ImageExporter(vb)
+            
+            # Get the image as QPixmap
+            pixmap = exporter.export(toBytes=True)
+            
+            # Copy to clipboard
+            clipboard = QApplication.clipboard()
+            clipboard.setPixmap(QPixmap(pixmap))
+            
+            QMessageBox.information(self, "Copied to Clipboard", 
+                               f"{plot_widget.chart_name} copied to clipboard!")
+        except Exception as e:
+            QMessageBox.critical(self, "Copy Error", 
+                               f"Failed to copy {plot_widget.chart_name}:\n{str(e)}")
+    
+    def export_graph_hd(self, plot_widget):
+        """Export graph in high resolution"""
+        try:
+            # Get the plot widget's view box
+            vb = plot_widget.getViewBox()
+            
+            # Export with high resolution settings
+            exporter = pg.exporters.ImageExporter(vb)
+            
+            # Set high resolution parameters
+            exporter.parameters()['width'] = 1920  # HD width
+            exporter.parameters()['height'] = 1080  # HD height
+            
+            # Generate filename
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_graph_name = plot_widget.chart_name.strip().replace(" ", "_").replace("/", "_")
+            filename = f"{safe_graph_name}_HD_{timestamp}.png"
+            
+            # Show save dialog
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                f"Export {plot_widget.chart_name} in High Resolution",
+                filename,
+                "PNG Files (*.png);;All Files (*)"
+            )
+            
+            if file_path:
+                exporter.export(file_path)
+                QMessageBox.information(self, "HD Image Exported", 
+                                   f"{plot_widget.chart_name} exported in HD:\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", 
+                               f"Failed to export {plot_widget.chart_name} in HD:\n{str(e)}")
+    
+    def show_amplitude_axis_properties(self, plot_widget):
+        """Show amplitude axis properties dialog for the specific graph"""
+        try:
+            # Get current axis properties from the plot widget
+            current_properties = self.get_current_axis_properties(plot_widget)
+            
+            # Create and show the dialog
+            dialog = AmplitudeAxisPropertiesDialog(self, current_properties)
+            dialog.properties_changed.connect(lambda props: self.apply_axis_properties(plot_widget, props))
+            
+            result = dialog.exec_()
+            if result == QDialog.Accepted:
+                print(f"Amplitude axis properties applied for {plot_widget.chart_name}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Properties Error", 
+                               f"Failed to open amplitude axis properties:\n{str(e)}")
+    
+    def get_current_axis_properties(self, plot_widget):
+        """Get current axis properties from the plot widget"""
+        try:
+            # Get the current Y-axis range
+            view_range = plot_widget.getViewBox().viewRange()
+            y_min, y_max = view_range[1]
+            
+            # Get the original Y-axis range if stored
+            original_y_min = getattr(plot_widget, 'original_y_min', y_min)
+            original_y_max = getattr(plot_widget, 'original_y_max', y_max)
+            
+            properties = {
+                'low_value': float(y_min),
+                'high_value': float(y_max),
+                'limit_axis_range': False,  # Default to False
+                'limit_low_value': float(original_y_min),
+                'limit_high_value': float(original_y_max),
+                'auto_adjust': 'scale_to_fit'  # Default to scale_to_fit
+            }
+            
+            return properties
+            
+        except Exception as e:
+            print(f"Error getting current axis properties: {e}")
+            # Return default properties
+            return {
+                'low_value': 35.0,
+                'high_value': 100.0,
+                'limit_axis_range': False,
+                'limit_low_value': 85.0,
+                'limit_high_value': 100.0,
+                'auto_adjust': 'scale_to_fit'
+            }
+    
+    def apply_axis_properties(self, plot_widget, properties):
+        """Apply the axis properties to the plot widget"""
+        try:
+            # Get the view box
+            vb = plot_widget.getViewBox()
+            
+            # Apply new Y-axis range
+            low_value = properties.get('low_value', 35.0)
+            high_value = properties.get('high_value', 100.0)
+            
+            # Get current data and transform it to fit within the new range
+            if hasattr(plot_widget, 'plot_curve') and plot_widget.plot_curve:
+                current_data = plot_widget.plot_curve.getData()
+                if current_data[0] is not None and len(current_data[0]) > 0:
+                    x_data, y_data = current_data
+                    
+                    # Calculate the original data range
+                    y_min_orig = np.min(y_data)
+                    y_max_orig = np.max(y_data)
+                    y_range_orig = y_max_orig - y_min_orig
+                    
+                    if y_range_orig > 0:
+                        # Scale the data to fit within the new range
+                        y_range_new = high_value - low_value
+                        
+                        # Transform data: map original range to new range
+                        y_scaled = ((y_data - y_min_orig) / y_range_orig) * y_range_new + low_value
+                        
+                        # Update the plot with scaled data
+                        plot_widget.plot_curve.setData(x_data, y_scaled)
+                        
+                        print(f"Scaled data from {y_min_orig:.2f}-{y_max_orig:.2f} to {low_value:.2f}-{high_value:.2f}")
+            
+            # Force the Y-axis range to exactly match the specified values
+            try:
+                plot_widget.setYRange(low_value, high_value, padding=0)
+            except TypeError:
+                # Try alternative method for older pyqtgraph versions
+                plot_widget.setRange(yRange=[low_value, high_value], padding=0)
+            
+            # Apply manual range setting to override any auto-scaling
+            vb.setRange(yRange=[low_value, high_value], padding=0)
+            
+            # Handle limit axis range
+            if properties.get('limit_axis_range', False):
+                limit_low = properties.get('limit_low_value', low_value)
+                limit_high = properties.get('limit_high_value', high_value)
+                
+                # Set strict limits on the view box to prevent zooming beyond range
+                try:
+                    vb.setLimits(yMin=limit_low, yMax=limit_high)
+                except TypeError:
+                    # Try alternative method
+                    vb.setLimits(yMin=limit_low, yMax=limit_high)
+            else:
+                # Set limits to match the current range to prevent unwanted scaling
+                try:
+                    vb.setLimits(yMin=low_value, yMax=high_value)
+                except TypeError:
+                    vb.setLimits(yMin=low_value, yMax=high_value)
+            
+            # Disable auto-range completely to maintain manual control
+            auto_adjust = properties.get('auto_adjust', 'scale_to_fit')
+            if auto_adjust == 'disabled':
+                # Completely disable auto-range
+                plot_widget.enableAutoRange(axis='y', enable=False)
+                vb.enableAutoRange(axis='y', enable=False)
+            elif auto_adjust == 'center':
+                # Enable auto-range but we'll manually control it
+                plot_widget.enableAutoRange(axis='y', enable=False)
+                vb.enableAutoRange(axis='y', enable=False)
+            else:  # scale_to_fit
+                # Disable auto-range for manual control
+                plot_widget.enableAutoRange(axis='y', enable=False)
+                vb.enableAutoRange(axis='y', enable=False)
+            
+            # Store the properties in the plot widget for future reference
+            plot_widget.axis_properties = properties
+            
+            # Force immediate update of the display
+            plot_widget.update()
+            vb.updateAutoRange()
+            vb.updateViewRange()
+            
+            print(f"Applied axis properties to {plot_widget.chart_name}:")
+            print(f"  Range: {low_value} - {high_value}")
+            print(f"  Limit: {properties.get('limit_axis_range', False)}")
+            print(f"  Auto-adjust: {auto_adjust}")
+            
+            # Update SpO2 value labels to match the new scaled data
+            if plot_widget.chart_name.strip() == "SpO2" and hasattr(plot_widget, 'plot_curve'):
+                current_data = plot_widget.plot_curve.getData()
+                if current_data[0] is not None and len(current_data[0]) > 0:
+                    x_data, y_data = current_data
+                    # Recreate value labels with the scaled data positions
+                    self.create_spo2_markers_and_labels(plot_widget, x_data, y_data)
+                    print(f"Updated SpO2 value labels for new axis range: {low_value} - {high_value}")
+            
+            # Force the range to be applied again after a short delay to ensure it sticks
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(100, lambda: self.force_range_update(plot_widget, low_value, high_value))
+            
+        except Exception as e:
+            print(f"Error applying axis properties: {e}")
+            QMessageBox.critical(self, "Apply Error", 
+                               f"Failed to apply axis properties:\n{str(e)}")
+    
+    def force_range_update(self, plot_widget, low_value, high_value):
+        """Force the range update to ensure it sticks"""
+        try:
+            vb = plot_widget.getViewBox()
+            vb.setRange(yRange=[low_value, high_value], padding=0)
+            plot_widget.setYRange(low_value, high_value, padding=0)
+            plot_widget.update()
+            
+            # Update SpO2 value labels to ensure they follow the graph line
+            if plot_widget.chart_name.strip() == "SpO2" and hasattr(plot_widget, 'plot_curve'):
+                current_data = plot_widget.plot_curve.getData()
+                if current_data[0] is not None and len(current_data[0]) > 0:
+                    x_data, y_data = current_data
+                    # Recreate value labels to match current data positions
+                    self.create_spo2_markers_and_labels(plot_widget, x_data, y_data)
+                    print(f"Force updated SpO2 value labels for range: {low_value} - {high_value}")
+            
+            print(f"Force updated range for {plot_widget.chart_name}: {low_value} - {high_value}")
+        except Exception as e:
+            print(f"Error in force range update: {e}")
     
     def custom_mouse_release(self, event, plot_widget):
         """Custom mouse release handler for reliable selection completion"""

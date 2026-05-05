@@ -13,7 +13,7 @@ from PyQt5.QtCore import Qt, QDate
 from PyQt5.QtGui import QFont, QPixmap
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.utils.database_manager import DatabaseManager
 
 
