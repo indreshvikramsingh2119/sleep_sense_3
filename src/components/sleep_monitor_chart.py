@@ -44,10 +44,12 @@ class SleepMonitorChart(QWidget):
         self.hidden_graphs = {}  # Store hidden graph data: {name: {container, plot_curve, color, frequency, amplitude, offset, position}}
         self.graph_order = []  # Track original order of graphs: [name1, name2, ...]
         self.dragged_graph = None  # Track currently dragged graph
-        self.manual_drag_container = None  # Track manually dragging container
-        self.manual_drag_graph_name = None  # Track manually dragging graph name
-        self.manual_drag_start_height = None  # Store original height during manual drag
-        self.manual_drag_start_y = None  # Store starting Y position during manual drag
+        
+        # Resizing variables for drag handles
+        self.resizing_graph = None
+        self.resizing_graph_name = None
+        self.resize_start_height = None
+        self.resize_start_y = None
         
         # Timer to enforce fixed X-axis range
         self.range_enforcement_timer = QTimer()
@@ -58,9 +60,7 @@ class SleepMonitorChart(QWidget):
         self.spo2_full_data = None  # Store full SpO2 data (time, spo2)
         self.current_time_offset = 0  # Current starting time for window
         
-        # Expanded states management
-        self.expanded_states = {}  # Store expanded states of charts
-        
+                
         # SpO2 specific statistics
         self.spo2_statistics = {}  # Store calculated statistics
         
@@ -127,8 +127,7 @@ class SleepMonitorChart(QWidget):
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(8) # Increased spacing between chart containers
-        
+        main_layout.setSpacing(8) 
         # Chart Area
         chart_container = QWidget()
         chart_container.setObjectName("chartBackground")
@@ -322,7 +321,7 @@ class SleepMonitorChart(QWidget):
         filename = f"raw_data_{self.patient_id}_{safe_ts}.json"
         file_path = os.path.join(out_dir, filename)
 
-        # Generate representative signal arrays similar to the plotted traces
+        
         signals = [
             ("Body Position", "#3b82f6", 0.5, 10, 50),
             ("Airflow", "#8b5cf6", 0.3, 15, 50),
@@ -345,7 +344,7 @@ class SleepMonitorChart(QWidget):
         payload = {
             "patient_id": self.patient_id,
             "timestamp": timestamp_iso,
-            "channels": channels,
+            "channels": channels
         }
 
         with open(file_path, "w", encoding="utf-8") as f:
@@ -364,17 +363,22 @@ class SleepMonitorChart(QWidget):
             # Get the value from dropdown item data
             seconds = dropdown.itemData(index)
             print(f"Debug: on_time_window_changed called with index {index}, seconds {seconds}")
+            old_time_window = self.current_time_window
             self.current_time_window = seconds
             
-            # Reset time offset when changing window size
-            self.current_time_offset = 0
+            # Only reset time offset if this is the first time window change or if charts don't exist yet
+            if self.charts_layout.count() == 0:
+                self.current_time_offset = 0
+                print(f"Debug: First time window setup, calling update_charts_for_time_window")
+                self.update_charts_for_time_window(seconds)
+            else:
+                # Charts already exist, just refresh them with new time window
+                print(f"Debug: Charts exist, calling refresh_charts with new time window")
+                self.refresh_charts()
             
-            # Update charts with new time window
-            print(f"Debug: About to call update_charts_for_time_window with {seconds} seconds")
-            self.update_charts_for_time_window(seconds)
             self.restore_all_selections()
             self.update_time_position_label()
-            print(f"Time window changed to: {dropdown.itemText(index)} ({seconds} seconds)")
+            print(f"Time window changed from {old_time_window}s to {seconds}s (playing: {self.is_playing})")
     
     def navigate_backward(self):
         """Navigate backward in time"""
@@ -397,8 +401,8 @@ class SleepMonitorChart(QWidget):
         
         if self.spo2_full_data and len(self.spo2_full_data[1]) > 0:
             # Calculate maximum possible time based on data length
-            max_duration = len(self.spo2_full_data[1]) / 10.0  # 10 samples per second
-            # Move forward by the current time window
+            max_duration = len(self.spo2_full_data[1]) / 10.0  
+           
             new_offset = self.current_time_offset + self.current_time_window
             if new_offset < max_duration:
                 self.current_time_offset = new_offset
@@ -420,7 +424,7 @@ class SleepMonitorChart(QWidget):
         
         self.is_playing = True
         print(f"🎬 Timer starting... is_playing: {self.is_playing}")
-        self.playback_timer.start(100)  # 100ms = smooth playback (10Hz)
+        self.playback_timer.start(100)  
         print(f"🎬 Timer started - Timer active: {self.playback_timer.isActive()}")
         print("▶️ Playback started")
         
@@ -449,23 +453,23 @@ class SleepMonitorChart(QWidget):
             self.pause_playback()
             return
         
-        # Move forward in time (0.1 sec per tick = 10Hz sync)
+        # Move forward in time 
         self.current_time_offset += 0.1 * self.playback_speed
         
         # Calculate maximum time based on data length
-        max_time = len(self.spo2_full_data[1]) / 10.0  # 10Hz data
+        max_time = len(self.spo2_full_data[1]) / 10.0  
         
         # Check if we've reached the end
         if self.current_time_offset >= max_time:
             self.pause_playback()
             print(f"🎬 Playback completed at {max_time:.1f}s")
             return
-        
+            
         # Update all charts with new time position
         self.refresh_charts()
         self.update_time_position_label()
         
-        # Print progress for debugging (every 10 ticks = 1 second)
+        # Print progress for debugging 
         if int(self.current_time_offset * 10) % 10 == 0:
             progress_percent = (self.current_time_offset / max_time) * 100
             print(f"🎬 AUTO-SCROLL: {self.current_time_offset:.1f}s / {max_time:.1f}s ({progress_percent:.1f}%)")
@@ -502,20 +506,6 @@ class SleepMonitorChart(QWidget):
         """Refresh all charts with current time window and offset"""
         print(f"Debug: refresh_charts called with time_window={self.current_time_window}s, offset={self.current_time_offset}s")
         
-        # Save expanded states before refreshing
-        self.expanded_states = {}
-        for i in range(self.charts_layout.count()):
-            container = self.charts_layout.itemAt(i).widget()
-            if container and hasattr(container, 'plot_widget'):
-                chart_name = container.plot_widget.chart_name
-                current_height = container.height()
-                max_height = container.maximumHeight()
-                print(f"Debug: Chart '{chart_name}' - Height: {current_height}, MaxHeight: {max_height}")
-                # Check if container is expanded (height > 120 or max_height is very large)
-                if current_height > 120 or max_height > 1000:
-                    self.expanded_states[chart_name] = current_height
-                    print(f"Debug: Saved expanded state for '{chart_name}' with height {current_height}")
-        
         for i in range(self.charts_layout.count()):
             container = self.charts_layout.itemAt(i).widget()
             if container and hasattr(container, 'plot_widget'):
@@ -547,6 +537,10 @@ class SleepMonitorChart(QWidget):
                 
                 # Store reference for enforcement timer
                 plot_widget.fixed_range = [0, self.current_time_window]
+                
+                # Store current Y-axis range to preserve zoom settings
+                if not hasattr(plot_widget, 'zoom_y_range'):
+                    plot_widget.zoom_y_range = None
                 
                 # Update data for each chart
                 if chart_name.strip() == "SpO2":
@@ -581,14 +575,20 @@ class SleepMonitorChart(QWidget):
                             except TypeError:
                                 plot_widget.setRange(yRange=[low_value, high_value], padding=0)
                         else:
-                            # Dynamic SpO2 Y-axis adjustment (only if no custom properties)
-                            avg_spo2 = np.mean(y)
-                            if avg_spo2 > 95:
-                                # Adjust Y-axis to start from 90 when SpO2 is above 95
-                                new_y_min, new_y_max = 90, 100
+                          
+                            if plot_widget.zoom_y_range is not None:
+                                # Use zoomed range during playback
+                                new_y_min, new_y_max = plot_widget.zoom_y_range
+                                print(f"Preserving zoom range during playback: {new_y_min} - {new_y_max}")
                             else:
-                                # Use standard medical range
-                                new_y_min, new_y_max = 70, 100
+                                # Dynamic SpO2 Y-axis adjustment (only if no custom properties)
+                                avg_spo2 = np.mean(y)
+                                if avg_spo2 > 95:
+                                    # Adjust Y-axis to start from 90 when SpO2 is above 95
+                                    new_y_min, new_y_max = 90, 100
+                                else:
+                                    # Use standard medical range
+                                    new_y_min, new_y_max = 70, 100
                             
                             try:
                                 plot_widget.setYRange(new_y_min, new_y_max)
@@ -622,12 +622,10 @@ class SleepMonitorChart(QWidget):
                     
                     # Apply custom axis properties if they exist
                     if hasattr(plot_widget, 'axis_properties'):
-                        # Apply scaling first, then set the range
+                        
                         properties = plot_widget.axis_properties
                         low_value = properties.get('low_value', 35.0)
                         high_value = properties.get('high_value', 100.0)
-                        
-                        # Scale the data to fit within the custom range
                         y_min_orig = np.min(y)
                         y_max_orig = np.max(y)
                         y_range_orig = y_max_orig - y_min_orig
@@ -646,19 +644,7 @@ class SleepMonitorChart(QWidget):
                     
                     print(f"Updated {chart_name} with {time_points} points for {self.current_time_window}s window")
         
-        # Restore expanded states after refreshing
-        for i in range(self.charts_layout.count()):
-            container = self.charts_layout.itemAt(i).widget()
-            if container and hasattr(container, 'plot_widget'):
-                chart_name = container.plot_widget.chart_name
-                if chart_name in self.expanded_states:
-                    # Restore expanded state
-                    saved_height = self.expanded_states[chart_name]
-                    container.setMinimumHeight(saved_height)
-                    container.setMaximumHeight(16777215)  # Very large number (effectively no limit)
-                    container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-                    print(f"Debug: Restored expanded state for '{chart_name}' with height {saved_height}")
-        
+                
         # Render dynamic selections for current time window
         self.render_dynamic_selections()
         
@@ -667,6 +653,7 @@ class SleepMonitorChart(QWidget):
     
     def set_time_window(self, seconds):
         """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
+        print(f"🔍 DEBUG: set_time_window({seconds}) called in sleep_monitor_chart.py")
         # Update current_time_window variable
         self.current_time_window = seconds
         
@@ -679,28 +666,25 @@ class SleepMonitorChart(QWidget):
                     dropdown.setCurrentIndex(i)
                     break
             
+            # Check if charts exist before refreshing
+            chart_count = self.charts_layout.count()
+            print(f"Debug: set_time_window called with {seconds}s, charts exist: {chart_count > 0}, count: {chart_count}")
+            
             # Update charts with new time window (refresh data only, don't recreate charts)
-            self.refresh_charts()
-            self.restore_all_selections()
+            if chart_count > 0:
+                print(f"Debug: Calling refresh_charts from set_time_window")
+                self.refresh_charts()
+                self.restore_all_selections()
+            else:
+                print(f"Debug: No charts exist, calling update_charts_for_time_window instead")
+                self.update_charts_for_time_window(seconds)
+            
             print(f"Time window set to: {seconds} seconds")
 
     
     def update_charts_for_time_window(self, seconds):
         """Update chart data based on time window selection"""
         print(f"Debug: update_charts_for_time_window called with {seconds} seconds")
-        # Save expanded states before clearing
-        self.expanded_states = {}
-        for i in range(self.charts_layout.count()):
-            container = self.charts_layout.itemAt(i).widget()
-            if container and hasattr(container, 'plot_widget'):
-                chart_name = container.plot_widget.chart_name
-                current_height = container.height()
-                max_height = container.maximumHeight()
-                print(f"Debug: Chart '{chart_name}' - Height: {current_height}, MaxHeight: {max_height}")
-                # Check if container is expanded (height > 120 or max_height is very large)
-                if current_height > 120 or max_height > 1000:
-                    self.expanded_states[chart_name] = current_height
-                    print(f"Debug: Saved expanded state for '{chart_name}' with height {current_height}")
         
         # Clear existing charts
         for i in reversed(range(self.charts_layout.count())):
@@ -740,12 +724,10 @@ class SleepMonitorChart(QWidget):
             adjusted_freq = base_freq * frequency_factor
             chart = self.create_signal_chart(name, color, adjusted_freq, amp, offset)
             self.charts_layout.addWidget(chart, stretch=1)
-            # Track the original order
+          
             self.graph_order.append(name)
         
-        # Restore expanded states immediately after charts are created
-        self._delayed_restore_expanded_states()
-    
+            
     def create_status_bar(self):
         """Create bottom status bar with professional playback controls"""
         frame = QFrame()
@@ -771,6 +753,7 @@ class SleepMonitorChart(QWidget):
         controls_layout = QHBoxLayout(controls_container)
         controls_layout.setContentsMargins(8, 4, 8, 4)
         controls_layout.setSpacing(8)
+        
         
         # Play/Pause Button - Dashboard style
         self.play_pause_btn = QPushButton("▶ Play")
@@ -837,10 +820,10 @@ class SleepMonitorChart(QWidget):
         self.speed_combo = QComboBox()
         self.speed_combo.setObjectName("speedCombo")
         self.speed_combo.addItems(["0.5x", "1.0x", "2.0x", "4.0x"])
-        self.speed_combo.setCurrentIndex(1)  # Default to 1.0x
+        self.speed_combo.setCurrentIndex(1)  
         self.speed_combo.currentTextChanged.connect(self.change_playback_speed)
         self.speed_combo.setFixedHeight(22)
-        self.speed_combo.setMinimumWidth(80)  # Increased width for better visibility
+        self.speed_combo.setMinimumWidth(80)  
         self.speed_combo.setStyleSheet("""
             QComboBox {
                 background: #ffffff;
@@ -938,8 +921,6 @@ class SleepMonitorChart(QWidget):
             self.graph_order.append(name)
         
         print("DEBUG: All charts created in init_charts")
-        # Restore expanded states after charts are created with a delay
-        QTimer.singleShot(100, self._delayed_restore_expanded_states)
         # INITIAL VIEWBOX SYNC (Fix first-time rendering)
         QTimer.singleShot(150, self._initial_viewbox_sync)
     
@@ -961,40 +942,40 @@ class SleepMonitorChart(QWidget):
                 pw.repaint()
                 print(f"Initial ViewBox sync for {pw.chart_name}: {start} → {end}")
 
-    def _delayed_restore_expanded_states(self):
-        """Restore expanded states for charts after they are created"""
-        print("Debug: _delayed_restore_expanded_states called")
-        for i in range(self.charts_layout.count()):
-            container = self.charts_layout.itemAt(i).widget()
-            if container and hasattr(container, 'plot_widget'):
-                chart_name = container.plot_widget.chart_name
-                if chart_name in self.expanded_states:
-                    # Restore expanded state
-                    saved_height = self.expanded_states[chart_name]
-                    container.setMinimumHeight(saved_height)
-                    container.setMaximumHeight(16777215)  # Very large number (effectively no limit)
-                    container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-                    print(f"Debug: Restored expanded state for '{chart_name}' with height {saved_height}")
-    
+        
     def load_spo2_data(self, csv_path):
         """Load SpO2 data from CSV file and store full data for time window filtering"""
         try:
             # Read CSV file directly using pandas
             df = pd.read_csv(csv_path)
             
+            # Handle different column name formats
+            if 'Timestamp' in df.columns and 'SpO2 (%)' in df.columns:
+                # Use the actual column names from your CSV
+                timestamp_col = 'Timestamp'
+                spo2_col = 'SpO2 (%)'
+            elif 'timestamp' in df.columns and 'spo2' in df.columns:
+                # Use lowercase column names
+                timestamp_col = 'timestamp'
+                spo2_col = 'spo2'
+            else:
+                # Try to find the columns automatically
+                timestamp_col = df.columns[0]  # First column
+                spo2_col = df.columns[1]       # Second column
+            
             # Convert timestamp to datetime and calculate relative time in seconds
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df['timestamp'] = pd.to_datetime(df[timestamp_col])
             start_time = df['timestamp'].iloc[0]
             df['time_seconds'] = (df['timestamp'] - start_time).dt.total_seconds()
             
             # Extract time and SpO2 values
             time_data = df['time_seconds'].values
-            spo2_data = df['spo2'].values
+            spo2_data = df[spo2_col].values
             
             # Convert SpO2 data to numeric if it's not already
             spo2_data = pd.to_numeric(spo2_data, errors='coerce')
             
-            # Remove NaN values and check how many were removed
+       
             nan_count = np.sum(np.isnan(spo2_data))
             if nan_count > 0:
                 print(f"Warning: Found {nan_count} NaN values in SpO2 data, removing them")
@@ -1022,7 +1003,8 @@ class SleepMonitorChart(QWidget):
     
     def load_spo2_data_from_file(self):
         """Load SpO2 data using file dialog - can be called from UI"""
-        time_data, spo2_data = self.load_spo2_data()
+        csv_path = "/Users/ptr/Downloads/spo2_6hr_data.csv"
+        time_data, spo2_data = self.load_spo2_data(csv_path)
         if len(time_data) > 0:
             # Refresh charts to display new data
             self.refresh_charts()
@@ -1043,7 +1025,7 @@ class SleepMonitorChart(QWidget):
             if window_size >= 3:
                 # Create weights for weighted moving average (center-weighted)
                 weights = np.ones(window_size)
-                weights[window_size//2] = 2.0  # Center point gets more weight
+                weights[window_size//2] = 2.0  
                 weights = weights / weights.sum()
                 
                 # Apply convolution with 'valid' mode to prevent edge artifacts, then pad
@@ -1052,9 +1034,9 @@ class SleepMonitorChart(QWidget):
                 # Pad the smoothed data to match original length using original edge values
                 pad_size = (len(y_data) - len(y_smooth_valid)) // 2
                 y_smooth = np.concatenate([
-                    y_data[:pad_size],  # Keep original edge values
-                    y_smooth_valid,     # Use smoothed middle section
-                    y_data[-pad_size:]  # Keep original edge values
+                    y_data[:pad_size],  
+                    y_smooth_valid,     
+                    y_data[-pad_size:]  
                 ])
                 
                 return y_smooth
@@ -1083,7 +1065,7 @@ class SleepMonitorChart(QWidget):
         # Extract the data for this window
         window_spo2 = full_spo2[start_sample:end_sample]
         
-        # Create proper time axis based on 10Hz sampling (0, 0.1, 0.2, 0.3...)
+        
         num_samples = len(window_spo2)
         if num_samples == 0:
             return np.array([]), np.array([])
@@ -1120,8 +1102,8 @@ class SleepMonitorChart(QWidget):
         
         container = QWidget()
         container.setObjectName("signalChartContainer")
-        container.setMinimumHeight(120)  # Set default minimum height
-        container.setMaximumHeight(120)  # Set default maximum height to maintain exact size
+        container.setMinimumHeight(120)  
+        container.setMaximumHeight(120)  
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
         # Apply professional double-shaded medical styling to container
@@ -1135,6 +1117,7 @@ class SleepMonitorChart(QWidget):
                     stop: 1 #e2e8f0
                 );
                 border: 2px solid #cbd5e1;
+                border-bottom: 3px solid #000000;
                 border-radius: 8px;
                 margin: 2px;
             }
@@ -1147,6 +1130,7 @@ class SleepMonitorChart(QWidget):
                     stop: 1 #bae6fd
                 );
                 border: 2px solid #3b82f6;
+                border-bottom: 3px solid #000000;
                 box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
             }
         """)
@@ -1209,8 +1193,8 @@ class SleepMonitorChart(QWidget):
                 color: #1e40af;
             }
         """)
-        # Add click event handler to hide/show graph
-        label.mousePressEvent = lambda event: self.toggle_graph_visibility(name, container, label)
+        # COMPLETELY REMOVE click event handler - labels should never hide graphs
+        
         label_layout.addWidget(label)
         
         container_layout.addWidget(label_frame)
@@ -1446,57 +1430,93 @@ class SleepMonitorChart(QWidget):
         buttons_layout.setContentsMargins(0, 0, 0, 0)
         buttons_layout.setSpacing(4)
         
-        # Add expand button first
-        drag_btn = QPushButton("Expand")
-        drag_btn.setObjectName("dragButton")
-        drag_btn.setFixedSize(50, 18)  # Increased width to show full text
-        drag_btn.setStyleSheet("""
-            QPushButton#dragButton {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #dbeafe,
-                    stop: 1 #bfdbfe
-                );
-                border: 1px solid #3b82f6;
-                border-radius: 4px;
-                color: #1d4ed8;
-                font-size: 10px;
-                font-weight: 700;
-                padding: 1px;
-                text-align: center;
-            }
-            QPushButton#dragButton:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #bfdbfe,
-                    stop: 1 #93c5fd
-                );
-                border-color: #2563eb;
-                color: #1e40af;
-            }
-            QPushButton#dragButton:pressed {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #dbeafe,
-                    stop: 0.5 #93c5fd,
-                    stop: 1 #60a5fa
-                );
-                border-color: #1d4ed8;
-                color: #1e3a8a;
-            }
-        """)
-        drag_btn.clicked.connect(lambda: self.start_manual_drag(name, container))
-        buttons_layout.addWidget(drag_btn)
-        
-        # Add zoom frame to the right of expand button
+        # Add zoom frame (no expand button)
         buttons_layout.addWidget(zoom_frame)
         
-        # Add the buttons container to plot layout
+        # Add buttons container to plot layout
         plot_container_layout.addWidget(buttons_container)
         print(f"DEBUG: Added zoom frame to buttons container for {name}")
         print(f"DEBUG: Zoom frame size: {zoom_frame.size()}, visible: {zoom_frame.isVisible()}")
+        
+        # Set up bottom border drag functionality on container
+        container.drag_graph_name = name
+        container.is_resizing = False
+        container.resize_start_height = None
+        container.resize_start_y = None
+        
+        # Enable mouse tracking for container
+        container.setMouseTracking(True)
+        
+        # Override mouse events for container to handle bottom border dragging
+        original_mouse_press = container.mousePressEvent
+        original_mouse_move = container.mouseMoveEvent
+        original_mouse_release = container.mouseReleaseEvent 
+        def container_mouse_press(event):
+            # Check if mouse is near bottom edge (last 15 pixels for full-width resize area)
+            if event.button() == Qt.LeftButton:
+                mouse_y = event.pos().y()
+                container_height = container.height()
+                resize_margin = 15
+                bottom_edge = container_height - resize_margin
+                
+                if mouse_y >= bottom_edge:
+                    # Start resizing
+                    container.is_resizing = True
+                    container.resize_start_height = container_height
+                    container.resize_start_y = event.globalY()
+                    container.setCursor(Qt.SizeVerCursor)
+                    return  # Don't call original handler
+                else:
+                    # Call original mouse press if not resizing
+                    if original_mouse_press:
+                        original_mouse_press(event)
+        
+        def container_mouse_move(event):
+            if container.is_resizing and event.buttons() == Qt.LeftButton:
+                # Handle resizing
+                delta_y = event.globalY() - container.resize_start_y
+                new_height = container.resize_start_height + delta_y
+                
+                # Set constraints
+                min_height = 120  # Original height, prevent shrinking below this
+                max_height = 400
+                new_height = max(min_height, min(max_height, new_height))
+                
+                # Apply new height
+                container.setMinimumHeight(new_height)
+                container.setMaximumHeight(new_height)
+                container.updateGeometry()
+                self.charts_widget.updateGeometry()
+            else:
+                # Check if mouse is near bottom edge for cursor change
+                mouse_y = event.pos().y()
+                container_height = container.height()
+                resize_margin = 15
+                bottom_edge = container_height - resize_margin
+                
+                if mouse_y >= bottom_edge:
+                    container.setCursor(Qt.SizeVerCursor)
+                else:
+                    container.setCursor(Qt.ArrowCursor)
+                
+                # Call original mouse move if not resizing
+                if original_mouse_move:
+                    original_mouse_move(event)
+        
+        def container_mouse_release(event):
+            if container.is_resizing:
+                # Finish resizing
+                container.is_resizing = False
+                container.setCursor(Qt.ArrowCursor)
+            else:
+                # Call original mouse release if not resizing
+                if original_mouse_release:
+                    original_mouse_release(event)
+        
+        # Assign the mouse event handlers to container
+        container.mousePressEvent = container_mouse_press
+        container.mouseMoveEvent = container_mouse_move
+        container.mouseReleaseEvent = container_mouse_release
         
         # Plot Widget with custom ViewBox
         plot_widget = pg.PlotWidget(viewBox=CustomViewBox())
@@ -1604,9 +1624,8 @@ class SleepMonitorChart(QWidget):
         if name.strip() == "SpO2":
             # Get SpO2 data for current time window
             if self.spo2_full_data is None:
-                # Load data if not already loaded
-                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                csv_path = os.path.join(base_dir, "extracted_data", "spo2_6hr_10Hz_data (1).csv")
+                # Load data from the specific CSV file
+                csv_path = "/Users/ptr/Downloads/spo2_6hr_data.csv"
                 print(f"Loading SpO2 data from: {csv_path}")
                 self.load_spo2_data(csv_path)
             
@@ -1679,8 +1698,7 @@ class SleepMonitorChart(QWidget):
         container.setAcceptDrops(True)
         # Remove mouse press event to prevent graph hiding
         # container.mousePressEvent = lambda event: self.start_drag(event, name, container)
-        container.mouseMoveEvent = lambda event: self.continue_drag(event, name)
-        container.mouseReleaseEvent = lambda event: self.end_drag(event, name)
+        # Don't override mouse events here - resize functionality is already assigned above
         
         # Store plot widget reference in container for resize handling
         container.plot_widget = plot_widget
@@ -1868,102 +1886,7 @@ class SleepMonitorChart(QWidget):
                 hidden_dropdown.addItem("No hidden graphs")
                 hidden_dropdown.setEnabled(False)
     
-    def start_manual_drag(self, graph_name, container):
-        """Toggle manual drag resizing when drag button is clicked"""
-        # Check if this container is already in manual drag mode
-        if self.manual_drag_container == container:
-            # Toggle back to original size
-            self.reset_to_original_size(container, graph_name)
-        else:
-            # Start manual drag mode
-            # Remove maximum height constraint to allow resizing
-            container.setMaximumHeight(16777215)  # Very large number (effectively no limit)
-            container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            
-            # Set up manual drag tracking
-            self.manual_drag_container = container
-            self.manual_drag_graph_name = graph_name
-            self.manual_drag_start_height = container.height()
-            
-            # Enable mouse tracking for manual drag
-            container.setMouseTracking(True)
-            container.mousePressEvent = lambda event: self.manual_drag_mouse_press(event, graph_name, container)
-            container.mouseMoveEvent = lambda event: self.manual_drag_mouse_move(event, graph_name)
-            container.mouseReleaseEvent = lambda event: self.manual_drag_mouse_release(event, graph_name)
-            
-            # Force immediate expansion to larger size
-            container.setMinimumHeight(300)  # Set expanded height
-            container.updateGeometry()
-            
-            print(f"Manual drag mode enabled for graph '{graph_name}'")
-    
-    def reset_to_original_size(self, container, graph_name):
-        """Reset container to original size (120px)"""
-        # Reset to original size
-        container.setMinimumHeight(120)
-        container.setMaximumHeight(120)
-        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         
-        # Clear manual drag mode
-        if self.manual_drag_container == container:
-            container.setMouseTracking(False)
-            container.mousePressEvent = lambda event: self.start_drag(event, graph_name, container)
-            container.mouseMoveEvent = lambda event: self.continue_drag(event, graph_name)
-            container.mouseReleaseEvent = lambda event: self.end_drag(event, graph_name)
-            
-            # Clear manual drag tracking
-            self.manual_drag_container = None
-            self.manual_drag_graph_name = None
-            self.manual_drag_start_height = None
-            self.manual_drag_start_y = None
-        
-        print(f"Graph '{graph_name}' reset to original size (120px)")
-    
-    def manual_drag_mouse_press(self, event, graph_name, container):
-        """Handle mouse press during manual drag"""
-        if event.button() == Qt.LeftButton and self.manual_drag_container == container:
-            self.manual_drag_start_y = event.globalY()
-            container.setCursor(Qt.SizeVerCursor)
-            print(f"Started manual dragging graph '{graph_name}' from height {self.manual_drag_start_height}")
-    
-    def manual_drag_mouse_move(self, event, graph_name):
-        """Handle mouse move during manual drag"""
-        if self.manual_drag_container and event.buttons() == Qt.LeftButton and self.manual_drag_start_y is not None:
-            # Calculate new height
-            delta_y = event.globalY() - self.manual_drag_start_y
-            new_height = self.manual_drag_start_height + delta_y
-            
-            # Set minimum height constraint
-            min_height = 80
-            new_height = max(min_height, new_height)
-            
-            # Apply exact manual size
-            self.manual_drag_container.setMinimumHeight(new_height)
-            self.manual_drag_container.setMaximumHeight(new_height)
-            
-            # Force layout update
-            self.manual_drag_container.updateGeometry()
-            self.charts_widget.updateGeometry()
-    
-    def manual_drag_mouse_release(self, event, graph_name):
-        """Handle mouse release during manual drag"""
-        if self.manual_drag_container:
-            self.manual_drag_container.setCursor(Qt.ArrowCursor)
-            final_height = self.manual_drag_container.height()
-            print(f"Finished manual dragging graph '{graph_name}' to height {final_height}")
-            
-            # Reset to normal mouse events
-            self.manual_drag_container.setMouseTracking(False)
-            self.manual_drag_container.mousePressEvent = lambda event: self.start_drag(event, graph_name, self.manual_drag_container)
-            self.manual_drag_container.mouseMoveEvent = lambda event: self.continue_drag(event, graph_name)
-            self.manual_drag_container.mouseReleaseEvent = lambda event: self.end_drag(event, graph_name)
-            
-            # Clear manual drag tracking
-            self.manual_drag_container = None
-            self.manual_drag_graph_name = None
-            self.manual_drag_start_height = None
-            self.manual_drag_start_y = None
-    
     def start_drag(self, event, graph_name, container):
         """Start drag operation"""
         if event.button() == Qt.LeftButton:
@@ -2091,33 +2014,58 @@ class SleepMonitorChart(QWidget):
         new_y_min = center - new_range_size / 2
         new_y_max = center + new_range_size / 2
         
-        # Apply limits to keep within 0-100 range
-        if new_y_min < 0:
-            new_y_min = 0
-            new_y_max = new_range_size
-        elif new_y_max > 100:
-            new_y_max = 100
-            new_y_min = 100 - new_range_size
+        # Get chart name to apply proper limits
+        chart_name = getattr(plot_widget, 'chart_name', '')
+        
+        # Define medical standard Y-axis ranges for each signal type
+        y_axis_ranges = {
+            "Body Position": (0, 4),     
+            "Airflow": (-2, 2),        
+            "Snoring": (0, 100),       
+            "Thorax": (-100, 100),     
+            "Abdomen": (-100, 100),     
+            "SpO2": (70, 100),      
+            "Pulse": (30, 250),        
+            "Body Movement": (0, 100),   
+            "PR/HR": (30, 250)          
+        }
+        
+        # Get proper Y-axis limits for this chart
+        y_min_limit, y_max_limit = y_axis_ranges.get(chart_name.strip(), (0, 100))
+        
+        # Apply chart-specific limits
+        if new_y_min < y_min_limit:
+            new_y_min = y_min_limit
+            new_y_max = new_y_min + new_range_size
+        elif new_y_max > y_max_limit:
+            new_y_max = y_max_limit
+            new_y_min = y_max_limit - new_range_size
             
         try:
             plot_widget.setYRange(new_y_min, new_y_max)
+            # Store zoom range to persist during playback
+            plot_widget.zoom_y_range = (new_y_min, new_y_max)
+            print(f"Stored zoom range for {chart_name}: {new_y_min} - {new_y_max}")
         except TypeError:
             # Try alternative method for older pyqtgraph versions
             plot_widget.setRange(yRange=[new_y_min, new_y_max])
+            # Store zoom range to persist during playback
+            plot_widget.zoom_y_range = (new_y_min, new_y_max)
+            print(f"Stored zoom range for {chart_name}: {new_y_min} - {new_y_max}")
     
     def reset_zoom(self, plot_widget):
         """Reset zoom to original medical standard range"""
         # Define medical standard Y-axis ranges
         y_axis_ranges = {
-            "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
-            "Airflow": (-2, 2),         # Respiratory airflow in normalized units
-            "Snoring": (0, 100),        # Snoring intensity percentage
-            "Thorax": (-100, 100),      # Chest respiratory effort movement
-            "Abdomen": (-100, 100),     # Abdominal respiratory effort movement
-            "SpO2": (70, 100),          # Medical SpO2 range (70-100%) - extended for hypoxia
-            "Pulse": (30, 250),         # Pulse rate in BPM - extended range
-            "Body Movement": (0, 100),   # Movement intensity percentage
-            "PR/HR": (30, 250)          # Pulse/Heart Rate in BPM - extended range
+            "Body Position": (0, 4),   
+            "Airflow": (-2, 2),         
+            "Snoring": (0, 100),        
+            "Thorax": (-100, 100),     
+            "Abdomen": (-100, 100),     
+            "SpO2": (70, 100),          
+            "Pulse": (30, 250),         
+            "Body Movement": (0, 100),  
+            "PR/HR": (30, 250)          
         }
         
         # Get the chart name from the plot widget
@@ -2126,9 +2074,15 @@ class SleepMonitorChart(QWidget):
         
         try:
             plot_widget.setYRange(y_min, y_max)
+       
+            plot_widget.zoom_y_range = None
+            print(f"Reset zoom range for {chart_name}")
         except TypeError:
-            # Try alternative method for older pyqtgraph versions
+          
             plot_widget.setRange(yRange=[y_min, y_max])
+           
+            plot_widget.zoom_y_range = None
+            print(f"Reset zoom range for {chart_name}")
     
     def toggle_playback(self):
         """Toggle between play and pause"""
@@ -2146,10 +2100,10 @@ class SleepMonitorChart(QWidget):
             # Jump forward by current time window
             self.current_time = self.current_time.addSecs(self.current_time_window)
             
-            # ✅ UPDATE OFFSET
+            #  UPDATE OFFSET
             self.current_time_offset += self.current_time_window
             
-            # ✅ FORCE VIEWBOX UPDATE AND PLOT REDRAW
+            #  FORCE VIEWBOX UPDATE AND PLOT REDRAW
             for i in range(self.charts_layout.count()):
                 container = self.charts_layout.itemAt(i).widget()
                 if hasattr(container, 'plot_widget'):
@@ -2165,7 +2119,7 @@ class SleepMonitorChart(QWidget):
                     pw.repaint()
                     print(f"Updated ViewBox range to {start} → {end} for {pw.chart_name}")
             
-            # ✅ DELAYED OVERLAY RENDER (IMPORTANT)
+            # DELAYED OVERLAY RENDER (IMPORTANT)
             QTimer.singleShot(0, self.render_dynamic_selections)
             
             self.update_time_display()
@@ -2279,7 +2233,7 @@ class SleepMonitorChart(QWidget):
         
         # Get the actual displayed data (scaled if axis properties are applied)
         if hasattr(plot_widget, 'axis_properties'):
-            # Use scaled data positions when axis properties are applied
+            
             current_data = plot_widget.plot_curve.getData()
             if current_data[0] is not None and len(current_data[0]) > 0:
                 x_displayed, y_displayed = current_data
@@ -2301,24 +2255,24 @@ class SleepMonitorChart(QWidget):
                 
                 # Create text item with value
                 text_item = pg.TextItem(
-                    text=f"{int(original_y)}",  # Display original SpO2 value
-                    color=(255, 0, 0),  # Bright red color
-                    anchor=(0.5, 1.0)  # Bottom center anchor to position on top of line
+                    text=f"{int(original_y)}",  
+                    color=(255, 0, 0), 
+                    anchor=(0.5, 1.0)  
                 )
                 
                 # Set font for better visibility while maintaining positioning
                 from PyQt5.QtGui import QFont
                 font = QFont()
-                font.setPointSize(6)  # Smaller font to fit all labels
+                font.setPointSize(6)  
                 font.setBold(True)
                 text_item.setFont(font)
                 
                 # Position the text slightly above the displayed data point to sit on top
-                offset_above = 0.2  # Small offset to sit on top of the line
+                offset_above = 0.2  
                 text_item.setPos(x_pos, y_pos + offset_above)
                 
                 # Set anchor to bottom center to position on top of the line
-                text_item.setAnchor((0.5, 1.0))  # Bottom center anchor
+                text_item.setAnchor((0.5, 1.0))  
                 
                 # Add to plot and store reference
                 plot_widget.addItem(text_item)
@@ -2333,7 +2287,7 @@ class SleepMonitorChart(QWidget):
             if not widget_rect.contains(widget_pos):
                 return
             scene_pos = plot_widget.mapToScene(widget_pos)
-            # Debounce - prevent duplicate clicks
+            
             import time
             current_time = time.time()
             if current_time - self.last_click_time < 0.1:
@@ -2413,7 +2367,7 @@ class SleepMonitorChart(QWidget):
             return
         
         # Check if click is on y-axis area (left side of the plot)
-        y_axis_width = 60  # Approximate width of y-axis area in pixels
+        y_axis_width = 60  
         if widget_pos.x() <= y_axis_width:
             self.show_graph_image_menu(event.globalPos(), plot_widget)
             print(f"Right-click on y-axis detected for {plot_widget.chart_name}")
@@ -2460,10 +2414,10 @@ class SleepMonitorChart(QWidget):
     def save_graph_as_image(self, plot_widget, format_type):
         """Save individual graph as image"""
         try:
-            # Get the plot widget's view box
+            
             vb = plot_widget.getViewBox()
             
-            # Export the plot to an image
+            
             exporter = pg.exporters.ImageExporter(vb)
             
             # Generate filename with timestamp and graph name
@@ -2513,15 +2467,13 @@ class SleepMonitorChart(QWidget):
     def export_graph_hd(self, plot_widget):
         """Export graph in high resolution"""
         try:
-            # Get the plot widget's view box
+            
             vb = plot_widget.getViewBox()
             
-            # Export with high resolution settings
             exporter = pg.exporters.ImageExporter(vb)
             
-            # Set high resolution parameters
-            exporter.parameters()['width'] = 1920  # HD width
-            exporter.parameters()['height'] = 1080  # HD height
+            exporter.parameters()['width'] = 1920  
+            exporter.parameters()['height'] = 1080  
             
             # Generate filename
             from datetime import datetime
@@ -2577,10 +2529,10 @@ class SleepMonitorChart(QWidget):
             properties = {
                 'low_value': float(y_min),
                 'high_value': float(y_max),
-                'limit_axis_range': False,  # Default to False
+                'limit_axis_range': False,  
                 'limit_low_value': float(original_y_min),
                 'limit_high_value': float(original_y_max),
-                'auto_adjust': 'scale_to_fit'  # Default to scale_to_fit
+                'auto_adjust': 'scale_to_fit'  
             }
             
             return properties
@@ -2661,15 +2613,15 @@ class SleepMonitorChart(QWidget):
             # Disable auto-range completely to maintain manual control
             auto_adjust = properties.get('auto_adjust', 'scale_to_fit')
             if auto_adjust == 'disabled':
-                # Completely disable auto-range
+              
                 plot_widget.enableAutoRange(axis='y', enable=False)
                 vb.enableAutoRange(axis='y', enable=False)
             elif auto_adjust == 'center':
-                # Enable auto-range but we'll manually control it
+              
                 plot_widget.enableAutoRange(axis='y', enable=False)
                 vb.enableAutoRange(axis='y', enable=False)
-            else:  # scale_to_fit
-                # Disable auto-range for manual control
+            else:  
+               
                 plot_widget.enableAutoRange(axis='y', enable=False)
                 vb.enableAutoRange(axis='y', enable=False)
             
@@ -2695,7 +2647,7 @@ class SleepMonitorChart(QWidget):
                     self.create_spo2_markers_and_labels(plot_widget, x_data, y_data)
                     print(f"Updated SpO2 value labels for new axis range: {low_value} - {high_value}")
             
-            # Force the range to be applied again after a short delay to ensure it sticks
+            
             from PyQt5.QtCore import QTimer
             QTimer.singleShot(100, lambda: self.force_range_update(plot_widget, low_value, high_value))
             
@@ -2712,12 +2664,12 @@ class SleepMonitorChart(QWidget):
             plot_widget.setYRange(low_value, high_value, padding=0)
             plot_widget.update()
             
-            # Update SpO2 value labels to ensure they follow the graph line
+            
             if plot_widget.chart_name.strip() == "SpO2" and hasattr(plot_widget, 'plot_curve'):
                 current_data = plot_widget.plot_curve.getData()
                 if current_data[0] is not None and len(current_data[0]) > 0:
                     x_data, y_data = current_data
-                    # Recreate value labels to match current data positions
+                 
                     self.create_spo2_markers_and_labels(plot_widget, x_data, y_data)
                     print(f"Force updated SpO2 value labels for range: {low_value} - {high_value}")
             
@@ -2798,7 +2750,7 @@ class SleepMonitorChart(QWidget):
                     print(f"Selection finished: {distance} pixels")
                     self.show_selection_menu()
                 else:
-                    # Selection too small, clear it
+                
                     print("Selection too small, clearing")
                     self.clear_selection()
             else:
@@ -2853,7 +2805,7 @@ class SleepMonitorChart(QWidget):
         
         overlay.setGeometry(int(x_min), 0, int(width), self.current_selection_chart.height())
         overlay.setVisible(True)
-        overlay.raise_()  # Ensure overlay is on top
+        overlay.raise_()  
         overlay.setText("Selecting...")
         overlay.raise_()
         overlay.setStyleSheet("""
@@ -2882,8 +2834,8 @@ class SleepMonitorChart(QWidget):
             time_data, spo2_data = self.spo2_full_data
             
             # Convert selection positions to time values (QPointF objects)
-            start_time = self.selection_start.x()  # x-coordinate in data space
-            end_time = self.selection_end.x()      # x-coordinate in data space
+            start_time = self.selection_start.x()  
+            end_time = self.selection_end.x()     
             
             # Add current time offset to get absolute time
             start_absolute_time = start_time + self.current_time_offset
@@ -3009,11 +2961,9 @@ class SleepMonitorChart(QWidget):
         print(f"Cursor position: {global_cursor_pos}")
         print("Showing menu...")
         
-        # Make menu truly modal - it won't close on outside clicks
-        # Remove minimize and maximize buttons, keep only close button
-        # Use stronger flags to completely disable maximize
+      
         menu.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint | Qt.WindowStaysOnTopHint)
-        menu.setFixedSize(menu.sizeHint())  # Prevent resizing/maximizing
+        menu.setFixedSize(menu.sizeHint())  
         menu.setWindowModality(Qt.ApplicationModal)
         
         # Store menu reference to prevent garbage collection
@@ -3104,17 +3054,17 @@ class SleepMonitorChart(QWidget):
             'start_time': start_time_abs,
             'end_time': end_time_abs,
             'color': self.get_label_color(label_type),
-            'spo2_info': spo2_info  # Store SpO2 info for display
+            'spo2_info': spo2_info  
         }
 
         self.selection_labels[chart_name].append(selection_data)
         self.dynamic_selections[chart_name].append(dynamic_selection_data)
 
-        # Hide the temporary "Choose Label" overlay
+     
         if hasattr(plot_widget, 'selection_overlay'):
             plot_widget.selection_overlay.setVisible(False)
 
-        # Render all selections dynamically (including the new one)
+       
         self.render_dynamic_selections()
 
         print(f"Label '{label_type}' added (persistent)")
@@ -3188,6 +3138,11 @@ class SleepMonitorChart(QWidget):
     
     def delete_overlay(self, overlay, chart_name):
         """Delete selected overlay with data sync"""
+        # Check if overlay still exists before accessing it
+        if overlay is None or not hasattr(overlay, 'hide'):
+            print("Warning: Overlay already deleted or invalid")
+            return
+            
         # Get the overlay's unique identifier (stored in overlay's objectName or userData)
         overlay_id = getattr(overlay, 'selection_id', None)
         if overlay_id is None:
@@ -3198,8 +3153,12 @@ class SleepMonitorChart(QWidget):
             print("Warning: Could not identify overlay for deletion")
             return
 
-        overlay.hide()
-        overlay.deleteLater()
+        try:
+            overlay.hide()
+            overlay.deleteLater()
+        except RuntimeError as e:
+            print(f"Warning: Overlay already deleted - {e}")
+            return
 
         # Remove from data using the unique identifier
         removed_count = 0
@@ -3258,21 +3217,21 @@ class SleepMonitorChart(QWidget):
                     # Force the X-axis range to be exactly what we want
                     try:
                         current_range = plot_widget.getViewBox().viewRange()
-                        # Only print if range is not what we want (to avoid spam)
+                        # Only print if range is not what we want 
                         if current_range[0][0] != plot_widget.fixed_range[0] or current_range[0][1] != plot_widget.fixed_range[1]:
                             print(f"🔧 FIXING ViewBox {plot_widget.chart_name}: {current_range[0]} → {plot_widget.fixed_range}")
                         plot_widget.setXRange(plot_widget.fixed_range[0], plot_widget.fixed_range[1], padding=0)
                     except:
-                        pass  # Ignore errors during enforcement
+                        pass  
     
     def get_label_color(self, label_type):
         """Get color for label type"""
         colors = {
-            'OSA': 'rgba(239, 68, 68, 0.2)',    # Red
-            'CSA': 'rgba(59, 130, 246, 0.2)',   # Blue
-            'MSA': 'rgba(245, 158, 11, 0.2)',   # Yellow
-            'HSA': 'rgba(16, 185, 129, 0.2)',   # Green
-            'SATURATION': 'rgba(239, 68, 68, 0.2)'   # Red
+            'OSA': 'rgba(239, 68, 68, 0.2)',    
+            'CSA': 'rgba(59, 130, 246, 0.2)', 
+            'MSA': 'rgba(245, 158, 11, 0.2)',  
+            'HSA': 'rgba(16, 185, 129, 0.2)',   
+            'SATURATION': 'rgba(239, 68, 68, 0.2)'  
         }
         return colors.get(label_type, 'rgba(107, 114, 128, 0.2)')
     
@@ -3443,8 +3402,8 @@ class SleepMonitorChart(QWidget):
         
         # Use large overlay height for persistent selections
         plot_height = plot_widget.height()
-        overlay_height = max(60, plot_height)  # Minimum 60px or full plot height
-        y_position = 0  # Start from top for large appearance
+        overlay_height = max(60, plot_height)
+        y_position = 0  
 
         overlay.setGeometry(int(x_min), y_position, int(x_max - x_min), int(overlay_height))
     
@@ -3504,7 +3463,6 @@ class SleepMonitorChart(QWidget):
 
 {selection_data['spo2_info']}
 """
-                                
                                 overlay.setText(full_text)
                                 overlay.setStyleSheet(f"""
                                     background-color: {selection_data['color']};
@@ -3642,8 +3600,8 @@ Desaturations: {self.spo2_statistics['desaturation_events']}
         """Check if selection is active and show warning if needed"""
         if hasattr(self, 'selection_active') and self.selection_active:
             self.show_selection_warning()
-            return True   # 🚫 block 
-        return False      # ✅ allow 
+            return True 
+        return False      
     
     def resizeEvent(self, event):
         """Handle resize for watermark centering"""

@@ -155,7 +155,6 @@ class AmplitudeAxisPropertiesDialog(QDialog):
         self.disabled_radio = QRadioButton("Disabled")
         self.auto_adjust_button_group.addButton(self.disabled_radio, 0)
         auto_adjust_layout.addWidget(self.disabled_radio)
-        auto_adjust_layout.addWidget(self.auto_adjust_button_group)
         
         # Center radio button
         self.center_radio = QRadioButton("Center")

@@ -395,7 +395,7 @@ class ButtonFunctions:
         report_view_action.setStatusTip('Show report view')
         report_view_action.triggered.connect(self.view_report_view)
         view_menu.addAction(report_view_action)
-
+        
         
 
         signal_view_action = QAction('Signal view', self.parent)
@@ -415,6 +415,8 @@ class ButtonFunctions:
          
         # Tools Menu
         tools_menu = menubar.addMenu('Tools')
+
+
         
         settings_action = QAction('Settings', self.parent)
         settings_action.setShortcut('Ctrl+,')
@@ -1095,6 +1097,7 @@ class ReportSettingsDialog(QDialog):
         
         self.show_logo_checkbox = QCheckBox()
         logo_file_button = QPushButton("Select file")
+        
         
         logo_layout.addWidget(self.show_logo_checkbox)
         logo_layout.addWidget(logo_file_button)
