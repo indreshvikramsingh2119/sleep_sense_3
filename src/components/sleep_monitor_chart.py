@@ -3392,20 +3392,32 @@ class SleepMonitorChart(QWidget):
     def update_overlay_position(self, plot_widget, overlay, start_pos, end_pos):
         """Update overlay position based on current view"""
         vb = plot_widget.getViewBox()
-        p1 = vb.mapViewToScene(start_pos)
-        p2 = vb.mapViewToScene(end_pos)
+        from PyQt5.QtCore import QPointF
+        # Convert float time values to QPointF for mapping
+        start_point = QPointF(start_pos, 0)
+        end_point = QPointF(end_pos, 0)
+        p1 = vb.mapViewToScene(start_point)
+        p2 = vb.mapViewToScene(end_point)
         w1 = plot_widget.mapFromScene(p1)
         w2 = plot_widget.mapFromScene(p2)
 
-        x_min = min(w1.x(), w2.x())
-        x_max = max(w1.x(), w2.x())
+        # Ensure x_min and x_max are within the visible bounds of the plot_widget
+        # This prevents the overlay from being drawn outside the chart area
+        plot_width = plot_widget.width()
+        x_min = max(0, min(w1.x(), w2.x()))
+        x_max = min(plot_width, max(w1.x(), w2.x()))
         
         # Use large overlay height for persistent selections
         plot_height = plot_widget.height()
         overlay_height = max(60, plot_height)
         y_position = 0  
 
-        overlay.setGeometry(int(x_min), y_position, int(x_max - x_min), int(overlay_height))
+        # Only set geometry and make visible if the overlay has a valid width
+        if x_max > x_min:
+            overlay.setGeometry(int(x_min), int(y_position), int(x_max - x_min), int(overlay_height))
+            overlay.setVisible(True)
+        else:
+            overlay.setVisible(False)  # Hide if width is invalid
     
     def render_dynamic_selections(self):
         """Render selection overlays based on current time window and offset"""

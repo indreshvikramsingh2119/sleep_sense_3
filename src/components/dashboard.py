@@ -29,6 +29,10 @@ class SleepSenseDashboard(QMainWindow):
         self.logo_frame = None
         self.logo_label = None
         
+        # Global event navigation system
+        self.current_event_index = -1  # Global pointer for event navigation
+        self.all_events = []  # Master event array sorted chronologically
+        
         self.button_functions = ButtonFunctions(self)
         self.init_ui()
         self.load_stylesheet()
@@ -276,6 +280,165 @@ class SleepSenseDashboard(QMainWindow):
         divider2.setFixedWidth(1)
         controls_layout.addWidget(divider2)
         
+        # Screenshot Button
+        self.btn_screenshot = QPushButton("📷")
+        self.btn_screenshot.setObjectName("screenshotButton")
+        self.btn_screenshot.setFixedSize(30, 22)
+        self.btn_screenshot.setToolTip("Take Screenshot")
+        self.btn_screenshot.setStatusTip("Capture entire application window")
+        self.btn_screenshot.clicked.connect(self.take_screenshot)
+        self.btn_screenshot.setStyleSheet("""
+            QPushButton#screenshotButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f8fafc,
+                    stop: 1 #f1f5f9
+                );
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                color: #374151;
+                font-size: 14px;
+                font-weight: bold;
+                text-align: center;
+            }
+            QPushButton#screenshotButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #dbeafe,
+                    stop: 1 #bfdbfe
+                );
+                border: 1px solid #3b82f6;
+                color: #1e40af;
+            }
+            QPushButton#screenshotButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #f8fafc,
+                    stop: 0.5 #e2e8f0,
+                    stop: 1 #cbd5e1
+                );
+                border: 1px solid #94a3b8;
+                color: #1e293b;
+            }
+        """)
+        # Add vertical divider line
+        divider3 = QFrame()
+        divider3.setFrameShape(QFrame.VLine)
+        divider3.setFrameShadow(QFrame.Sunken)
+        divider3.setStyleSheet("""
+            QFrame {
+                background-color: #d1d5db;
+                color: #d1d5db;
+                border: none;
+                margin: 0 4px;
+            }
+        """)
+        divider3.setFixedWidth(1)
+        controls_layout.addWidget(divider3)
+
+        # Event Navigation Buttons
+        event_label = QLabel("Event Nav:")
+        event_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        controls_layout.addWidget(event_label)
+
+        self.btn_prev_event = QPushButton("◀ Prev")
+        self.btn_prev_event.setObjectName("eventNavButton")
+        self.btn_prev_event.setFixedHeight(22)
+        self.btn_prev_event.setMinimumWidth(60)
+        self.btn_prev_event.setToolTip("Go to Previous Event")
+        self.btn_prev_event.clicked.connect(self.navigate_to_previous_event)
+        self.btn_prev_event.setStyleSheet("""
+            QPushButton#eventNavButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f0f9ff,
+                    stop: 1 #e0f2fe
+                );
+                border: 1px solid #3b82f6;
+                border-radius: 4px;
+                color: #1e40af;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton#eventNavButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #dbeafe,
+                    stop: 0.5 #bfdbfe,
+                    stop: 1 #93c5fd
+                );
+                border: 1px solid #2563eb;
+                color: #1e3a8a;
+            }
+            QPushButton#eventNavButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #93c5fd,
+                    stop: 0.5 #60a5fa,
+                    stop: 1 #3b82f6
+                );
+                border: 1px solid #1d4ed8;
+                color: #ffffff;
+            }
+            QPushButton#eventNavButton:disabled {
+                background: #f3f4f6;
+                border: 1px solid #d1d5db;
+                color: #9ca3af;
+            }
+        """)
+        controls_layout.addWidget(self.btn_prev_event)
+
+        self.btn_next_event = QPushButton("Next ▶")
+        self.btn_next_event.setObjectName("eventNavButton")
+        self.btn_next_event.setFixedHeight(22)
+        self.btn_next_event.setMinimumWidth(60)
+        self.btn_next_event.setToolTip("Go to Next Event")
+        self.btn_next_event.clicked.connect(self.navigate_to_next_event)
+        self.btn_next_event.setStyleSheet("""
+            QPushButton#eventNavButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f0f9ff,
+                    stop: 1 #e0f2fe
+                );
+                border: 1px solid #3b82f6;
+                border-radius: 4px;
+                color: #1e40af;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton#eventNavButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #dbeafe,
+                    stop: 0.5 #bfdbfe,
+                    stop: 1 #93c5fd
+                );
+                border: 1px solid #2563eb;
+                color: #1e3a8a;
+            }
+            QPushButton#eventNavButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #93c5fd,
+                    stop: 0.5 #60a5fa,
+                    stop: 1 #3b82f6
+                );
+                border: 1px solid #1d4ed8;
+                color: #ffffff;
+            }
+            QPushButton#eventNavButton:disabled {
+                background: #f3f4f6;
+                border: 1px solid #d1d5db;
+                color: #9ca3af;
+            }
+        """)
+        controls_layout.addWidget(self.btn_next_event)
+
         # Screenshot Button
         self.btn_screenshot = QPushButton("📷")
         self.btn_screenshot.setObjectName("screenshotButton")
@@ -727,9 +890,11 @@ class SleepSenseDashboard(QMainWindow):
     
     def on_slider_changed(self, value):
         """Handle slider value change"""
+        print(f"DEBUG: on_slider_changed called with value={value}, current_event_index={self.current_event_index}")
+        
         if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
             # Calculate maximum time based on data length
-            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  
+            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0
             
             if max_duration > self.monitor_chart.current_time_window:
                 # Calculate time offset from slider value (0-100)
@@ -740,6 +905,12 @@ class SleepSenseDashboard(QMainWindow):
                 # Refresh charts and update labels
                 self.monitor_chart.refresh_charts()
                 self.update_slider_position()
+                
+                # Don't update current_event_index when manually moving slider
+                # Keep the index as is so event navigation buttons work correctly
+                # Just update button states based on existing events
+                self.all_events = self.get_all_events_sorted()
+                self.update_event_navigation_buttons()
                 
                 print(f"Dashboard slider changed to: {value}% (time: {self.monitor_chart.current_time_offset:.1f}s)")
     
@@ -975,19 +1146,26 @@ class SleepSenseDashboard(QMainWindow):
         self.patient_record_form.exec_()  # Modal dialog
     
     def open_medical_report(self):
-        """Open Medical Report Form as modal dialog"""
+        """Generate Medical Report and show in internal viewer"""
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
         
         print("Medical Report button clicked")
-        # Import the medical report form
-        from .medical_report_form import MedicalReportForm
+        # Import the medical report generation function and PDF viewer
+        from .medical_report_form import generate_sleep_report, PDFViewerWidget
         
-        # Create and show the medical report form as modal dialog
-        self.medical_report_form = MedicalReportForm(self)
-        self.medical_report_form.database_window = self.database_window
-        self.medical_report_form.exec_()  # Modal dialog
+        # Generate the report and show in internal viewer
+        try:
+            pdf_path = generate_sleep_report()
+            print("✅ Medical report generated successfully!")
+            
+            # Show PDF in internal viewer
+            self.pdf_viewer = PDFViewerWidget(pdf_path, self)
+            self.pdf_viewer.exec_()
+            
+        except Exception as e:
+            print(f"❌ Error generating medical report: {str(e)}")
     
     def load_patient_data(self, patient_data):
         """Load patient data from database and display in dashboard"""
@@ -1118,6 +1296,133 @@ class SleepSenseDashboard(QMainWindow):
                 print("✅ Auto-playback started - Full SpO2 graph should now be visible!")
         except Exception as e:
             print(f"❌ Error starting auto-playback: {e}")
+
+    def get_all_events_sorted(self):
+        """Gather all events from dynamic_selections and sort chronologically"""
+        all_events = []
+        
+        if hasattr(self.monitor_chart, 'dynamic_selections'):
+            # Iterate through all charts and their dynamic selections
+            for chart_name, selections in self.monitor_chart.dynamic_selections.items():
+                for selection in selections:
+                    # Create event object with essential information
+                    event = {
+                        'chart_name': chart_name,
+                        'label': selection.get('label', 'Unknown'),
+                        'start_time': selection.get('start_time', 0),
+                        'end_time': selection.get('end_time', 0),
+                        'color': selection.get('color', '#ff0000')
+                    }
+                    all_events.append(event)
+        
+        # Sort events by start_time (chronological order)
+        all_events.sort(key=lambda x: x['start_time'])
+        
+        return all_events
+
+    def navigate_to_next_event(self):
+        """Navigate to the next event that is NOT currently visible on screen"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
+        # Refresh the event list to get current events
+        self.all_events = self.get_all_events_sorted()
+        
+        if not self.all_events:
+            print("No events found for navigation")
+            return
+        
+        # Get current viewport range
+        viewport_start = self.monitor_chart.current_time_offset
+        viewport_end = viewport_start + self.monitor_chart.current_time_window
+        
+        # Find the first event that is OUTSIDE the current viewport (after viewport_end)
+        next_event_index = -1
+        for i, event in enumerate(self.all_events):
+            if event['start_time'] > viewport_end:
+                next_event_index = i
+                break
+        
+        if next_event_index != -1:
+            # Found an event outside viewport, navigate to it
+            self.current_event_index = next_event_index
+            self.go_to_event(self.current_event_index)
+            print(f"Navigated to next visible event (index {self.current_event_index}) at {self.all_events[next_event_index]['start_time']:.1f}s")
+        else:
+            print("No more events ahead - all remaining events are visible")
+
+    def navigate_to_previous_event(self):
+        """Navigate to the previous event that is NOT currently visible on screen"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
+        # Refresh the event list to get current events
+        self.all_events = self.get_all_events_sorted()
+        
+        if not self.all_events:
+            print("No events found for navigation")
+            return
+        
+        # Get current viewport range
+        viewport_start = self.monitor_chart.current_time_offset
+        viewport_end = viewport_start + self.monitor_chart.current_time_window
+        
+        # Find the first event that is OUTSIDE the current viewport (before viewport_start)
+        # Search in reverse order
+        prev_event_index = -1
+        for i in range(len(self.all_events) - 1, -1, -1):
+            event = self.all_events[i]
+            if event['end_time'] < viewport_start:
+                prev_event_index = i
+                break
+        
+        if prev_event_index != -1:
+            # Found an event outside viewport, navigate to it
+            self.current_event_index = prev_event_index
+            self.go_to_event(self.current_event_index)
+            print(f"Navigated to previous visible event (index {self.current_event_index}) at {self.all_events[prev_event_index]['start_time']:.1f}s")
+        else:
+            print("No more events behind - all previous events are visible")
+
+    def go_to_event(self, event_index):
+        """Navigate to a specific event by index - syncs all charts and time slider"""
+        if event_index < 0 or event_index >= len(self.all_events):
+            print(f"Invalid event index: {event_index}")
+            return
+        
+        event = self.all_events[event_index]
+        event_time = event['start_time']
+        
+        # Calculate viewport window size (center the event)
+        window_size = self.monitor_chart.current_time_window
+        # Position event at center of viewport (offset = event_time - window_size/2)
+        new_offset = max(0, event_time - window_size / 2)
+        
+        # Update monitor chart time offset
+        self.monitor_chart.current_time_offset = new_offset
+        
+        # Refresh all charts with new time position
+        self.monitor_chart.refresh_charts()
+        
+        # Sync time navigation slider
+        self.update_slider_position()
+        
+        # Update button states (enable/disable based on position)
+        self.update_event_navigation_buttons()
+        
+        print(f"Jumped to event '{event['label']}' at {event_time:.1f}s (offset: {new_offset:.1f}s)")
+
+    def update_event_navigation_buttons(self):
+        """Update event navigation button states based on current position"""
+        print(f"DEBUG update_event_navigation_buttons: all_events count={len(self.all_events)}, current_event_index={self.current_event_index}")
+        
+        # Always enable buttons regardless of events
+        # User wants buttons permanently enabled
+        self.btn_prev_event.setEnabled(True)
+        self.btn_next_event.setEnabled(True)
+        print(f"DEBUG: Both buttons enabled (permanently)")
 
     def auto_load_spo2_data(self):
         """Automatically load SpO2 data for playback testing"""

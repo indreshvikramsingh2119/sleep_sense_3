@@ -1,6 +1,9 @@
 # Sleep Sense Dashboard - PyQt5 Requirements
 
 PyQt5>=5.15.10
+PyQtWebEngine>=5.15.10
 pyqtgraph>=0.13.3
 numpy>=1.26.0
 pandas>=1.5.0
+reportlab>=4.0.0
+Pillow>=10.0.0
