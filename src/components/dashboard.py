@@ -6,7 +6,7 @@ import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea,
-    QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox
+    QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox, QCheckBox
 )
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont, QPixmap
@@ -28,7 +28,7 @@ class SleepSenseDashboard(QMainWindow):
         super().__init__()
         self.logo_frame = None
         self.logo_label = None
-        # create ButtonFunctions helper and attach to dashboard
+        
         self.button_functions = ButtonFunctions(self)
         self.init_ui()
         self.load_stylesheet()
@@ -87,7 +87,7 @@ class SleepSenseDashboard(QMainWindow):
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         
         content_widget = QWidget()
-        content_widget.setMinimumWidth(2000)  # Force minimum width to trigger horizontal scrollbar
+        content_widget.setMinimumWidth(2000)  
         content_layout = QHBoxLayout(content_widget)
         content_layout.setContentsMargins(16, 16, 16, 16)
         content_layout.setSpacing(16)
@@ -98,8 +98,8 @@ class SleepSenseDashboard(QMainWindow):
         # Left Panel - Patient Info
         patient_panel = QFrame()
         patient_panel.setObjectName("patientPanel")
-        patient_panel.setMinimumWidth(380)  # Further increased minimum width
-        patient_panel.setMaximumWidth(450) # Further increased maximum width
+        patient_panel.setMinimumWidth(380)  
+        patient_panel.setMaximumWidth(450) 
         patient_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         patient_layout = QVBoxLayout(patient_panel)
         patient_layout.setContentsMargins(2, 2, 2, 2)  # Reduced margins for more left shift
@@ -122,19 +122,22 @@ class SleepSenseDashboard(QMainWindow):
         # Auto-load SpO2 data for playback testing
         self.auto_load_spo2_data()
         
+        # Start playback automatically after a short delay to show full data
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(1000, self.start_auto_playback)
+        
         # Connect monitor chart reference to patient info for save functionality
         self.patient_info.monitor_chart = self.monitor_chart
         
         # Connect dashboard slider to chart navigation updates
         self.monitor_chart.time_position_updated.connect(self.update_slider_position)
         
-        # Set dashboard controls reference in chart
-        self.monitor_chart.set_dashboard_controls(self.time_window_dropdown, self.hidden_graphs_dropdown)
+        # Update button text to show initial count
+        self.graph_dropdown_button.setText("Graphs (9/9) ▼")
         
         # Connect dashboard controls to chart functionality
         self.time_window_dropdown.currentIndexChanged.connect(self.on_time_window_changed)
-        self.hidden_graphs_dropdown.currentIndexChanged.connect(self.restore_hidden_graph)
-        
+                
         chart_layout.addWidget(self.monitor_chart)
         
         # Add Time Navigation in chart panel (same size as graph containers)
@@ -142,9 +145,9 @@ class SleepSenseDashboard(QMainWindow):
         chart_layout.addWidget(time_slider_bar)
         
         splitter.addWidget(chart_panel)
-        splitter.setSizes([300, 1000]) # Initial sizes, will be adjusted by policies
-        splitter.setStretchFactor(0, 0) # Left panel takes its preferred size, doesn't stretch
-        splitter.setStretchFactor(1, 1) # Right panel takes all available extra space
+        splitter.setSizes([300, 1000])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1) 
         
         content_layout.addWidget(splitter)
         
@@ -152,9 +155,6 @@ class SleepSenseDashboard(QMainWindow):
         scroll_area.setWidget(content_widget)
         main_layout.addWidget(scroll_area)
         
-        # Time Slider Navigation Bar at Bottom - REMOVED (moved to chart panel)
-        
-        # Remove margins from main layout to allow full width
         main_layout.setContentsMargins(0, 0, 0, 0)
         
     def create_controls_container(self):
@@ -193,11 +193,9 @@ class SleepSenseDashboard(QMainWindow):
             ("5m", 300),
             ("10m", 600),
         ]
-        
         for label, value in time_windows:
             self.time_window_dropdown.addItem(label, value)
         
-        # Set default selection to 1m (index 2)
         self.time_window_dropdown.setCurrentIndex(2)
         
         controls_layout.addWidget(self.time_window_dropdown)
@@ -217,19 +215,51 @@ class SleepSenseDashboard(QMainWindow):
         divider.setFixedWidth(1)
         controls_layout.addWidget(divider)
         
-        # Hidden Graphs Dropdown
-        hidden_graphs_label = QLabel("Hidden Graphs:")
-        hidden_graphs_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
-        controls_layout.addWidget(hidden_graphs_label)
+        # Graph Selection Dropdown
+        graphs_label = QLabel("Graphs:")
+        graphs_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        controls_layout.addWidget(graphs_label)
         
-        self.hidden_graphs_dropdown = QComboBox()
-        self.hidden_graphs_dropdown.setObjectName("hiddenGraphsDropdown")
-        self.hidden_graphs_dropdown.setFixedHeight(22)
-        self.hidden_graphs_dropdown.setMinimumWidth(90)
-        self.hidden_graphs_dropdown.addItem("Select to restore...")
-        self.hidden_graphs_dropdown.setEnabled(False)
+        # Create dropdown button for graph selection
+        self.graph_dropdown_button = QPushButton("Select Graphs ▼")
+        self.graph_dropdown_button.setObjectName("graphDropdownButton")
+        self.graph_dropdown_button.setFixedHeight(22)
+        self.graph_dropdown_button.setMinimumWidth(100)
+        self.graph_dropdown_button.setStyleSheet("""
+            QPushButton#graphDropdownButton {
+                background-color: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 10px;
+                font-weight: 600;
+                color: #374151;
+                text-align: left;
+            }
+            QPushButton#graphDropdownButton:hover {
+                background-color: #f8fafc;
+                border-color: #9ca3af;
+            }
+            QPushButton#graphDropdownButton:pressed {
+                background-color: #e2e8f0;
+            }
+        """)
+        self.graph_dropdown_button.clicked.connect(self.show_graph_selection_menu)
         
-        controls_layout.addWidget(self.hidden_graphs_dropdown)
+        # Store graph visibility state
+        self.graph_visibility = {
+            "Body Position": True ,
+            "Airflow": True, 
+            "Snoring": True,
+            "Thorex": True,
+            "Abdomen": True,
+            "SpO2": True,
+            "Pulse": True,
+            "Body Movement": True,
+            "PR/HR)": True
+        }
+        
+        controls_layout.addWidget(self.graph_dropdown_button)
         
         # Add vertical divider line
         divider2 = QFrame()
@@ -301,34 +331,132 @@ class SleepSenseDashboard(QMainWindow):
         if hasattr(self, 'monitor_chart') and self.monitor_chart:
             # Get the value from dropdown item data
             seconds = self.time_window_dropdown.itemData(index)
-            print(f"Dashboard: Time window changed to: {self.time_window_dropdown.itemText(index)} ({seconds} seconds)")
+            print(f"Debug: Dashboard on_time_window_changed called with index {index}, seconds {seconds}")
             
             # Update the chart's time window
             self.monitor_chart.set_time_window(seconds)
+            print(f"Debug: Dashboard called set_time_window({seconds})")
     
-    def restore_hidden_graph(self, index):
-        """Handle hidden graphs dropdown change"""
+        
+    def show_graph_selection_menu(self):
+        """Show dropdown menu with checkboxes for graph selection"""
+        from PyQt5.QtWidgets import QMenu, QWidgetAction, QVBoxLayout
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                padding: 4px;
+                font-size: 11px;
+                color: #374151;
+                min-width: 150px;
+            }
+            QMenu::item {
+                padding: 4px 8px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #f3f4f6;
+            }
+        """)
+        
+        # Create a widget to hold checkboxes
+        checkbox_widget = QWidget()
+        checkbox_layout = QVBoxLayout(checkbox_widget)
+        checkbox_layout.setContentsMargins(4, 4, 4, 4)
+        checkbox_layout.setSpacing(2)
+        
+        # Add checkboxes for each graph
+        for graph_name in self.graph_visibility.keys():
+            # Use display name without trailing spaces for checkbox text
+            display_name = graph_name.rstrip()
+            checkbox = QCheckBox(display_name)
+            checkbox.setChecked(self.graph_visibility[graph_name])
+            checkbox.toggled.connect(lambda checked, name=graph_name: self.toggle_graph_visibility(name, checked))
+            checkbox.setStyleSheet("""
+                QCheckBox {
+                    font-size: 10px;
+                    color: #374151;
+                    spacing: 8px;
+                    padding: 3px;
+                    font-weight: 500;
+                }
+                QCheckBox::indicator {
+                    width: 16px;
+                    height: 16px;
+                    border: 2px solid #d1d5db;
+                    border-radius: 3px;
+                    background-color: #ffffff;
+                }
+                QCheckBox::indicator:hover {
+                    border-color: #9ca3af;
+                    background-color: #f8fafc;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #2563eb;
+                    border-color: #2563eb;
+                    image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTIuNSA2TDQuNSA5TDkuNSAzIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIgZmlsbC1ydWxlPSJldmVub2RkIi8+Cjwvc3ZnPg==);
+                }
+                QCheckBox::indicator:checked:hover {
+                    background-color: #1d4ed8;
+                    border-color: #1d4ed8;
+                }
+            """)
+            checkbox_layout.addWidget(checkbox)
+        
+        # Add the checkbox widget to the menu
+        action = QWidgetAction(self)
+        action.setDefaultWidget(checkbox_widget)
+        menu.addAction(action)
+        
+        # Show the menu below the button
+        button_rect = self.graph_dropdown_button.rect()
+        global_pos = self.graph_dropdown_button.mapToGlobal(button_rect.bottomLeft())
+        menu.exec_(global_pos)
+    
+    def toggle_graph_visibility(self, graph_name, checked):
+        """Toggle graph visibility based on checkbox state"""
+        self.graph_visibility[graph_name] = checked
+        
+        # Directly find and hide/show the chart container
         if hasattr(self, 'monitor_chart') and self.monitor_chart:
-            # Get the graph name from dropdown
-            graph_name = self.hidden_graphs_dropdown.itemText(index)
+            # Find the container for this graph
+            container = None
+            for i in range(self.monitor_chart.charts_layout.count()):
+                widget = self.monitor_chart.charts_layout.itemAt(i).widget()
+                if widget and hasattr(widget, 'plot_widget'):
+                    plot_widget = widget.plot_widget
+                    if hasattr(plot_widget, 'chart_name'):
+                        chart_name_actual = plot_widget.chart_name
+                        # Try exact match first, then try without trailing spaces
+                        if chart_name_actual == graph_name or chart_name_actual.strip() == graph_name.strip():
+                            container = widget
+                            break
             
-            # Check if graph exists in hidden graphs
-            if graph_name not in self.monitor_chart.hidden_graphs:
-                print(f"Dashboard: Graph '{graph_name}' not found in hidden graphs")
-                return
-            
-            print(f"Dashboard: Restoring hidden graph '{graph_name}'")
-            
-            # Call the chart's restore method
-            self.monitor_chart.restore_hidden_graph_from_dropdown(index)
+            if container:
+                if checked:
+                    container.show()
+                    print(f"Graph '{graph_name}' shown")
+                else:
+                    container.hide()
+                    print(f"Graph '{graph_name}' hidden")
+            else:
+                print(f"Graph '{graph_name}' not found")
+        
+        # Update button text to show selected count
+        selected_count = sum(1 for visible in self.graph_visibility.values() if visible)
+        self.graph_dropdown_button.setText(f"Graphs ({selected_count}/9) ▼")
     
+        
     def create_time_slider_bar(self):
         """Create time slider navigation bar with professional styling - same size as graph containers"""
         # Main container with same styling as graph containers
         main_container = QWidget()
         main_container.setObjectName("signalChartContainer")
-        main_container.setMinimumHeight(35)  # Slightly bigger
-        main_container.setMaximumHeight(35)  # Slightly bigger
+        main_container.setMinimumHeight(35) 
+        main_container.setMaximumHeight(35)
         main_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
         # Apply professional double-shaded medical styling to container
@@ -360,8 +488,8 @@ class SleepSenseDashboard(QMainWindow):
         
         # Inner layout for the container
         container_layout = QHBoxLayout(main_container)
-        container_layout.setContentsMargins(4, 3, 4, 3)  # Slightly bigger margins
-        container_layout.setSpacing(6) # Good spacing
+        container_layout.setContentsMargins(4, 3, 4, 3) 
+        container_layout.setSpacing(6) 
         
         # Time Position Label - smaller font
         time_label = QLabel("Time Nav:")
@@ -371,8 +499,8 @@ class SleepSenseDashboard(QMainWindow):
         # Left navigation button - with clear arrow
         self.slider_left_btn = QPushButton("◀")
         self.slider_left_btn.setObjectName("sliderNavButton")
-        self.slider_left_btn.setFixedHeight(20)  # Slightly bigger
-        self.slider_left_btn.setFixedWidth(28)   # Slightly bigger
+        self.slider_left_btn.setFixedHeight(20)  
+        self.slider_left_btn.setFixedWidth(28)   
         # Apply clear arrow styling
         self.slider_left_btn.setStyleSheet("""
             QPushButton#sliderNavButton {
@@ -419,7 +547,7 @@ class SleepSenseDashboard(QMainWindow):
         self.time_slider.setMinimum(0)
         self.time_slider.setMaximum(100)
         self.time_slider.setValue(0)
-        self.time_slider.setFixedHeight(20)  # Slightly bigger height
+        self.time_slider.setFixedHeight(20)  
         self.time_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
         # Apply custom styling to slider
@@ -474,8 +602,8 @@ class SleepSenseDashboard(QMainWindow):
         # Right navigation button - with clear arrow
         self.slider_right_btn = QPushButton("▶")
         self.slider_right_btn.setObjectName("sliderNavButton")
-        self.slider_right_btn.setFixedHeight(20)  # Slightly bigger
-        self.slider_right_btn.setFixedWidth(28)   # Slightly bigger
+        self.slider_right_btn.setFixedHeight(20)  
+        self.slider_right_btn.setFixedWidth(28)   
         # Apply clear arrow styling
         self.slider_right_btn.setStyleSheet("""
             QPushButton#sliderNavButton {
@@ -541,7 +669,7 @@ class SleepSenseDashboard(QMainWindow):
         
     def slider_navigate_backward(self):
         """Navigate backward using slider buttons"""
-        # Check if monitor chart has selection active and block if needed
+        
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
         
@@ -572,7 +700,7 @@ class SleepSenseDashboard(QMainWindow):
             # Move forward by step size
             self.monitor_chart.current_time_offset = min(max_offset, self.monitor_chart.current_time_offset + step_size)
             
-            # ✅ FORCE VIEWBOX UPDATE AND PLOT REDRAW
+            #  FORCE VIEWBOX UPDATE AND PLOT REDRAW
             for i in range(self.monitor_chart.charts_layout.count()):
                 container = self.monitor_chart.charts_layout.itemAt(i).widget()
                 if hasattr(container, 'plot_widget'):
@@ -588,7 +716,7 @@ class SleepSenseDashboard(QMainWindow):
                     pw.repaint()
                     print(f"Updated ViewBox range to {start} → {end} for {pw.chart_name}")
             
-            # ✅ DELAYED OVERLAY RENDER (IMPORTANT)
+            #  DELAYED OVERLAY RENDER (IMPORTANT)
             from PyQt5.QtCore import QTimer
             QTimer.singleShot(0, self.monitor_chart.render_dynamic_selections)
             
@@ -618,7 +746,7 @@ class SleepSenseDashboard(QMainWindow):
     def update_slider_position(self):
         """Update slider position based on current time offset"""
         if self.time_slider and hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
-            # Calculate maximum possible time based on data length
+          
             max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  
             
             # Calculate slider value (0-100) based on current position
@@ -641,7 +769,7 @@ class SleepSenseDashboard(QMainWindow):
             minutes = int((self.monitor_chart.current_time_offset % 3600) // 60)
             seconds = int(self.monitor_chart.current_time_offset % 60)
             self.slider_time_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
-    
+            
     def load_stylesheet(self):
         """Load QSS stylesheet"""
         
@@ -660,7 +788,6 @@ class SleepSenseDashboard(QMainWindow):
         
         self.setStyleSheet(stylesheet)
     
-        
     def create_professional_toolbar(self):
         """Create professional icon toolbar with grouped buttons"""
         toolbar = QToolBar("MainToolbar")
@@ -982,19 +1109,36 @@ class SleepSenseDashboard(QMainWindow):
         event_list_action.triggered.connect(self.button_functions.view_event_list)
         view_menu.addAction(event_list_action)
     
+    def start_auto_playback(self):
+        """Start playback automatically to show full SpO2 data"""
+        try:
+            if hasattr(self.monitor_chart, 'start_playback'):
+                print("🎬 Starting auto-playback to show full SpO2 data...")
+                self.monitor_chart.start_playback()
+                print("✅ Auto-playback started - Full SpO2 graph should now be visible!")
+        except Exception as e:
+            print(f"❌ Error starting auto-playback: {e}")
+
     def auto_load_spo2_data(self):
         """Automatically load SpO2 data for playback testing"""
         import os
         try:
-            # Try to load the sample SpO2 data file
-            csv_path = os.path.join(os.getcwd(), "extracted_data", "spo2_6hr_10Hz_data (1).csv")
+            # Load the user's specific SpO2 data file
+            csv_path = "/Users/ptr/Downloads/modified_spo2_97_99.csv"
             if os.path.exists(csv_path):
                 print(f"🎬 Auto-loading SpO2 data from: {csv_path}")
                 self.monitor_chart.load_spo2_data(csv_path)
                 print("✅ SpO2 data loaded successfully - Playback ready!")
             else:
-                print(f"⚠️ Sample data file not found: {csv_path}")
-                print("💡 Playback controls will work but need data to be loaded manually")
+                print(f"⚠️ Data file not found: {csv_path}")
+                # Fallback to sample data if available
+                sample_path = os.path.join(os.getcwd(), "extracted_data", "spo2_6hr_10Hz_data (1).csv")
+                if os.path.exists(sample_path):
+                    print(f"🎬 Loading sample SpO2 data from: {sample_path}")
+                    self.monitor_chart.load_spo2_data(sample_path)
+                    print("✅ Sample SpO2 data loaded successfully!")
+                else:
+                    print("💡 Playback controls will work but need data to be loaded manually")
         except Exception as e:
             print(f"❌ Error auto-loading SpO2 data: {e}")
             print("💡 Use File → Load Data to load SpO2 data for playback")

@@ -8,8 +8,6 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QFont
 
 from src.components.dashboard import SleepSenseDashboard
-
-## Testing Comment
    
 
 def main  ():
@@ -21,13 +19,14 @@ def main  ():
     font = QFont("Segoe UI", 10) 
     app.setFont(font)
     
-    # Create and show the main dashboard window
-    window = SleepSenseDashboard() 
+
+   
+    window = SleepSenseDashboard()
     window.show()
     
-    # Start the application event loop 
+   
     sys.exit(app.exec_())
-
+            
  
 if __name__ == '__main__':
     main()        
