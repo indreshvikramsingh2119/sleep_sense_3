@@ -5,7 +5,7 @@ Medical Grade PyQt5 Sleep Monitoring System
 
 import sys
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont 
 from PyQt5.QtCore import Qt
 
 from src.components.dashboard import SleepSenseDashboard

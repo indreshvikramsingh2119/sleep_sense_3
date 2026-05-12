@@ -575,15 +575,15 @@ class EventWindow(QDialog):
         """Get real-time data for the selected graph type"""
         # Medical standard Y-axis ranges
         y_axis_ranges = {
-            "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
-            "Airflow": (-2, 2),         # Respiratory airflow in normalized units
-            "Snoring": (0, 100),        # Snoring intensity percentage
-            "Thorax": (-100, 100),      # Chest respiratory effort movement
-            "Abdomen": (-100, 100),     # Abdominal respiratory effort movement
-            "SpO2": (70, 100),          # Medical SpO2 range (70-100%) - extended for hypoxia
-            "Pulse": (30, 250),         # Pulse rate in BPM - extended range
-            "Body Movement": (0, 100),   # Movement intensity percentage
-            "PR/HR": (30, 250)          # Pulse/Heart Rate in BPM - extended range
+            "Body Position": (0, 4),     
+            "Airflow": (-2, 2),       
+            "Snoring": (0, 100),        
+            "Thorax": (-100, 100),      
+            "Abdomen": (-100, 100),    
+            "SpO2": (70, 100),          
+            "Pulse": (30, 250),        
+            "Body Movement": (0, 100),   
+            "PR/HR": (30, 250)        
         }
         
         # Graph parameters adjusted for medical standard ranges
