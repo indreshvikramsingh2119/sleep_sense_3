@@ -266,8 +266,7 @@ class EventWindow(QDialog):
             "Abdomen",
             "SpO2",
             "Pulse",
-            "Body Movement",
-            "PR/HR"
+            "Body Movement"
         ]
         self.event_type_combo.addItems(self.graph_types)
         self.event_type_combo.setCurrentText("Airflow")  # Default to airflow like original
@@ -515,8 +514,7 @@ class EventWindow(QDialog):
             "Abdomen": (-100, 100),     # Abdominal respiratory effort movement
             "SpO2": (70, 100),          # Medical SpO2 range (70-100%) - extended for hypoxia
             "Pulse": (30, 250),         # Pulse rate in BPM - extended range
-            "Body Movement": (0, 100),   # Movement intensity percentage
-            "PR/HR": (30, 250)          # Pulse/Heart Rate in BPM - extended range
+            "Body Movement": (0, 100)   # Movement intensity percentage
         }
         
         # Dynamic SpO2 Y-axis adjustment
@@ -575,15 +573,14 @@ class EventWindow(QDialog):
         """Get real-time data for the selected graph type"""
         # Medical standard Y-axis ranges
         y_axis_ranges = {
-            "Body Position": (0, 4),     
-            "Airflow": (-2, 2),       
-            "Snoring": (0, 100),        
-            "Thorax": (-100, 100),      
-            "Abdomen": (-100, 100),    
-            "SpO2": (70, 100),          
-            "Pulse": (30, 250),        
-            "Body Movement": (0, 100),   
-            "PR/HR": (30, 250)        
+            "Body Position": (0, 4),
+            "Airflow": (-2, 2),
+            "Snoring": (0, 100),
+            "Thorax": (-100, 100),
+            "Abdomen": (-100, 100),
+            "SpO2": (70, 100),
+            "Pulse": (30, 250),
+            "Body Movement": (0, 100)
         }
         
         # Graph parameters adjusted for medical standard ranges
@@ -595,8 +592,7 @@ class EventWindow(QDialog):
             "Abdomen": {"freq": 0.1, "amp": 100, "offset": 0, "range": y_axis_ranges["Abdomen"], "color": "#10b981"},
             "SpO2": {"freq": 1.5, "amp": 15, "offset": 85, "range": y_axis_ranges["SpO2"], "color": "#06b6d4"},
             "Pulse": {"freq": 0.1, "amp": 60, "offset": 140, "range": y_axis_ranges["Pulse"], "color": "#f97316"},
-            "Body Movement": {"freq": 0.1, "amp": 50, "offset": 50, "range": y_axis_ranges["Body Movement"], "color": "#8b5cf6"},
-            "PR/HR": {"freq": 0.1, "amp": 60, "offset": 140, "range": y_axis_ranges["PR/HR"], "color": "#5c61f6"}
+            "Body Movement": {"freq": 0.1, "amp": 50, "offset": 50, "range": y_axis_ranges["Body Movement"], "color": "#8b5cf6"}
         }
         
         params = graph_params.get(graph_type, graph_params["Airflow"])
@@ -695,14 +691,6 @@ class EventWindow(QDialog):
                     base_data[start_idx:end_idx] = params["offset"] + params["amp"] * np.random.random()
             return np.clip(base_data, params["range"][0], params["range"][1])
             
-        elif graph_type == "PR/HR":
-            # Pulse rate / Heart rate
-            base_pr = params["offset"]
-            pr_variability = params["amp"] * 0.05 * np.sin(2 * np.pi * 0.1 * time_points)
-            noise = np.random.normal(0, params["amp"] * 0.02, len(time_points))
-            pr_data = base_pr + pr_variability + noise
-            return np.clip(pr_data, params["range"][0], params["range"][1])
-            
         else:
             # Default sinusoidal pattern
             default_data = params["amp"] * np.sin(2 * np.pi * params["freq"] * time_points) + params["offset"]
@@ -718,8 +706,7 @@ class EventWindow(QDialog):
             "Abdomen": "#10b981",
             "SpO2": "#06b6d4",
             "Pulse": "#f97316",
-            "Body Movement": "#8b5cf6",
-            "PR/HR": "#5c61f6"
+            "Body Movement": "#8b5cf6"
         }
         return color_map.get(graph_type, "#3498db")
     
@@ -733,8 +720,7 @@ class EventWindow(QDialog):
             "Abdomen": ("Effort", "AU"),
             "SpO2": ("SpO2", "%"),
             "Pulse": ("Pulse", "bpm"),
-            "Body Movement": ("Movement", "AU"),
-            "PR/HR": ("Heart Rate", "bpm")
+            "Body Movement": ("Movement", "AU")
         }
         return label_map.get(graph_type, ("Signal", "AU"))
         
@@ -763,7 +749,7 @@ class EventWindow(QDialog):
             threshold = 22  # Movement threshold for events
             event_mask = data > threshold
             
-        elif graph_type == "Pulse" or graph_type == "PR/HR":
+        elif graph_type == "Pulse":
             # Detect bradycardia/tachycardia events
             threshold_low = 50
             threshold_high = 100
@@ -915,13 +901,6 @@ class EventWindow(QDialog):
                 ("No movement", "Movement"),
                 ("Restlessness", "Movement"),
                 ("Periodic movement", "Movement")
-            ],
-            "PR/HR": [
-                ("Bradycardia", "PR/HR"),
-                ("Tachycardia", "PR/HR"),
-                ("Normal HR", "PR/HR"),
-                ("Arrhythmia", "PR/HR"),
-                ("HR variability", "PR/HR")
             ]
         }
         

@@ -12,6 +12,8 @@ from src.components.dashboard import SleepSenseDashboard
    
 
 def main  ():   
+
+    
     """Main function to run the Sleep Sense Dashboard application"""
     # Set Qt attributes for WebEngine support
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
@@ -23,7 +25,7 @@ def main  ():
     font = QFont("Segoe UI", 10) 
     app.setFont(font)
     
-
+  
    
     window = SleepSenseDashboard()
     window.show()
@@ -33,11 +35,11 @@ def main  ():
             
  
 if __name__ == '__main__':
-    main()        
+    main()          
     
          
    
-
+    
 
 
 
@@ -49,4 +51,8 @@ if __name__ == '__main__':
 
 
      
-        
+              
+
+
+
+              

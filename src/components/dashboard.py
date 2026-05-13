@@ -123,8 +123,8 @@ class SleepSenseDashboard(QMainWindow):
         self.monitor_chart.set_patient_id("--------")
         self.monitor_chart.raw_data_saved.connect(self.patient_info.add_saved_raw_file)
         
-        # Auto-load SpO2 data for playback testing
-        self.auto_load_spo2_data()
+        # Auto-load PSG data from CSV file
+        self.auto_load_psg_data()
         
         # Start playback automatically after a short delay to show full data
         from PyQt5.QtCore import QTimer
@@ -259,8 +259,7 @@ class SleepSenseDashboard(QMainWindow):
             "Abdomen": True,
             "SpO2": True,
             "Pulse": True,
-            "Body Movement": True,
-            "PR/HR)": True
+            "Body Movement": True
         }
         
         controls_layout.addWidget(self.graph_dropdown_button)
@@ -305,7 +304,7 @@ class SleepSenseDashboard(QMainWindow):
             QPushButton#screenshotButton:hover {
                 background: qlineargradient(
                     x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
+                      stop: 0 #ffffff,
                     stop: 0.5 #dbeafe,
                     stop: 1 #bfdbfe
                 );
@@ -342,6 +341,54 @@ class SleepSenseDashboard(QMainWindow):
         event_label = QLabel("Event Nav:")
         event_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
         controls_layout.addWidget(event_label)
+
+        self.btn_first_event = QPushButton("⏮ First")
+        self.btn_first_event.setObjectName("eventNavButton")
+        self.btn_first_event.setFixedHeight(22)
+        self.btn_first_event.setMinimumWidth(70)
+        self.btn_first_event.setToolTip("Go to First Event")
+        self.btn_first_event.clicked.connect(self.navigate_to_first_event)
+        self.btn_first_event.setStyleSheet("""
+            QPushButton#eventNavButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f0f9ff,
+                    stop: 1 #e0f2fe
+                );
+                border: 1px solid #3b82f6;
+                border-radius: 4px;
+                color: #1e40af;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton#eventNavButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #dbeafe,
+                    stop: 0.5 #bfdbfe,
+                    stop: 1 #93c5fd
+                );
+                border: 1px solid #2563eb;
+                color: #1e3a8a;
+            }
+            QPushButton#eventNavButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #93c5fd,
+                    stop: 0.5 #60a5fa,
+                    stop: 1 #3b82f6
+                );
+                border: 1px solid #1d4ed8;
+                color: #ffffff;
+            }
+            QPushButton#eventNavButton:disabled {
+                background: #f3f4f6;
+                border: 1px solid #d1d5db;
+                color: #9ca3af;
+            }
+        """)
+        controls_layout.addWidget(self.btn_first_event)
 
         self.btn_prev_event = QPushButton("◀ Prev")
         self.btn_prev_event.setObjectName("eventNavButton")
@@ -438,6 +485,54 @@ class SleepSenseDashboard(QMainWindow):
             }
         """)
         controls_layout.addWidget(self.btn_next_event)
+
+        self.btn_last_event = QPushButton("Last ⏭")
+        self.btn_last_event.setObjectName("eventNavButton")
+        self.btn_last_event.setFixedHeight(22)
+        self.btn_last_event.setMinimumWidth(70)
+        self.btn_last_event.setToolTip("Go to Last Event")
+        self.btn_last_event.clicked.connect(self.navigate_to_last_event)
+        self.btn_last_event.setStyleSheet("""
+            QPushButton#eventNavButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f0f9ff,
+                    stop: 1 #e0f2fe
+                );
+                border: 1px solid #3b82f6;
+                border-radius: 4px;
+                color: #1e40af;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton#eventNavButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #dbeafe,
+                    stop: 0.5 #bfdbfe,
+                    stop: 1 #93c5fd
+                );
+                border: 1px solid #2563eb;
+                color: #1e3a8a;
+            }
+            QPushButton#eventNavButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #93c5fd,
+                    stop: 0.5 #60a5fa,
+                    stop: 1 #3b82f6
+                );
+                border: 1px solid #1d4ed8;
+                color: #ffffff;
+            }
+            QPushButton#eventNavButton:disabled {
+                background: #f3f4f6;
+                border: 1px solid #d1d5db;
+                color: #9ca3af;
+            }
+        """)
+        controls_layout.addWidget(self.btn_last_event)
 
         # Screenshot Button
         self.btn_screenshot = QPushButton("📷")
@@ -1352,6 +1447,24 @@ class SleepSenseDashboard(QMainWindow):
         else:
             print("No more events ahead - all remaining events are visible")
 
+    def navigate_to_first_event(self):
+        """Navigate to the first event in the data"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
+        # Refresh the event list to get current events
+        self.all_events = self.get_all_events_sorted()
+        
+        if not self.all_events:
+            print("No events found for navigation")
+            return
+        
+        # Navigate to first event (index 0)
+        self.current_event_index = 0
+        self.go_to_event(self.current_event_index)
+        print(f"Navigated to first event (index {self.current_event_index}) at {self.all_events[0]['start_time']:.1f}s")
+
     def navigate_to_previous_event(self):
         """Navigate to the previous event that is NOT currently visible on screen"""
         # Check if monitor chart has selection active and block if needed
@@ -1385,6 +1498,24 @@ class SleepSenseDashboard(QMainWindow):
             print(f"Navigated to previous visible event (index {self.current_event_index}) at {self.all_events[prev_event_index]['start_time']:.1f}s")
         else:
             print("No more events behind - all previous events are visible")
+
+    def navigate_to_last_event(self):
+        """Navigate to the last event in the data"""
+        # Check if monitor chart has selection active and block if needed
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+        
+        # Refresh the event list to get current events
+        self.all_events = self.get_all_events_sorted()
+        
+        if not self.all_events:
+            print("No events found for navigation")
+            return
+        
+        # Navigate to last event (index len-1)
+        self.current_event_index = len(self.all_events) - 1
+        self.go_to_event(self.current_event_index)
+        print(f"Navigated to last event (index {self.current_event_index}) at {self.all_events[-1]['start_time']:.1f}s")
 
     def go_to_event(self, event_index):
         """Navigate to a specific event by index - syncs all charts and time slider"""
@@ -1420,32 +1551,27 @@ class SleepSenseDashboard(QMainWindow):
         
         # Always enable buttons regardless of events
         # User wants buttons permanently enabled
+        self.btn_first_event.setEnabled(True)
         self.btn_prev_event.setEnabled(True)
         self.btn_next_event.setEnabled(True)
-        print(f"DEBUG: Both buttons enabled (permanently)")
+        self.btn_last_event.setEnabled(True)
+        print(f"DEBUG: All navigation buttons enabled (permanently)")
 
-    def auto_load_spo2_data(self):
-        """Automatically load SpO2 data for playback testing"""
+    def auto_load_psg_data(self):
+        """Automatically load PSG data from CSV file"""
         import os
         try:
-            # Load the user's specific SpO2 data file
-            csv_path = "/Users/ptr/Downloads/modified_spo2_97_99.csv"
+            # Load the PSG data file with all signals
+            csv_path = os.path.join(os.getcwd(), "extracted_data", "human.data.csv")
             if os.path.exists(csv_path):
-                print(f"🎬 Auto-loading SpO2 data from: {csv_path}")
-                self.monitor_chart.load_spo2_data(csv_path)
-                print("✅ SpO2 data loaded successfully - Playback ready!")
+                print(f"🎬 Auto-loading PSG data from: {csv_path}")
+                self.monitor_chart.load_psg_data(csv_path)
+                print("✅ PSG data loaded successfully - Playback ready!")
             else:
-                print(f"⚠️ Data file not found: {csv_path}")
-                # Fallback to sample data if available
-                sample_path = os.path.join(os.getcwd(), "extracted_data", "spo2_6hr_10Hz_data (1).csv")
-                if os.path.exists(sample_path):
-                    print(f"🎬 Loading sample SpO2 data from: {sample_path}")
-                    self.monitor_chart.load_spo2_data(sample_path)
-                    print("✅ Sample SpO2 data loaded successfully!")
-                else:
-                    print("💡 Playback controls will work but need data to be loaded manually")
+                print(f"⚠️ PSG data file not found: {csv_path}")
+                print("💡 Use File → Load Data to load PSG data for playback")
         except Exception as e:
-            print(f"❌ Error auto-loading SpO2 data: {e}")
-            print("💡 Use File → Load Data to load SpO2 data for playback")
+            print(f"❌ Error auto-loading PSG data: {e}")
+            print("💡 Use File → Load Data to load PSG data for playback")
 
 

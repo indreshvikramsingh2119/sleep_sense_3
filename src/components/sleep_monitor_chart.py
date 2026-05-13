@@ -10,6 +10,7 @@ import json
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from scipy.signal import savgol_filter
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog, QApplication, QDialog
@@ -59,6 +60,7 @@ class SleepMonitorChart(QWidget):
         
         # Time window data management
         self.spo2_full_data = None  # Store full SpO2 data (time, spo2)
+        self.psg_full_data = None  # Store full PSG data for all signals
         self.current_time_offset = 0  # Current starting time for window
         
                 
@@ -332,7 +334,6 @@ class SleepMonitorChart(QWidget):
             ("SpO2", "#06b6d4", 1.5, 12, 50),
             ("Pulse", "#f97316", 0.0, 0, 30),
             ("Body Movement", "#8b5cf6", 0.1, 5, 20),
-            ("PR/HR", "#5c61f6", 0.1, 5, 20),
         ]
 
         time_points = 1000
@@ -425,7 +426,7 @@ class SleepMonitorChart(QWidget):
         
         self.is_playing = True
         print(f"🎬 Timer starting... is_playing: {self.is_playing}")
-        self.playback_timer.start(100)  
+        self.playback_timer.start(50)  
         print(f"🎬 Timer started - Timer active: {self.playback_timer.isActive()}")
         print("▶️ Playback started")
         
@@ -577,7 +578,7 @@ class SleepMonitorChart(QWidget):
                     x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
                     if len(x) > 0 and len(y) > 0:
                         # Update normal line plot
-                        plot_widget.plot_curve.setData(x, y)
+                        plot_widget.plot_curve.setData(x, y, connect='finite')
                         # Ensure no fill for SpO2 graph
                         plot_widget.plot_curve.opts['fill'] = None
                         
@@ -596,7 +597,7 @@ class SleepMonitorChart(QWidget):
                             if y_range_orig > 0:
                                 y_range_new = high_value - low_value
                                 y_scaled = ((y - y_min_orig) / y_range_orig) * y_range_new + low_value
-                                plot_widget.plot_curve.setData(x, y_scaled)
+                                plot_widget.plot_curve.setData(x, y_scaled, connect='finite')
                                 print(f"Scaled SpO2 data from {y_min_orig:.2f}-{y_max_orig:.2f} to {low_value:.2f}-{high_value:.2f}")
                             
                             # Set the range
@@ -640,15 +641,25 @@ class SleepMonitorChart(QWidget):
                                 plot_widget.value_labels = []
                             print(f"Removed SpO2 value labels for {self.current_time_window}s time window")
                 else:
-                    # Update simulated data for ALL other signals
-                    time_points = int(self.current_time_window * 10)
-                    x = np.linspace(0, self.current_time_window, time_points)
-                    freq = plot_widget.graph_frequency
-                    amp = plot_widget.graph_amplitude
-                    offset = plot_widget.graph_offset
-                    y = np.sin(x * freq * 2 * np.pi) * amp + offset + (np.random.rand(time_points) - 0.5) * amp * 0.1
-                    y = self.smooth_data(x, y, window_size=5)
-                    plot_widget.plot_curve.setData(x, y)
+                    # Try to use real PSG data first
+                    x, y = self.get_signal_data_for_window(chart_name, self.current_time_window, self.current_time_offset)
+                    
+                    if len(x) > 0 and len(y) > 0:
+                        # Use real data from CSV
+                        plot_widget.plot_curve.setData(x, y, connect='finite')
+                        print(f"Updated {chart_name} with real data: {len(x)} points")
+                    else:
+                        # Fallback to simulated data if real data not available
+                        time_points = int(self.current_time_window * 10)
+                        x = np.linspace(0, self.current_time_window, time_points)
+                        freq = plot_widget.graph_frequency
+                        amp = plot_widget.graph_amplitude
+                        offset = plot_widget.graph_offset
+                        # Remove random noise for stable rendering
+                        y = np.sin(x * freq * 2 * np.pi) * amp + offset
+                        y = self.smooth_data(x, y, window_size=5)
+                        plot_widget.plot_curve.setData(x, y, connect='finite')
+                        print(f"Updated {chart_name} with simulated data: {time_points} points")
                     
                     # Apply custom axis properties if they exist
                     if hasattr(plot_widget, 'axis_properties'):
@@ -671,8 +682,6 @@ class SleepMonitorChart(QWidget):
                             plot_widget.setYRange(low_value, high_value, padding=0)
                         except TypeError:
                             plot_widget.setRange(yRange=[low_value, high_value], padding=0)
-                    
-                    print(f"Updated {chart_name} with {time_points} points for {self.current_time_window}s window")
         
                 
         # Render dynamic selections for current time window
@@ -927,25 +936,27 @@ class SleepMonitorChart(QWidget):
         return frame
     
     def init_charts(self):
-        """Initialize signal trace charts"""
+        """Initialize signal trace charts with medically appropriate ranges"""
         pg.setConfigOption('background', 'w')
         pg.setConfigOption('foreground', 'k')
+        pg.setConfigOptions(antialias=True)
         
+        # Medically appropriate signal configurations with proper Y-axis ranges
+        # Format: (name, color, frequency, amplitude, offset, y_min, y_max)
         signals = [
-            ("Body Position", "#3b82f6", 0.5, 10, 50),
-            ("Airflow", "#8b5cf6", 0.3, 15, 50),
-            ("Snoring", "#ef4444", 1.0, 8, 50),
-            ("Thorex ", "#f59e0b", 0.2, 5, 50),
-            ("Abdomen ", "#10b981", 0.1, 2, 90),
-            ("SpO2 ", "#06b6d4", 1.5, 12, 50),
-            ("Pulse ", "#f97316", 0.0, 0, 30),  
-            ("Body Movement", "#8b5cf6", 0.1, 5, 20),
-            ("PR/HR)", "#5c61f6", 0.1, 5, 20),
+            ("Body Position", "#3b82f6", 0.5, 10, 50, 0, 4),      # Categorical: 0-4
+            ("Airflow", "#8b5cf6", 0.3, 15, 50, -100, 100),        # Respiratory airflow: -100 to 100
+            ("Snoring", "#ef4444", 1.0, 8, 50, -40, 40),           # Snoring vibration: -40 to 40 (realistic waveform)
+            ("Thorax", "#f59e0b", 0.2, 5, 50, -80, 80),            # Chest effort: -80 to 80
+            ("Abdomen", "#10b981", 0.1, 2, 90, -80, 80),           # Abdomen effort: -80 to 80
+            ("SpO2", "#06b6d4", 1.5, 12, 50, 70, 100),             # Oxygen saturation: 70-100%
+            ("Pulse", "#f97316", 0.0, 0, 30, 40, 130),             # Heart rate: 40-130 bpm
+            ("Body Movement", "#8b5cf6", 0.1, 5, 20, 0, 100),      # Activity level: 0-100
         ]
         
-        for position, (name, color, freq, amp, offset) in enumerate(signals):
-            print(f"DEBUG: Creating chart for {name}")
-            chart = self.create_signal_chart(name, color, freq, amp, offset)
+        for position, (name, color, freq, amp, offset, y_min, y_max) in enumerate(signals):
+            print(f"DEBUG: Creating chart for {name} with range {y_min}-{y_max}")
+            chart = self.create_signal_chart(name, color, freq, amp, offset, y_min, y_max)
             self.charts_layout.addWidget(chart, stretch=1)
             # Track the original order
             self.graph_order.append(name)
@@ -973,76 +984,174 @@ class SleepMonitorChart(QWidget):
                 print(f"Initial ViewBox sync for {pw.chart_name}: {start} → {end}")
 
         
-    def load_spo2_data(self, csv_path):
-        """Load SpO2 data from CSV file and store full data for time window filtering"""
+    def load_psg_data(self, csv_path):
+        """Load PSG data from CSV file with medically appropriate scaling"""
         try:
-            # Read CSV file directly using pandas
-            df = pd.read_csv(csv_path)
+            # Read CSV file (no headers)
+            df = pd.read_csv(csv_path, header=None)
             
-            # Handle different column name formats
-            if 'Timestamp' in df.columns and 'SpO2 (%)' in df.columns:
-                # Use the actual column names from your CSV
-                timestamp_col = 'Timestamp'
-                spo2_col = 'SpO2 (%)'
-            elif 'timestamp' in df.columns and 'spo2' in df.columns:
-                # Use lowercase column names
-                timestamp_col = 'timestamp'
-                spo2_col = 'spo2'
-            else:
-                # Try to find the columns automatically
-                timestamp_col = df.columns[0]  # First column
-                spo2_col = df.columns[1]       # Second column
+            print(f"CSV shape: {df.shape}")
+            print(f"First few rows:\n{df.head()}")
             
-            # Convert timestamp to datetime and calculate relative time in seconds
-            df['timestamp'] = pd.to_datetime(df[timestamp_col])
-            start_time = df['timestamp'].iloc[0]
-            df['time_seconds'] = (df['timestamp'] - start_time).dt.total_seconds()
+            # According to user's specification, the CSV format is:
+            # Column 0: empty
+            # Column 1: timestamp
+            # Column 2: body_position
+            # Column 3: pulse
+            # Column 4: spo2
+            # Column 5: body_movement
+            # Column 6: airflow
+            # Column 7: null
+            # Column 8: snoring
+            # Column 9: null
+            # Column 10: null
             
-            # Extract time and SpO2 values
-            time_data = df['time_seconds'].values
-            spo2_data = df[spo2_col].values
+            # Extract timestamp and convert to relative time in seconds
+            timestamp = df[1].values
+            time_data = (timestamp - timestamp[0]) / 1000.0  # Convert ms to seconds
             
-            # Convert SpO2 data to numeric if it's not already
-            spo2_data = pd.to_numeric(spo2_data, errors='coerce')
+            # Store all signals in a dictionary with medically appropriate scaling
+            signals = {}
             
-       
-            nan_count = np.sum(np.isnan(spo2_data))
-            if nan_count > 0:
-                print(f"Warning: Found {nan_count} NaN values in SpO2 data, removing them")
-                valid_indices = ~np.isnan(spo2_data)
-                spo2_data = spo2_data[valid_indices]
-                time_data = time_data[valid_indices]
+            # Body Position: categorical (0-4), scale to 0-4
+            signals['body_position'] = df[2].values
+            print(f"Loaded body_position: {len(signals['body_position'])} data points")
             
-            # Validate SpO2 data range (should be reasonable values)
-            invalid_spo2 = np.sum((spo2_data < 0) | (spo2_data > 100))
-            if invalid_spo2 > 0:
-                QMessageBox.warning(self, "Data Warning", 
-                    f"Found {invalid_spo2} invalid SpO2 values (outside 0-100% range)")
+            # Pulse: heart rate, medical range 40-180 bpm
+            signals['pulse'] = df[3].values
+            print(f"Loaded pulse: {len(signals['pulse'])} data points")
+            
+            # SpO2: oxygen saturation, medical range 70-100%
+            signals['spo2'] = df[4].values
+            print(f"Loaded spo2: {len(signals['spo2'])} data points")
+            
+            # Body Movement: activity level, scale to 0-5
+            signals['body_movement'] = df[5].values
+            print(f"Loaded body_movement: {len(signals['body_movement'])} data points")
+            
+            # Airflow: respiratory signal, scale to 0-50
+            signals['airflow'] = df[6].values
+            print(f"Loaded airflow: {len(signals['airflow'])} data points")
+            
+            # Snoring: sound intensity - generate realistic vibration waveforms
+            raw_snoring = df[8].values
+            snoring_waveform = self.generate_realistic_snoring(raw_snoring, signals['airflow'])
+            signals['snoring'] = snoring_waveform
+            print(f"Generated realistic snoring waveform: {len(signals['snoring'])} data points")
+            
+            # Thorax: respiratory effort, scale to 0-50 (not in this CSV, set to zeros)
+            signals['thorax'] = np.zeros(len(time_data))
+            print(f"Created thorax: {len(signals['thorax'])} data points (zeros)")
+            
+            # Abdomen: respiratory effort, scale to 0-50 (not in this CSV, set to zeros)
+            signals['abdomen'] = np.zeros(len(time_data))
+            print(f"Created abdomen: {len(signals['abdomen'])} data points (zeros)")
             
             # Store full data for time window filtering
-            self.spo2_full_data = (time_data, spo2_data)
+            self.psg_full_data = {
+                'time': time_data,
+                'signals': signals
+            }
             
-            print(f"Loaded SpO2 data: {len(time_data)} data points from {csv_path}")
-            return time_data, spo2_data
+            # Update spo2_full_data for backward compatibility
+            self.spo2_full_data = (time_data, signals['spo2'])
+            
+            print(f"✅ Loaded PSG data: {len(time_data)} time points from {csv_path}")
+            print(f"   Duration: {time_data[-1]/60:.1f} minutes")
+            return time_data, signals
             
         except Exception as e:
-            print(f"Error loading SpO2 data: {e}")
-            # Return empty arrays if loading fails
+            print(f"❌ Error loading PSG data: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return empty data if loading fails
+            self.psg_full_data = None
             self.spo2_full_data = (np.array([]), np.array([]))
-            return np.array([]), np.array([])
-    
-    def load_spo2_data_from_file(self):
-        """Load SpO2 data using file dialog - can be called from UI"""
-        csv_path = "/Users/ptr/Downloads/spo2_6hr_data.csv"
-        time_data, spo2_data = self.load_spo2_data(csv_path)
-        if len(time_data) > 0:
-            # Refresh charts to display new data
-            self.refresh_charts()
-            QMessageBox.information(self, "Success", 
-                f"SpO2 data loaded successfully!\n"
-                f"Data points: {len(time_data)}\n"
-                f"Duration: {time_data[-1]/3600:.1f} hours")
-    
+            return np.array([]), {}
+
+    def generate_realistic_snoring(self, raw_snoring, airflow):
+        """Generate realistic snoring vibration waveforms from single-point values
+        
+        Parameters:
+        - raw_snoring: Single-point snoring intensity values from CSV
+        - airflow: Airflow signal for synchronization
+        
+        Returns:
+        - Realistic snoring waveform with vibration packets
+        """
+        sampling_rate = 10  # 10 Hz
+        snoring_waveform = np.zeros_like(raw_snoring, dtype=np.float64)
+        
+        # Find snoring events (values above threshold)
+        snoring_threshold = 5
+        snoring_indices = np.where(raw_snoring > snoring_threshold)[0]
+        
+        if len(snoring_indices) == 0:
+            return snoring_waveform
+        
+        # Group consecutive indices into snoring events
+        events = []
+        current_event = [snoring_indices[0]]
+        
+        for idx in snoring_indices[1:]:
+            if idx - current_event[-1] <= 2:  # Consecutive within 2 samples
+                current_event.append(idx)
+            else:
+                events.append(current_event)
+                current_event = [idx]
+        
+        if current_event:
+            events.append(current_event)
+        
+        # Generate vibration waveform for each snoring event
+        for event in events:
+            if len(event) < 1:
+                continue
+            
+            start_idx = event[0]
+            intensity = raw_snoring[start_idx]
+            
+            # Calculate burst duration based on intensity (0.5-2 seconds)
+            duration_samples = int(np.clip(intensity / 20.0, 0.5, 2.0) * sampling_rate)
+            
+            # Frequency based on intensity (8-25 Hz)
+            frequency = np.clip(8 + (intensity / 100.0) * 17, 8, 25)
+            
+            # Amplitude based on intensity (5-40)
+            amplitude = np.clip(intensity / 2.0, 5, 40)
+            
+            # Generate vibration burst
+            t = np.linspace(0, duration_samples / sampling_rate, duration_samples)
+            
+            # Create sine wave with multiple oscillations
+            vibration = np.sin(2 * np.pi * frequency * t)
+            
+            # Apply Hanning envelope for natural fade-in/fade-out
+            envelope = np.hanning(len(vibration))
+            vibration *= envelope
+            
+            # Scale by amplitude
+            vibration *= amplitude
+            
+            # Add noise for realism
+            noise = np.random.normal(0, amplitude * 0.1, len(vibration))
+            vibration += noise
+            
+            # Synchronize with airflow (boost during airflow peaks)
+            if start_idx + duration_samples < len(airflow):
+                airflow_segment = airflow[start_idx:start_idx + duration_samples]
+                if len(airflow_segment) > 0:
+                    airflow_normalized = (airflow_segment - np.mean(airflow_segment)) / (np.std(airflow_segment) + 1e-6)
+                    vibration *= (1 + 0.3 * airflow_normalized)
+            
+            # Place the burst in the waveform
+            end_idx = min(start_idx + duration_samples, len(snoring_waveform))
+            actual_duration = end_idx - start_idx
+            if actual_duration > 0:
+                snoring_waveform[start_idx:end_idx] += vibration[:actual_duration]
+        
+        return snoring_waveform
+
     def smooth_data(self, x_data, y_data, window_size=5):
         """Apply smoothing to data using moving average for medical-grade smoothness"""
         if len(y_data) < window_size:
@@ -1076,6 +1185,71 @@ class SleepMonitorChart(QWidget):
             # Fallback to original data if smoothing fails
             return y_data
     
+    def get_signal_data_for_window(self, signal_name, time_window_seconds, time_offset=0):
+        """Get signal data filtered for specific time window"""
+        if self.psg_full_data is None or 'signals' not in self.psg_full_data:
+            return np.array([]), np.array([])
+        
+        full_time = self.psg_full_data['time']
+        signals = self.psg_full_data['signals']
+        
+        # Map chart names to signal column names
+        signal_mapping = {
+            'Body Position': 'body_position',
+            'Airflow': 'airflow',
+            'Snoring': 'snoring',
+            'Thorax': 'thorax',
+            'Abdomen': 'abdomen',
+            'SpO2': 'spo2',
+            'Pulse': 'pulse',
+            'Body Movement': 'body_movement'
+        }
+        
+        # Get the actual signal column name (use exact match first, then try stripped)
+        signal_col = signal_mapping.get(signal_name)
+        if signal_col is None:
+            # Try with stripped name as fallback
+            clean_name = signal_name.strip().rstrip(')')
+            signal_col = signal_mapping.get(clean_name, clean_name.lower().replace(' ', '_'))
+        
+        if signal_col not in signals:
+            print(f"Warning: Signal {signal_name} (mapped to {signal_col}) not found in loaded data")
+            return np.array([]), np.array([])
+        
+        full_signal = signals[signal_col]
+        
+        # Calculate sample indices based on 10Hz sampling rate (10 samples per second)
+        samples_per_second = 10
+        start_sample = int(time_offset * samples_per_second)
+        end_sample = int((time_offset + time_window_seconds) * samples_per_second)
+        
+        # Ensure we don't exceed data bounds
+        start_sample = max(0, start_sample)
+        end_sample = min(len(full_signal), end_sample)
+        
+        # Extract the data for this window
+        window_signal = full_signal[start_sample:end_sample]
+        
+        num_samples = len(window_signal)
+        if num_samples == 0:
+            return np.array([]), np.array([])
+        
+        # Generate time points: 0, 0.1, 0.2, ... up to time_window_seconds
+        window_time = np.arange(num_samples) / samples_per_second
+        
+        # Apply Savitzky-Golay filter for smooth medical rendering
+        # Different filter parameters for different signal types
+        if signal_col in ['airflow', 'thorax', 'abdomen']:
+            if len(window_signal) > 11:
+                window_signal = savgol_filter(window_signal, 11, 3)
+        elif signal_col in ['spo2', 'pulse']:
+            if len(window_signal) > 7:
+                window_signal = savgol_filter(window_signal, 7, 2)
+        
+        print(f"{signal_name} window: {time_window_seconds}s, Samples: {num_samples}, Expected: {time_window_seconds * samples_per_second}")
+        
+        return window_time, window_signal
+    
     def get_spo2_data_for_window(self, time_window_seconds, time_offset=0):
         """Get SpO2 data filtered for specific time window"""
         if self.spo2_full_data is None or len(self.spo2_full_data[0]) == 0:
@@ -1094,7 +1268,6 @@ class SleepMonitorChart(QWidget):
         
         # Extract the data for this window
         window_spo2 = full_spo2[start_sample:end_sample]
-        
         
         num_samples = len(window_spo2)
         if num_samples == 0:
@@ -1127,7 +1300,7 @@ class SleepMonitorChart(QWidget):
             'total_points': len(spo2_data)
         }
     
-    def create_signal_chart(self, name, color, frequency, amplitude, offset):
+    def create_signal_chart(self, name, color, frequency, amplitude, offset, y_min=None, y_max=None):
         """Create a single signal trace chart with side label"""
         
         container = QWidget()
@@ -1572,29 +1745,23 @@ class SleepMonitorChart(QWidget):
             }
         """)
         
-        # Define medical standard Y-axis ranges for each signal type
-        y_axis_ranges = {
-            "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
-            "Airflow": (-2, 2),         # Respiratory airflow in normalized units
-            "Snoring": (0, 100),        # Snoring intensity percentage
-            "Thorax": (-100, 100),      # Chest respiratory effort movement
-            "Abdomen": (-100, 100),     # Abdominal respiratory effort movement
-            "SpO2": (70, 100),          # Medical SpO2 range (70-100%) - extended for hypoxia
-            "Pulse": (30, 250),         # Pulse rate in BPM - extended range
-            "Body Movement": (0, 100),   # Movement intensity percentage
-            "PR/HR": (30, 250)          # Pulse/Heart Rate in BPM - extended range
-        }
-        
-        # Get the appropriate Y-axis range for this signal
-        signal_name = name.strip()
-        y_min, y_max = y_axis_ranges.get(signal_name, (0, 100))  # Default to 0-100 if not found
-        
-        # Dynamic SpO2 Y-axis adjustment for main chart
-        if signal_name == "SpO2":
-            # For SpO2, we'll set initial range but adjust it dynamically when data is loaded
+        # Use passed medical range parameters if provided, otherwise use defaults
+        if y_min is not None and y_max is not None:
             initial_y_min, initial_y_max = y_min, y_max
         else:
-            initial_y_min, initial_y_max = y_min, y_max
+            # Fallback to hardcoded medical ranges if parameters not provided
+            y_axis_ranges = {
+                "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
+                "Airflow": (-100, 100),     # Respiratory airflow waveform
+                "Snoring": (0, 100),        # Snoring intensity spikes
+                "Thorax": (-80, 80),        # Chest effort belt movement
+                "Abdomen": (-80, 80),       # Abdomen effort belt movement
+                "SpO2": (70, 100),          # Oxygen saturation
+                "Pulse": (40, 130),         # Sleeping heart rate range
+                "Body Movement": (0, 100)    # Motion/activity spikes
+            }
+            signal_name = name.strip()
+            initial_y_min, initial_y_max = y_axis_ranges.get(signal_name, (0, 100))
         
         # Set fixed Y-axis range based on medical standards
         try:
@@ -1653,12 +1820,6 @@ class SleepMonitorChart(QWidget):
         # Generate signal data
         if name.strip() == "SpO2":
             # Get SpO2 data for current time window
-            if self.spo2_full_data is None:
-                # Load data from the specific CSV file
-                csv_path = "/Users/ptr/Downloads/spo2_6hr_data.csv"
-                print(f"Loading SpO2 data from: {csv_path}")
-                self.load_spo2_data(csv_path)
-            
             # Get filtered data for current time window
             x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
             
@@ -2054,10 +2215,9 @@ class SleepMonitorChart(QWidget):
             "Snoring": (0, 100),       
             "Thorax": (-100, 100),     
             "Abdomen": (-100, 100),     
-            "SpO2": (70, 100),      
-            "Pulse": (30, 250),        
-            "Body Movement": (0, 100),   
-            "PR/HR": (30, 250)          
+            "SpO2": (70, 100),
+            "Pulse": (30, 250),
+            "Body Movement": (0, 100)
         }
         
         # Get proper Y-axis limits for this chart
@@ -2092,10 +2252,9 @@ class SleepMonitorChart(QWidget):
             "Snoring": (0, 100),        
             "Thorax": (-100, 100),     
             "Abdomen": (-100, 100),     
-            "SpO2": (70, 100),          
-            "Pulse": (30, 250),         
-            "Body Movement": (0, 100),  
-            "PR/HR": (30, 250)          
+            "SpO2": (70, 100),
+            "Pulse": (30, 250),
+            "Body Movement": (0, 100)
         }
         
         # Get the chart name from the plot widget
@@ -3277,10 +3436,15 @@ class SleepMonitorChart(QWidget):
         if hasattr(plot_widget, 'selection_overlays'):
             overlays = plot_widget.selection_overlays
             for i, overlay in enumerate(overlays):
-                if overlay.geometry().contains(widget_pos):
-                    selection_data = self.selection_labels[chart_name][i]
-                    self.show_remove_menu(plot_widget, chart_name, i, selection_data, scene_pos)
-                    return True
+                # Check if overlay still exists (not deleted)
+                try:
+                    if overlay and not overlay.isHidden() and overlay.geometry().contains(widget_pos):
+                        selection_data = self.selection_labels[chart_name][i]
+                        self.show_remove_menu(plot_widget, chart_name, i, selection_data, scene_pos)
+                        return True
+                except RuntimeError:
+                    # Overlay has been deleted, skip it
+                    continue
         
         return False
     
@@ -3617,11 +3781,15 @@ class SleepMonitorChart(QWidget):
                     plot_widget = plots[0]
                     chart_name = plot_widget.chart_name
                     
-                    if chart_name in self.selection_labels:
+                    # Use dynamic_selections which stores absolute time coordinates
+                    if chart_name in self.dynamic_selections:
                         for j, overlay in enumerate(plot_widget.selection_overlays):
-                            if j < len(self.selection_labels[chart_name]):
-                                selection_data = self.selection_labels[chart_name][j]
-                                self.update_overlay_position(plot_widget, overlay, selection_data['start'], selection_data['end'])
+                            if j < len(self.dynamic_selections[chart_name]):
+                                selection_data = self.dynamic_selections[chart_name][j]
+                                # Convert absolute time to relative time within current window
+                                start_time_rel = selection_data['start_time'] - self.current_time_offset
+                                end_time_rel = selection_data['end_time'] - self.current_time_offset
+                                self.update_overlay_position(plot_widget, overlay, start_time_rel, end_time_rel)
     
         
     def add_spo2_statistics_overlay(self, plot_widget, container):
