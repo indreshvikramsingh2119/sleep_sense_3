@@ -11,14 +11,17 @@ import webbrowser
 import json
 import csv
 import platform
+import tempfile
+from urllib.parse import quote
 from PyQt5.QtWidgets import (
     QFileDialog, QMessageBox, QInputDialog, QLineEdit, QPushButton, QMenu, QAction, QWidget, QDialog, QVBoxLayout,
     QHBoxLayout, QListWidget, QLabel, QComboBox, QCheckBox, QGroupBox, QGridLayout, QSpacerItem, QSizePolicy,
     QRadioButton, QButtonGroup, QSpinBox, QTextEdit, QSlider, QTabWidget, QFormLayout, QFrame
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QTextDocument
 from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
+from PyQt5.QtWebEngineWidgets import QWebEngineView
 
 
 class ButtonFunctions:
@@ -211,6 +214,7 @@ class ButtonFunctions:
         
         if menu_type == 'file':
             # custom file menu matching requested image
+            menu.addSeparator()
             menu.addAction('Database', self.file_database)
             menu.addAction('Archive', self.file_open_archive)
             save_action = menu.addAction('Save report locally', self.file_save_report_locally)
@@ -218,16 +222,10 @@ class ButtonFunctions:
             save_action.setEnabled(bool(getattr(self.parent, 'has_report', True)))
             menu.addAction('Print report', self.file_print_report)
             
-            # Print patient instructions submenu
-            instr_menu = QMenu('Print patient instructions', menu)
-            instr_menu.addAction('Short', lambda: self.file_print_patient_instructions('short'))
-            instr_menu.addAction('Full', lambda: self.file_print_patient_instructions('full'))
-            menu.addMenu(instr_menu)
-            
             menu.addSeparator()
             menu.addAction('View external data', self.file_view_external_data)
-            dup_action = menu.addAction('Duplicate', self.file_duplicate)
-            dup_action.setEnabled(True)  # will validate inside handler
+            # dup_action = menu.addAction('Duplicate', self.file_duplicate)
+            # dup_action.setEnabled(True)  # will validate inside handler
             # Export submenu
             export_menu = QMenu('Export', menu)
             export_menu.addAction('Export as CSV', lambda: self.file_export('csv'))
@@ -247,8 +245,7 @@ class ButtonFunctions:
             menu.addAction('Undo', self.edit_undo, 'Ctrl+Z')
             menu.addAction('Redo', self.edit_redo, 'Ctrl+Y')
             menu.addSeparator()
-            menu.addAction('Copy', self.edit_copy, 'Ctrl+C')
-            menu.addAction('Paste', self.edit_paste, 'Ctrl+V')
+            
             
         elif menu_type == 'view':
             # Add Quick start with house icon
@@ -268,12 +265,9 @@ class ButtonFunctions:
             menu.addAction('Edit event group', self.tools_edit_event_group)
             menu.addSeparator()
             settings_menu = menu.addMenu('Settings')
-            settings_menu.addAction('Signal view', self.tools_settings_signal_view)
             settings_menu.addAction('Report', self.tools_settings_report)
             settings_menu.addAction('Analysis parameters', self.tools_settings_analysis_parameters)
             settings_menu.addAction('EDF export', self.tools_settings_edf_export)
-            menu.addAction('Send Event Log by email', self.tools_send_event_log_email)
-            menu.addAction('Database Transfer', self.tools_database_transfer)
             
         elif menu_type == 'help':
             menu.addAction('Clinical Guide', self.help_clinical_guide)
@@ -551,25 +545,7 @@ class ButtonFunctions:
         print("Tools -> Edit event group clicked")
         # TODO: Implement edit event group functionality
     
-    def tools_send_event_log_email(self):
-        """Send Event Log by email"""
-        print("Tools -> Send Event Log by email clicked")
-        # TODO: Implement send event log by email functionality
-    
-    def tools_database_transfer(self):
-        """Database Transfer"""
-        print("Tools -> Database Transfer clicked")
-        # TODO: Implement database transfer functionality
-    
         
-    def tools_settings_signal_view(self):
-        """Signal view"""
-        print("Tools -> Settings -> Signal view clicked")
-        dialog = SignalViewDialog(self.parent)
-        if dialog.exec_() == QDialog.Accepted:
-            print("Signal view settings applied")
-            # TODO: Apply signal view settings
-    
     def tools_settings_report(self):
         """Report"""
         print("Tools -> Settings -> Report clicked")
@@ -646,6 +622,13 @@ class ButtonFunctions:
         print("Help -> About clicked")
         # TODO: Show about dialog
     
+    def file_load_data(self):
+        """Load PSG data from CSV file using file dialog"""
+        if hasattr(self.parent, 'load_psg_data_from_file'):
+            self.parent.load_psg_data_from_file()
+        else:
+            QMessageBox.warning(self.parent, "Load Data", "Load data function not available")
+
     def file_database(self):
         """Open patient database window - same as red database button"""
         # Check if parent has monitor chart with selection active and block if needed
@@ -850,41 +833,108 @@ class ButtonFunctions:
         except Exception as e:
             QMessageBox.critical(self.parent, "Import Error", str(e))
     
-    def _open_mailto(self, subject="", body="", attach_path=None):
-        """Open default mail client with subject/body. Attachment handled by user (or via platform-specific logic)."""
-        # Basic mailto
-        mailto = f"mailto:?subject={webbrowser.quote(subject)}&body={webbrowser.quote(body)}"
+    def _generate_pdf_from_html(self, html_content, output_path):
+        """Generate PDF from HTML content using QWebEngineView"""
         try:
-            webbrowser.open(mailto)
-            QMessageBox.information(self.parent, "Email", "Email client opened. Attach files manually if required.")
+            # Create a temporary web view to render HTML
+            web_view = QWebEngineView()
+            web_view.setHtml(html_content)
+            
+            # Wait for page to load (simple approach)
+            # In production, you'd use QWebEnginePage.loadFinished signal
+            import time
+            time.sleep(2)  # Give time for rendering
+            
+            # Create printer
+            printer = QPrinter(QPrinter.HighResolution)
+            printer.setOutputFormat(QPrinter.PdfFormat)
+            printer.setOutputFileName(output_path)
+            printer.setPageSize(QPrinter.A4)
+            
+            # Print to PDF
+            web_view.page().print(printer, lambda success: None)
+            
+            return True
         except Exception as e:
-            QMessageBox.warning(self.parent, "Email", f"Could not open mail client:\n{e}")
+            print(f"Error generating PDF: {e}")
+            return False
+    
+    def _open_gmail_compose(self, subject, body, attachment_path=None):
+        """Open Gmail compose in browser with subject and body pre-filled"""
+        try:
+            # Gmail compose URL with subject and body
+            gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&su={quote(subject)}&body={quote(body)}"
+            
+            # Open Gmail in browser
+            webbrowser.open(gmail_url)
+            
+            if attachment_path:
+                # Show message about attaching the file
+                QMessageBox.information(
+                    self.parent, 
+                    "Gmail Opened",
+                    f"Gmail has been opened in your browser.\n\n"
+                    f"Please attach the file:\n{attachment_path}\n\n"
+                    f"If you're not logged in, you'll be redirected to the login page first."
+                )
+                
+                # Also open file location to help user find the file
+                try:
+                    if platform.system() == "Darwin":  # macOS
+                        subprocess.run(["open", "-R", attachment_path])
+                    elif platform.system() == "Windows":
+                        subprocess.run(["explorer", "/select,", attachment_path])
+                    else:  # Linux
+                        subprocess.run(["xdg-open", os.path.dirname(attachment_path)])
+                except:
+                    pass
+            else:
+                QMessageBox.information(
+                    self.parent,
+                    "Gmail Opened",
+                    "Gmail has been opened in your browser.\n\nIf you're not logged in, you'll be redirected to the login page first."
+                )
+                
+        except Exception as e:
+            QMessageBox.warning(self.parent, "Email", f"Could not open Gmail:\n{e}")
     
     def file_send_report_email(self):
-        """Prepare email for report; opens mail client with subject/body"""
-        # Try to locate a saved report or generate a temporary one
-        report_path = None
+        """Generate PDF report and open Gmail compose for sending"""
+        # Generate PDF from report
+        pdf_path = None
         if hasattr(self.parent, "get_report_html"):
             try:
                 html = self.parent.get_report_html()
-                tmp = os.path.join(tempfile.gettempdir(), f"sleep_report_{datetime.now().strftime('%Y%m%d%H%M%S')}.html")
-                with open(tmp, "w", encoding="utf-8") as f:
-                    f.write(html)
-                report_path = tmp
-            except Exception:
-                report_path = None
+                pdf_path = os.path.join(tempfile.gettempdir(), f"sleep_report_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf")
+                
+                # Try to generate PDF
+                if self._generate_pdf_from_html(html, pdf_path):
+                    QMessageBox.information(self.parent, "PDF Generated", f"Report saved as PDF:\n{pdf_path}")
+                else:
+                    # Fallback: save as HTML
+                    html_path = os.path.join(tempfile.gettempdir(), f"sleep_report_{datetime.now().strftime('%Y%m%d%H%M%S')}.html")
+                    with open(html_path, "w", encoding="utf-8") as f:
+                        f.write(html)
+                    pdf_path = html_path
+                    QMessageBox.information(self.parent, "HTML Saved", f"Report saved as HTML:\n{html_path}")
+                    
+            except Exception as e:
+                QMessageBox.warning(self.parent, "Error", f"Could not generate report:\n{e}")
+                return
+        
         subject = "Sleep Sense Report"
-        body = "Please find the sleep report attached (attach manually if not attached automatically)."
-        self._open_mailto(subject, body, attach_path=report_path)
+        body = "Please find the sleep report attached."
+        self._open_gmail_compose(subject, body, pdf_path)
     
     def file_send_recording_email(self):
-        """Prompt user to select a recording to attach and open mail client"""
+        """Prompt user to select a recording and open Gmail compose for sending"""
         path, _ = QFileDialog.getOpenFileName(self.parent, "Select recording to send", os.path.expanduser("~"))
         if not path:
             return
+        
         subject = "Recording from Sleep Sense"
-        body = "Please find the recording attached (attach manually if not attached automatically)."
-        self._open_mailto(subject, body, attach_path=path)
+        body = "Please find the recording attached."
+        self._open_gmail_compose(subject, body, path)
 
     def _activate_view(self, key, friendly_name):
         """Try multiple ways to ask the parent dashboard to show a named view/tab/page.
@@ -989,73 +1039,7 @@ class ButtonFunctions:
         self._activate_view('quick_start', 'Quick start')
 
 
-class SignalViewDialog(QDialog):
-    """Dialog for customizing signal view settings"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Customize signal view")
-        self.setFixedSize(400, 300)
-        self.init_ui()
-    
-    def init_ui(self):
-        """Initialize the dialog UI"""
-        layout = QVBoxLayout()
-        
-        # Create Only window group
-        only_window_group = QGroupBox("Only window")
-        only_window_layout = QGridLayout()
-        
-        # Resolution dropdown
-        resolution_label = QLabel("Resolution:")
-        self.resolution_combo = QComboBox()
-        self.resolution_combo.addItems(["10 sec.", "20 sec.", "30 sec.", "60 sec."])
-        self.resolution_combo.setCurrentText("10 sec.")
-        
-        # Channels and Events buttons
-        channels_button = QPushButton("Channels...")
-        events_button = QPushButton("Events...")
-        
-        only_window_layout.addWidget(resolution_label, 0, 0)
-        only_window_layout.addWidget(self.resolution_combo, 0, 1)
-        only_window_layout.addWidget(channels_button, 1, 0)
-        only_window_layout.addWidget(events_button, 1, 1)
-        
-        only_window_group.setLayout(only_window_layout)
-        
-        # Checkboxes
-        self.signal_cursor_checkbox = QCheckBox("Signal cursor")
-        self.hide_channels_checkbox = QCheckBox("Hide channels with no data")
-        self.hide_channels_checkbox.setChecked(True)
-        
-        # Bottom buttons
-        button_layout = QHBoxLayout()
-        ok_button = QPushButton("OK")
-        cancel_button = QPushButton("Cancel")
-        standard_values_button = QPushButton("Standard values")
-        
-        ok_button.clicked.connect(self.accept)
-        cancel_button.clicked.connect(self.reject)
-        standard_values_button.clicked.connect(self.reset_to_standard_values)
-        
-        button_layout.addWidget(ok_button)
-        button_layout.addWidget(cancel_button)
-        button_layout.addWidget(standard_values_button)
-        
-        # Add all to main layout
-        layout.addWidget(only_window_group)
-        layout.addWidget(self.signal_cursor_checkbox)
-        layout.addWidget(self.hide_channels_checkbox)
-        layout.addStretch()
-        layout.addLayout(button_layout)
-        
-        self.setLayout(layout)
-    
-    def reset_to_standard_values(self):
-        """Reset to standard values"""
-        self.resolution_combo.setCurrentText("10 sec.")
-        self.signal_cursor_checkbox.setChecked(False)
-        self.hide_channels_checkbox.setChecked(True)
+
     
     def get_settings(self):
         """Get current settings"""

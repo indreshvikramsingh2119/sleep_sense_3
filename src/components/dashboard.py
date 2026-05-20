@@ -137,7 +137,7 @@ class SleepSenseDashboard(QMainWindow):
         self.monitor_chart.time_position_updated.connect(self.update_slider_position)
         
         # Update button text to show initial count
-        self.graph_dropdown_button.setText("Graphs (9/9) ▼")
+        self.graph_dropdown_button.setText("Graphs (8/8) ▼")
         
         # Connect dashboard controls to chart functionality
         self.time_window_dropdown.currentIndexChanged.connect(self.on_time_window_changed)
@@ -255,7 +255,7 @@ class SleepSenseDashboard(QMainWindow):
             "Body Position": True ,
             "Airflow": True, 
             "Snoring": True,
-            "Thorex": True,
+            "Thorax": True,
             "Abdomen": True,
             "SpO2": True,
             "Pulse": True,
@@ -594,6 +594,11 @@ class SleepSenseDashboard(QMainWindow):
             # Update the chart's time window
             self.monitor_chart.set_time_window(seconds)
             print(f"Debug: Dashboard called set_time_window({seconds})")
+            
+            # Force immediate refresh of charts
+            if hasattr(self.monitor_chart, 'refresh_charts'):
+                self.monitor_chart.refresh_charts()
+                print(f"Debug: Dashboard forced refresh_charts() call")
     
         
     def show_graph_selection_menu(self):
@@ -705,7 +710,8 @@ class SleepSenseDashboard(QMainWindow):
         
         # Update button text to show selected count
         selected_count = sum(1 for visible in self.graph_visibility.values() if visible)
-        self.graph_dropdown_button.setText(f"Graphs ({selected_count}/9) ▼")
+        total_count = len(self.graph_visibility)
+        self.graph_dropdown_button.setText(f"Graphs ({selected_count}/8) ▼")
     
         
     def create_time_slider_bar(self):
@@ -1561,17 +1567,36 @@ class SleepSenseDashboard(QMainWindow):
         """Automatically load PSG data from CSV file"""
         import os
         try:
-            # Load the PSG data file with all signals
+            # Try to load from default path first
             csv_path = os.path.join(os.getcwd(), "extracted_data", "human.data.csv")
+            
             if os.path.exists(csv_path):
                 print(f"🎬 Auto-loading PSG data from: {csv_path}")
                 self.monitor_chart.load_psg_data(csv_path)
                 print("✅ PSG data loaded successfully - Playback ready!")
             else:
-                print(f"⚠️ PSG data file not found: {csv_path}")
-                print("💡 Use File → Load Data to load PSG data for playback")
+                print(f"⚠️ Default PSG data file not found: {csv_path}")
+                print("💡 Use File → Load Data to select PSG data file")
+                # Don't auto-load, let user select file manually
         except Exception as e:
             print(f"❌ Error auto-loading PSG data: {e}")
-            print("💡 Use File → Load Data to load PSG data for playback")
+            print("💡 Use File → Load Data to select PSG data file")
+    
+    def load_psg_data_from_file(self):
+        """Open file dialog to select and load PSG data file"""
+        from PyQt5.QtWidgets import QFileDialog
+        import os
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select PSG Data File",
+            os.path.join(os.getcwd(), "extracted_data"),
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if file_path:
+            print(f"🎬 Loading PSG data from: {file_path}")
+            self.monitor_chart.load_psg_data(file_path)
+            print("✅ PSG data loaded successfully - Playback ready!")
 
 

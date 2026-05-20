@@ -1,52 +1,55 @@
 """
-Custom ViewBox with mouse release signal for drag selection
+Custom ViewBox with stable Y-axis zoom and fixed X-axis for PSG monitoring
 """
 
 import pyqtgraph as pg
-from PyQt5.QtCore import pyqtSignal, QRectF
+from PyQt5.QtCore import pyqtSignal
 
 
 class CustomViewBox(pg.ViewBox):
-    """ViewBox with sigMouseReleased signal"""
+    """ViewBox with sigMouseReleased signal and stable zoom behavior"""
     sigMouseReleased = pyqtSignal(object)
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.time_window_min = 0
         self.time_window_max = 60  # Default to 60 seconds
+        # IMPORTANT: Set mouse mode to RectMode for natural behavior
+        self.setMouseMode(self.RectMode)
     
     def set_time_window_limits(self, min_val, max_val):
         """Set the time window limits for X-axis"""
         self.time_window_min = min_val
         self.time_window_max = max_val
+        # FIXED X RANGE - keep it fixed when limits change
+        self.setXRange(min_val, max_val, padding=0)
     
-    def viewRange(self):
-        """Override to enforce fixed time window limits"""
-        range_val = super().viewRange()
-        x_range, y_range = range_val
+    def wheelEvent(self, ev, axis=None):
+        """Stable zoom behavior - only Y-axis zoom centered on waveform position"""
+        # Get current view range
+        current_x_range, current_y_range = self.viewRange()
+        x_min, x_max = current_x_range
+        y_min, y_max = current_y_range
         
-        # Force X-axis to be exactly the limits
-        forced_x_range = [self.time_window_min, self.time_window_max]
+        # Zoom factor based on scroll direction
+        zoom_factor = 0.9 if ev.delta() > 0 else 1.1  # 0.9 for zoom in, 1.1 for zoom out
         
-        return [forced_x_range, y_range]
-    
-    def setRange(self, rect=None, padding=0.02, update=True, disableAutoRange=True, **kwargs):
-        """Override setRange to enforce time window limits"""
-        if rect is None:
-            rect = self.viewRect()
+        # -----------------------------------------
+        # ONLY Y ZOOM - centered on visible data range (NOT mouse position)
+        # This keeps the strip plot anchored to its position
+        # -----------------------------------------
+        y_center = (y_min + y_max) / 2  # Center of visible Y-range where data is
+        new_y_min = y_center - (y_center - y_min) * zoom_factor
+        new_y_max = y_center + (y_max - y_center) * zoom_factor
         
-        # Force X-axis to stay within limits
-        current_width = rect.width()
+        # KEEP X FIXED at time window limits
+        self.setRange(
+            xRange=[self.time_window_min, self.time_window_max],
+            yRange=[new_y_min, new_y_max],
+            padding=0
+        )
         
-        # Always force the range to be exactly the limits
-        forced_rect = QRectF(self.time_window_min, rect.top(), 
-                             self.time_window_max - self.time_window_min, rect.height())
-        
-        try:
-            super().setRange(forced_rect, padding=0, update=update, disableAutoRange=disableAutoRange, **kwargs)
-        except TypeError:
-            # Handle older pyqtgraph versions
-            super().setRange(forced_rect, padding=0, update=update, **kwargs)
+        ev.accept()
     
     def mouseReleaseEvent(self, event):
         """Emit signal on mouse release"""

@@ -329,7 +329,7 @@ class SleepMonitorChart(QWidget):
             ("Body Position", "#3b82f6", 0.5, 10, 50),
             ("Airflow", "#8b5cf6", 0.3, 15, 50),
             ("Snoring", "#ef4444", 1.0, 8, 50),
-            ("Thorex", "#f59e0b", 0.2, 5, 50),
+            ("Thorax", "#f59e0b", 0.2, 5, 50),
             ("Abdomen", "#10b981", 0.1, 2, 90),
             ("SpO2", "#06b6d4", 1.5, 12, 50),
             ("Pulse", "#f97316", 0.0, 0, 30),
@@ -699,11 +699,14 @@ class SleepMonitorChart(QWidget):
         # Use dashboard controls if available, otherwise use local controls
         dropdown = getattr(self, 'dashboard_time_window_dropdown', None) or getattr(self, 'time_window_dropdown', None)
         if dropdown:
+            # Block signals to prevent recursive calls when setting dropdown index
+            dropdown.blockSignals(True)
             # Find matching dropdown item and set it
             for i in range(dropdown.count()):
                 if dropdown.itemData(i) == seconds:
                     dropdown.setCurrentIndex(i)
                     break
+            dropdown.blockSignals(False)
             
             # Check if charts exist before refreshing
             chart_count = self.charts_layout.count()
@@ -748,12 +751,11 @@ class SleepMonitorChart(QWidget):
             ("Body Position", "#3b82f6", 0.5, 10, 50),
             ("Airflow", "#8b5cf6", 0.3, 15, 50),
             ("Snoring", "#ef4444", 1.0, 8, 50),
-            ("Thorex ", "#f59e0b", 0.2, 5, 50),
-            ("Abdomen ", "#10b981", 0.1, 2, 90),
-            ("SpO2 ", "#06b6d4", 1.5, 12, 50),
-            ("Pulse ", "#f97316", 0.0, 0, 30),
+            ("Thorax", "#f59e0b", 0.2, 5, 50),
+            ("Abdomen", "#10b981", 0.1, 2, 90),
+            ("SpO2", "#06b6d4", 1.5, 12, 50),
+            ("Pulse", "#f97316", 0.0, 0, 30),
             ("Body Movement", "#8b5cf6", 0.1, 5, 20),
-            ("PR/HR)", "#5c61f6", 0.1, 5, 20),
         ]
         
         # Adjust frequency based on time window (longer window = lower frequency for visibility)
@@ -1646,6 +1648,8 @@ class SleepMonitorChart(QWidget):
         container.is_resizing = False
         container.resize_start_height = None
         container.resize_start_y = None
+        container.resize_hover = False  # Track hover state for visual affordance
+        container.hover_mouse_x = 0  # Track mouse X position for localized glow
         
         # Enable mouse tracking for container
         container.setMouseTracking(True)
@@ -1699,8 +1703,17 @@ class SleepMonitorChart(QWidget):
                 
                 if mouse_y >= bottom_edge:
                     container.setCursor(Qt.SizeVerCursor)
+                    container.hover_mouse_x = event.pos().x()  # Track mouse X position
+                    if not container.resize_hover:
+                        container.resize_hover = True
+                        container.update()  # Trigger repaint for glow line
+                    else:
+                        container.update()  # Update glow position while hovering
                 else:
                     container.setCursor(Qt.ArrowCursor)
+                    if container.resize_hover:
+                        container.resize_hover = False
+                        container.update()  # Trigger repaint to remove glow line
                 
                 # Call original mouse move if not resizing
                 if original_mouse_move:
@@ -1721,12 +1734,73 @@ class SleepMonitorChart(QWidget):
         container.mouseMoveEvent = container_mouse_move
         container.mouseReleaseEvent = container_mouse_release
         
+        # Add paintEvent to draw resize affordance glow line
+        original_paint = container.paintEvent
+        def container_paint_event(event):
+            if original_paint:
+                original_paint(event)
+            
+            # Draw localized glow line when hovering near bottom edge
+            if container.resize_hover:
+                from PyQt5.QtGui import QPainter, QColor, QPen, QLinearGradient
+                try:
+                    painter = QPainter(container)
+                    painter.setRenderHint(QPainter.Antialiasing)
+                    
+                    # Get mouse position and container dimensions
+                    mouse_x = container.hover_mouse_x
+                    container_width = container.width()
+                    y = container.height() - 2
+                    
+                    # Create localized glow effect centered around mouse position
+                    glow_width = 150  # Width of the glow area
+                    glow_start_x = max(0, mouse_x - glow_width // 2)
+                    glow_end_x = min(container_width, mouse_x + glow_width // 2)
+                    
+                    # Draw gradient glow line (professional medical-grade blue)
+                    gradient = QLinearGradient(glow_start_x, y, glow_end_x, y)
+                    gradient.setColorAt(0.0, QColor(59, 130, 246, 0))  # Transparent at edges
+                    gradient.setColorAt(0.3, QColor(59, 130, 246, 100))  # Fading in
+                    gradient.setColorAt(0.5, QColor(59, 130, 246, 220))  # Brightest at center
+                    gradient.setColorAt(0.7, QColor(59, 130, 246, 100))  # Fading out
+                    gradient.setColorAt(1.0, QColor(59, 130, 246, 0))  # Transparent at edges
+                    
+                    pen = QPen(gradient)
+                    pen.setWidth(4)
+                    pen.setCapStyle(Qt.RoundCap)
+                    painter.setPen(pen)
+                    painter.drawLine(glow_start_x, y, glow_end_x, y)
+                    
+                    # Add a subtle secondary glow for depth
+                    pen2 = QPen(QColor(147, 197, 253, 80))
+                    pen2.setWidth(8)
+                    pen2.setCapStyle(Qt.RoundCap)
+                    painter.setPen(pen2)
+                    painter.drawLine(glow_start_x, y, glow_end_x, y)
+                    
+                    # Draw a bright center line for precision
+                    center_pen = QPen(QColor(255, 255, 255, 180))
+                    center_pen.setWidth(2)
+                    center_pen.setCapStyle(Qt.RoundCap)
+                    painter.setPen(center_pen)
+                    painter.drawLine(mouse_x - 20, y, mouse_x + 20, y)
+                    
+                    painter.end()
+                except Exception as e:
+                    print(f"Error drawing glow line: {e}")
+        
+        container.paintEvent = container_paint_event
+        
         # Plot Widget with custom ViewBox
         plot_widget = pg.PlotWidget(viewBox=CustomViewBox())
         plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         plot_widget.setAlignment(Qt.AlignCenter)
         # Remove all grid lines for clean white background
         plot_widget.showGrid(x=False, y=False)
+        
+        # Disable all auto-range and auto-visibility for stable PSG monitor behavior
+        plot_widget.enableAutoRange(False)
+        plot_widget.setAutoVisible(y=False)
         
         # Remove right-click context menu
         
