@@ -20,13 +20,13 @@ for i in range(df.shape[1]):
 # Index 1: body_position (actual column 2)
 # Index 2: pulse (actual column 3)
 # Index 3: spo2 (actual column 4)
-# Index 4: body_movement (actual column 5)
+# Index 4: body_movement (actual column 5). 
 # Index 5: airflow (actual column 6)
-# Index 6: null (actual column 7)
+# Index 6: null (actual column 7).            
 # Index 7: snoring (actual column 8)
 # Index 8: null (actual column 9)
-# Index 9: null (actual column 10)
-
+# Index 9: null (actual column 10)  
+ 
 # Extract signals according to user's specification
 timestamp = df[1].values
 body_position = df[2].values
@@ -38,7 +38,6 @@ snoring = df[8].values
 
 # Create time in seconds (relative to first timestamp)
 time_seconds = (timestamp - timestamp[0]) / 1000.0  # Convert ms to seconds
-
 # Plot all signals
 fig, axes = plt.subplots(8, 1, figsize=(15, 12), sharex=True)
 fig.suptitle('PSG Signal Data - Column Position Verification', fontsize=16)

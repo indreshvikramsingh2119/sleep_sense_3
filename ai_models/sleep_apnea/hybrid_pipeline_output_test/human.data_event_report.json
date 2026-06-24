@@ -1,0 +1,1766 @@
+[
+  {
+    "event_id": "event_001",
+    "start_sec": 3560.172,
+    "end_sec": 3660.267,
+    "duration_sec": 100.0949999999998,
+    "start_index": 11180,
+    "end_index": 11493,
+    "airflow_baseline": 31.0,
+    "airflow_min": 3.0,
+    "airflow_drop_percent": 90.32258064516128,
+    "spo2_baseline": 95.0,
+    "spo2_min": 71.0,
+    "spo2_drop": 24.0,
+    "movement_mean": 10.449044585987261,
+    "snoring_mean": 5.292993630573249,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_001.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.47210291028022766,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.472 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.47210291028022766
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.36425626277923584
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11880164593458176
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.04483921080827713
+      }
+    ]
+  },
+  {
+    "event_id": "event_002",
+    "start_sec": 4120.069,
+    "end_sec": 4210.231,
+    "duration_sec": 90.16199999999935,
+    "start_index": 12933,
+    "end_index": 13215,
+    "airflow_baseline": 15.0,
+    "airflow_min": 8.0,
+    "airflow_drop_percent": 46.666666666666664,
+    "spo2_baseline": 95.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 30.0,
+    "movement_mean": 7.501766784452297,
+    "snoring_mean": 5.34982332155477,
+    "rule_hint": "REVIEW",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_002.png",
+    "candidate_label": "REVIEW",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4545556306838989,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.455 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4545556306838989
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.38894200325012207
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.10270442068576813
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.053797874599695206
+      }
+    ]
+  },
+  {
+    "event_id": "event_003",
+    "start_sec": 5220.111,
+    "end_sec": 5400.211,
+    "duration_sec": 180.10000000000036,
+    "start_index": 16375,
+    "end_index": 16940,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 91.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 26.0,
+    "movement_mean": 8.395759717314487,
+    "snoring_mean": 5.987632508833922,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_003.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4361778795719147,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.436 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4361778795719147
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.39975160360336304
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.08941426128149033
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.074656181037426
+      }
+    ]
+  },
+  {
+    "event_id": "event_004",
+    "start_sec": 5430.07,
+    "end_sec": 6120.203,
+    "duration_sec": 690.1330000000007,
+    "start_index": 17033,
+    "end_index": 19191,
+    "airflow_baseline": 14.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 92.85714285714286,
+    "spo2_baseline": 65.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 0.0,
+    "movement_mean": 8.885595182955072,
+    "snoring_mean": 6.034738304770727,
+    "rule_hint": "REVIEW",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_004.png",
+    "candidate_label": "REVIEW",
+    "cnn_label": "MSA",
+    "cnn_confidence": 0.41456761956214905,
+    "final_label": "MSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.415 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "MSA",
+        "confidence": 0.41456761956214905
+      },
+      {
+        "label": "CSA",
+        "confidence": 0.283780574798584
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.2714107036590576
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.03024105727672577
+      }
+    ]
+  },
+  {
+    "event_id": "event_005",
+    "start_sec": 6110.175,
+    "end_sec": 6220.018,
+    "duration_sec": 109.84299999999985,
+    "start_index": 19160,
+    "end_index": 19504,
+    "airflow_baseline": 14.0,
+    "airflow_min": 5.0,
+    "airflow_drop_percent": 64.28571428571429,
+    "spo2_baseline": 96.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 31.0,
+    "movement_mean": 7.84927536231884,
+    "snoring_mean": 6.3478260869565215,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_005.png",
+    "candidate_label": "HSA",
+    "cnn_label": "MSA",
+    "cnn_confidence": 0.4341750741004944,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.434 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "MSA",
+        "confidence": 0.4341750741004944
+      },
+      {
+        "label": "CSA",
+        "confidence": 0.41018909215927124
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.09353034198284149
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.06210550293326378
+      }
+    ]
+  },
+  {
+    "event_id": "event_006",
+    "start_sec": 6360.037,
+    "end_sec": 6490.092,
+    "duration_sec": 130.05499999999938,
+    "start_index": 19942,
+    "end_index": 20348,
+    "airflow_baseline": 15.0,
+    "airflow_min": 8.0,
+    "airflow_drop_percent": 46.666666666666664,
+    "spo2_baseline": 96.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 31.0,
+    "movement_mean": 5.0,
+    "snoring_mean": 7.167076167076167,
+    "rule_hint": "REVIEW",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_006.png",
+    "candidate_label": "REVIEW",
+    "cnn_label": "MSA",
+    "cnn_confidence": 0.4708639085292816,
+    "final_label": "MSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.471 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "MSA",
+        "confidence": 0.4708639085292816
+      },
+      {
+        "label": "CSA",
+        "confidence": 0.3671738803386688
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.08438020199537277
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.07758202403783798
+      }
+    ]
+  },
+  {
+    "event_id": "event_007",
+    "start_sec": 6620.17,
+    "end_sec": 7070.001,
+    "duration_sec": 449.83100000000013,
+    "start_index": 20755,
+    "end_index": 22161,
+    "airflow_baseline": 14.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 92.85714285714286,
+    "spo2_baseline": 91.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 26.0,
+    "movement_mean": 7.567164179104478,
+    "snoring_mean": 6.077469793887705,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_007.png",
+    "candidate_label": "CSA",
+    "cnn_label": "MSA",
+    "cnn_confidence": 0.3958505392074585,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.396 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "MSA",
+        "confidence": 0.3958505392074585
+      },
+      {
+        "label": "CSA",
+        "confidence": 0.3382987678050995
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.22867517173290253
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.037175580859184265
+      }
+    ]
+  },
+  {
+    "event_id": "event_008",
+    "start_sec": 7270.083,
+    "end_sec": 7390.303,
+    "duration_sec": 120.22000000000025,
+    "start_index": 22786,
+    "end_index": 23162,
+    "airflow_baseline": 14.0,
+    "airflow_min": 5.0,
+    "airflow_drop_percent": 64.28571428571429,
+    "spo2_baseline": 96.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 31.0,
+    "movement_mean": 5.0,
+    "snoring_mean": 6.347480106100796,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_008.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4509076178073883,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.451 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4509076178073883
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.38155829906463623
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.10086715966463089
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.06666693836450577
+      }
+    ]
+  },
+  {
+    "event_id": "event_009",
+    "start_sec": 7420.072,
+    "end_sec": 7650.042,
+    "duration_sec": 229.97000000000025,
+    "start_index": 23255,
+    "end_index": 23974,
+    "airflow_baseline": 14.0,
+    "airflow_min": 6.0,
+    "airflow_drop_percent": 57.14285714285714,
+    "spo2_baseline": 96.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 31.0,
+    "movement_mean": 5.991666666666666,
+    "snoring_mean": 5.933333333333334,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_009.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.45550474524497986,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.456 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.45550474524497986
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.38412246108055115
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.09174959361553192
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.06862319260835648
+      }
+    ]
+  },
+  {
+    "event_id": "event_010",
+    "start_sec": 7660.242,
+    "end_sec": 7760.147,
+    "duration_sec": 99.90499999999975,
+    "start_index": 24006,
+    "end_index": 24318,
+    "airflow_baseline": 15.0,
+    "airflow_min": 4.0,
+    "airflow_drop_percent": 73.33333333333333,
+    "spo2_baseline": 95.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 30.0,
+    "movement_mean": 6.782747603833866,
+    "snoring_mean": 5.670926517571885,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_010.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4712711572647095,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.471 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4712711572647095
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.36934980750083923
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11351560801267624
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.04586338996887207
+      }
+    ]
+  },
+  {
+    "event_id": "event_011",
+    "start_sec": 7810.122,
+    "end_sec": 7890.197,
+    "duration_sec": 80.07499999999982,
+    "start_index": 24474,
+    "end_index": 24724,
+    "airflow_baseline": 15.0,
+    "airflow_min": 8.0,
+    "airflow_drop_percent": 46.666666666666664,
+    "spo2_baseline": 97.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 32.0,
+    "movement_mean": 5.0,
+    "snoring_mean": 5.7848605577689245,
+    "rule_hint": "REVIEW",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_011.png",
+    "candidate_label": "REVIEW",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.46400052309036255,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.464 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.46400052309036255
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.37751778960227966
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.1108374372124672
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.0476442351937294
+      }
+    ]
+  },
+  {
+    "event_id": "event_012",
+    "start_sec": 7880.005,
+    "end_sec": 8110.273,
+    "duration_sec": 230.26800000000003,
+    "start_index": 24692,
+    "end_index": 25411,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 97.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 32.0,
+    "movement_mean": 8.716666666666667,
+    "snoring_mean": 5.688888888888889,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_012.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.44860559701919556,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.449 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.44860559701919556
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3862268328666687
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.09608186781406403
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.06908572465181351
+      }
+    ]
+  },
+  {
+    "event_id": "event_013",
+    "start_sec": 8100.019,
+    "end_sec": 8290.152,
+    "duration_sec": 190.1329999999998,
+    "start_index": 25379,
+    "end_index": 25973,
+    "airflow_baseline": 14.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 92.85714285714286,
+    "spo2_baseline": 89.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 24.0,
+    "movement_mean": 10.025210084033613,
+    "snoring_mean": 6.258823529411765,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_013.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.43335938453674316,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.433 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.43335938453674316
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.39760029315948486
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.09822598844766617
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.07081431895494461
+      }
+    ]
+  },
+  {
+    "event_id": "event_014",
+    "start_sec": 8330.003,
+    "end_sec": 8400.114,
+    "duration_sec": 70.11099999999897,
+    "start_index": 26098,
+    "end_index": 26317,
+    "airflow_baseline": 14.0,
+    "airflow_min": 7.0,
+    "airflow_drop_percent": 50.0,
+    "spo2_baseline": 96.0,
+    "spo2_min": 92.0,
+    "spo2_drop": 4.0,
+    "movement_mean": 5.0,
+    "snoring_mean": 5.290909090909091,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_014.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4580962061882019,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.458 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4580962061882019
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3800426721572876
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11495188623666763
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.04690922424197197
+      }
+    ]
+  },
+  {
+    "event_id": "event_015",
+    "start_sec": 8480.11,
+    "end_sec": 8640.166,
+    "duration_sec": 160.05599999999868,
+    "start_index": 26566,
+    "end_index": 27065,
+    "airflow_baseline": 14.0,
+    "airflow_min": 2.0,
+    "airflow_drop_percent": 85.71428571428571,
+    "spo2_baseline": 98.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 33.0,
+    "movement_mean": 6.392,
+    "snoring_mean": 5.494,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_015.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.43715566396713257,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.437 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.43715566396713257
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.4052828848361969
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.09803244471549988
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.05952906981110573
+      }
+    ]
+  },
+  {
+    "event_id": "event_016",
+    "start_sec": 8630.028,
+    "end_sec": 8910.022,
+    "duration_sec": 279.9940000000006,
+    "start_index": 27033,
+    "end_index": 27907,
+    "airflow_baseline": 14.0,
+    "airflow_min": 4.0,
+    "airflow_drop_percent": 71.42857142857143,
+    "spo2_baseline": 97.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 32.0,
+    "movement_mean": 5.336,
+    "snoring_mean": 5.756571428571428,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_016.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4336426854133606,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.434 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4336426854133606
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.4020845293998718
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.08785489201545715
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.0764179602265358
+      }
+    ]
+  },
+  {
+    "event_id": "event_017",
+    "start_sec": 8940.153,
+    "end_sec": 9030.064,
+    "duration_sec": 89.91100000000006,
+    "start_index": 28001,
+    "end_index": 28281,
+    "airflow_baseline": 14.0,
+    "airflow_min": 6.0,
+    "airflow_drop_percent": 57.14285714285714,
+    "spo2_baseline": 94.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 29.0,
+    "movement_mean": 5.0,
+    "snoring_mean": 7.145907473309609,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_017.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4409503638744354,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.441 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4409503638744354
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.39187246561050415
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11848988384008408
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.04868729040026665
+      }
+    ]
+  },
+  {
+    "event_id": "event_018",
+    "start_sec": 9120.29,
+    "end_sec": 9280.094,
+    "duration_sec": 159.80399999999827,
+    "start_index": 28562,
+    "end_index": 29060,
+    "airflow_baseline": 14.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 92.85714285714286,
+    "spo2_baseline": 94.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 29.0,
+    "movement_mean": 7.709418837675351,
+    "snoring_mean": 5.501002004008016,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_018.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4464019238948822,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.446 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4464019238948822
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.39201971888542175
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.09940683096647263
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.06217154487967491
+      }
+    ]
+  },
+  {
+    "event_id": "event_019",
+    "start_sec": 9290.03,
+    "end_sec": 9440.087,
+    "duration_sec": 150.05699999999888,
+    "start_index": 29091,
+    "end_index": 29559,
+    "airflow_baseline": 15.0,
+    "airflow_min": 5.0,
+    "airflow_drop_percent": 66.66666666666666,
+    "spo2_baseline": 93.0,
+    "spo2_min": 69.0,
+    "spo2_drop": 24.0,
+    "movement_mean": 5.742004264392324,
+    "snoring_mean": 5.567164179104478,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_019.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4374101459980011,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.437 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4374101459980011
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.4026903510093689
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.10277543216943741
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.057124048471450806
+      }
+    ]
+  },
+  {
+    "event_id": "event_020",
+    "start_sec": 11270.115,
+    "end_sec": 11330.285,
+    "duration_sec": 60.17000000000007,
+    "start_index": 35261,
+    "end_index": 35449,
+    "airflow_baseline": 15.0,
+    "airflow_min": 7.0,
+    "airflow_drop_percent": 53.333333333333336,
+    "spo2_baseline": 96.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 31.0,
+    "movement_mean": 9.867724867724867,
+    "snoring_mean": 5.677248677248677,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_020.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4568488299846649,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.457 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4568488299846649
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3751985728740692
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.12154301255941391
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.04640958085656166
+      }
+    ]
+  },
+  {
+    "event_id": "event_021",
+    "start_sec": 12480.188,
+    "end_sec": 12570.077,
+    "duration_sec": 89.88899999999921,
+    "start_index": 39028,
+    "end_index": 39308,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 97.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 32.0,
+    "movement_mean": 10.05693950177936,
+    "snoring_mean": 5.540925266903915,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_021.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4628865718841553,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.463 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4628865718841553
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3712674379348755
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11539048701524734
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.05045558139681816
+      }
+    ]
+  },
+  {
+    "event_id": "event_022",
+    "start_sec": 14280.175,
+    "end_sec": 14670.224,
+    "duration_sec": 390.0490000000009,
+    "start_index": 44613,
+    "end_index": 45822,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 96.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 31.0,
+    "movement_mean": 8.251239669421487,
+    "snoring_mean": 6.620661157024793,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_022.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.46174710988998413,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.462 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.46174710988998413
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3549487590789795
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.12284371256828308
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.060460466891527176
+      }
+    ]
+  },
+  {
+    "event_id": "event_023",
+    "start_sec": 14680.136,
+    "end_sec": 14880.14,
+    "duration_sec": 200.003999999999,
+    "start_index": 45853,
+    "end_index": 46472,
+    "airflow_baseline": 14.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 92.85714285714286,
+    "spo2_baseline": 94.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 29.0,
+    "movement_mean": 6.254838709677419,
+    "snoring_mean": 5.696774193548387,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_023.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4492207467556,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.449 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4492207467556
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.389493465423584
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.10290296375751495
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.058382775634527206
+      }
+    ]
+  },
+  {
+    "event_id": "event_024",
+    "start_sec": 14870.017,
+    "end_sec": 15000.314,
+    "duration_sec": 130.29700000000048,
+    "start_index": 46441,
+    "end_index": 46845,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 96.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 31.0,
+    "movement_mean": 8.037037037037036,
+    "snoring_mean": 5.392592592592592,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_024.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.45312783122062683,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.453 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.45312783122062683
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3765851557254791
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11769668012857437
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.052590299397706985
+      }
+    ]
+  },
+  {
+    "event_id": "event_025",
+    "start_sec": 15020.243,
+    "end_sec": 15090.053,
+    "duration_sec": 69.80999999999949,
+    "start_index": 46906,
+    "end_index": 47121,
+    "airflow_baseline": 15.0,
+    "airflow_min": 7.0,
+    "airflow_drop_percent": 53.333333333333336,
+    "spo2_baseline": 96.0,
+    "spo2_min": 94.0,
+    "spo2_drop": 2.0,
+    "movement_mean": 5.0,
+    "snoring_mean": 5.722222222222222,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_025.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4590264856815338,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.459 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4590264856815338
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3765822649002075
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.12185866385698318
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.042532678693532944
+      }
+    ]
+  },
+  {
+    "event_id": "event_026",
+    "start_sec": 15170.143,
+    "end_sec": 15260.08,
+    "duration_sec": 89.9369999999999,
+    "start_index": 47370,
+    "end_index": 47648,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 96.0,
+    "spo2_min": 86.0,
+    "spo2_drop": 10.0,
+    "movement_mean": 12.702508960573477,
+    "snoring_mean": 5.745519713261649,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_026.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4503364562988281,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.450 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4503364562988281
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3776424825191498
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.12519872188568115
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.04682229831814766
+      }
+    ]
+  },
+  {
+    "event_id": "event_027",
+    "start_sec": 17650.006,
+    "end_sec": 17790.058,
+    "duration_sec": 140.05199999999968,
+    "start_index": 55111,
+    "end_index": 55550,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 96.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 31.0,
+    "movement_mean": 5.9818181818181815,
+    "snoring_mean": 6.225,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_027.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4451349973678589,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.445 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4451349973678589
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3877461552619934
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.10315493494272232
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.0639638677239418
+      }
+    ]
+  },
+  {
+    "event_id": "event_028",
+    "start_sec": 17810.147,
+    "end_sec": 17940.153,
+    "duration_sec": 130.00599999999758,
+    "start_index": 55613,
+    "end_index": 56022,
+    "airflow_baseline": 14.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 92.85714285714286,
+    "spo2_baseline": 94.0,
+    "spo2_min": 85.0,
+    "spo2_drop": 9.0,
+    "movement_mean": 10.536585365853659,
+    "snoring_mean": 5.729268292682927,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_028.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.45982179045677185,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.460 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.45982179045677185
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3707290589809418
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11799147725105286
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.051457613706588745
+      }
+    ]
+  },
+  {
+    "event_id": "event_029",
+    "start_sec": 19320.267,
+    "end_sec": 19410.049,
+    "duration_sec": 89.78199999999924,
+    "start_index": 60353,
+    "end_index": 60635,
+    "airflow_baseline": 14.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 92.85714285714286,
+    "spo2_baseline": 94.0,
+    "spo2_min": 70.0,
+    "spo2_drop": 24.0,
+    "movement_mean": 7.469964664310954,
+    "snoring_mean": 6.060070671378092,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_029.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4560851454734802,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.456 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4560851454734802
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.38263750076293945
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11342961341142654
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.04784781113266945
+      }
+    ]
+  },
+  {
+    "event_id": "event_030",
+    "start_sec": 19810.194,
+    "end_sec": 19890.203,
+    "duration_sec": 80.00900000000183,
+    "start_index": 61891,
+    "end_index": 62141,
+    "airflow_baseline": 14.0,
+    "airflow_min": 7.0,
+    "airflow_drop_percent": 50.0,
+    "spo2_baseline": 93.0,
+    "spo2_min": 84.0,
+    "spo2_drop": 9.0,
+    "movement_mean": 7.725099601593626,
+    "snoring_mean": 5.46613545816733,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_030.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4570828676223755,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.457 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4570828676223755
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3710387051105499
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.1273193657398224
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.04455907270312309
+      }
+    ]
+  },
+  {
+    "event_id": "event_031",
+    "start_sec": 19950.273,
+    "end_sec": 20060.291,
+    "duration_sec": 110.01800000000003,
+    "start_index": 62329,
+    "end_index": 62674,
+    "airflow_baseline": 14.0,
+    "airflow_min": 7.0,
+    "airflow_drop_percent": 50.0,
+    "spo2_baseline": 93.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 28.0,
+    "movement_mean": 9.971098265895954,
+    "snoring_mean": 5.6473988439306355,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_031.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4563126862049103,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.456 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4563126862049103
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.38417208194732666
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.10717646777629852
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.05233879014849663
+      }
+    ]
+  },
+  {
+    "event_id": "event_032",
+    "start_sec": 20290.214,
+    "end_sec": 20400.261,
+    "duration_sec": 110.04699999999866,
+    "start_index": 63395,
+    "end_index": 63741,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 94.0,
+    "spo2_min": 76.0,
+    "spo2_drop": 18.0,
+    "movement_mean": 8.772334293948127,
+    "snoring_mean": 5.270893371757925,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_032.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.47012007236480713,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.470 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.47012007236480713
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.37419426441192627
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.10355119407176971
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.05213440954685211
+      }
+    ]
+  },
+  {
+    "event_id": "event_033",
+    "start_sec": 21060.097,
+    "end_sec": 21150.316,
+    "duration_sec": 90.21899999999732,
+    "start_index": 65809,
+    "end_index": 66092,
+    "airflow_baseline": 15.0,
+    "airflow_min": 5.0,
+    "airflow_drop_percent": 66.66666666666666,
+    "spo2_baseline": 88.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 23.0,
+    "movement_mean": 11.221830985915492,
+    "snoring_mean": 5.264084507042254,
+    "rule_hint": "HSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_033.png",
+    "candidate_label": "HSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4700345993041992,
+    "final_label": "HSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.470 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4700345993041992
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3724880516529083
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.10934487730264664
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.048132527619600296
+      }
+    ]
+  },
+  {
+    "event_id": "event_034",
+    "start_sec": 21150.316,
+    "end_sec": 21320.026,
+    "duration_sec": 169.71000000000276,
+    "start_index": 66092,
+    "end_index": 66623,
+    "airflow_baseline": 14.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 92.85714285714286,
+    "spo2_baseline": 96.0,
+    "spo2_min": 80.0,
+    "spo2_drop": 16.0,
+    "movement_mean": 8.278195488721805,
+    "snoring_mean": 6.389097744360902,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_034.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.42741167545318604,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.427 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.42741167545318604
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.41443127393722534
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.08814110606908798
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.07001592218875885
+      }
+    ]
+  },
+  {
+    "event_id": "event_035",
+    "start_sec": 22180.062,
+    "end_sec": 22360.251,
+    "duration_sec": 180.1889999999985,
+    "start_index": 69316,
+    "end_index": 69880,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 97.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 32.0,
+    "movement_mean": 11.895575221238937,
+    "snoring_mean": 5.435398230088496,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_035.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4532041847705841,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.453 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4532041847705841
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.38436996936798096
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.09889420121908188
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.06353169679641724
+      }
+    ]
+  },
+  {
+    "event_id": "event_036",
+    "start_sec": 22530.071,
+    "end_sec": 22630.156,
+    "duration_sec": 100.08499999999913,
+    "start_index": 70411,
+    "end_index": 70725,
+    "airflow_baseline": 15.0,
+    "airflow_min": 8.0,
+    "airflow_drop_percent": 46.666666666666664,
+    "spo2_baseline": 96.0,
+    "spo2_min": 93.0,
+    "spo2_drop": 3.0,
+    "movement_mean": 5.0,
+    "snoring_mean": 5.476190476190476,
+    "rule_hint": "REVIEW",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_036.png",
+    "candidate_label": "REVIEW",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.44362205266952515,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.444 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.44362205266952515
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3973510265350342
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.1086658388376236
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.050361089408397675
+      }
+    ]
+  },
+  {
+    "event_id": "event_037",
+    "start_sec": 23080.055,
+    "end_sec": 23240.03,
+    "duration_sec": 159.97499999999854,
+    "start_index": 72133,
+    "end_index": 72634,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 97.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 32.0,
+    "movement_mean": 8.352589641434262,
+    "snoring_mean": 5.374501992031872,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_037.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4586179256439209,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.459 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4586179256439209
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.38135161995887756
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.1038479134440422
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.05618252232670784
+      }
+    ]
+  },
+  {
+    "event_id": "event_038",
+    "start_sec": 23750.321,
+    "end_sec": 23980.185,
+    "duration_sec": 229.8640000000014,
+    "start_index": 74232,
+    "end_index": 74952,
+    "airflow_baseline": 15.0,
+    "airflow_min": 1.0,
+    "airflow_drop_percent": 93.33333333333333,
+    "spo2_baseline": 96.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 31.0,
+    "movement_mean": 10.299583911234397,
+    "snoring_mean": 5.879334257975034,
+    "rule_hint": "CSA",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_038.png",
+    "candidate_label": "CSA",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4843461513519287,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.484 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4843461513519287
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3404959440231323
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.09493046998977661
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.08022747933864594
+      }
+    ]
+  },
+  {
+    "event_id": "event_039",
+    "start_sec": 25000.052,
+    "end_sec": 25070.021,
+    "duration_sec": 69.96900000000096,
+    "start_index": 78141,
+    "end_index": 78360,
+    "airflow_baseline": 14.0,
+    "airflow_min": 8.0,
+    "airflow_drop_percent": 42.857142857142854,
+    "spo2_baseline": 65.0,
+    "spo2_min": 91.0,
+    "spo2_drop": 0.0,
+    "movement_mean": 5.0,
+    "snoring_mean": 5.7681818181818185,
+    "rule_hint": "REVIEW",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_039.png",
+    "candidate_label": "REVIEW",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.46066832542419434,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.461 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.46066832542419434
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3767317533493042
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11440694332122803
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.048193030059337616
+      }
+    ]
+  },
+  {
+    "event_id": "event_040",
+    "start_sec": 25150.245,
+    "end_sec": 25210.0,
+    "duration_sec": 59.75500000000102,
+    "start_index": 78610,
+    "end_index": 78797,
+    "airflow_baseline": 14.0,
+    "airflow_min": 8.0,
+    "airflow_drop_percent": 42.857142857142854,
+    "spo2_baseline": 91.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 26.0,
+    "movement_mean": 7.042553191489362,
+    "snoring_mean": 5.276595744680851,
+    "rule_hint": "REVIEW",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_040.png",
+    "candidate_label": "REVIEW",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.44847574830055237,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.448 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.44847574830055237
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3911743760108948
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11078161746263504
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.0495682954788208
+      }
+    ]
+  },
+  {
+    "event_id": "event_041",
+    "start_sec": 25270.026,
+    "end_sec": 25370.183,
+    "duration_sec": 100.15699999999924,
+    "start_index": 78984,
+    "end_index": 79297,
+    "airflow_baseline": 14.0,
+    "airflow_min": 8.0,
+    "airflow_drop_percent": 42.857142857142854,
+    "spo2_baseline": 94.0,
+    "spo2_min": 89.0,
+    "spo2_drop": 5.0,
+    "movement_mean": 10.487261146496815,
+    "snoring_mean": 5.662420382165605,
+    "rule_hint": "REVIEW",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_041.png",
+    "candidate_label": "REVIEW",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.4470064640045166,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.447 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.4470064640045166
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.3765808045864105
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.12940920889377594
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.04700351879000664
+      }
+    ]
+  },
+  {
+    "event_id": "event_042",
+    "start_sec": 26580.112,
+    "end_sec": 26650.119,
+    "duration_sec": 70.00699999999779,
+    "start_index": 83073,
+    "end_index": 83292,
+    "airflow_baseline": 19.0,
+    "airflow_min": 11.0,
+    "airflow_drop_percent": 42.10526315789473,
+    "spo2_baseline": 92.0,
+    "spo2_min": 65.0,
+    "spo2_drop": 27.0,
+    "movement_mean": 8.018181818181818,
+    "snoring_mean": 5.4363636363636365,
+    "rule_hint": "REVIEW",
+    "image_path": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/event_images/event_042.png",
+    "candidate_label": "REVIEW",
+    "cnn_label": "CSA",
+    "cnn_confidence": 0.46804460883140564,
+    "final_label": "CSA",
+    "validation_status": "low_confidence_rule_override",
+    "validation_reason": "CNN confidence 0.468 below threshold 0.70",
+    "top_probabilities": [
+      {
+        "label": "CSA",
+        "confidence": 0.46804460883140564
+      },
+      {
+        "label": "MSA",
+        "confidence": 0.36998048424720764
+      },
+      {
+        "label": "OSA",
+        "confidence": 0.11529289931058884
+      },
+      {
+        "label": "HSA",
+        "confidence": 0.04668205976486206
+      }
+    ]
+  }
+]

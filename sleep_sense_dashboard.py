@@ -143,7 +143,42 @@ class PatientInfoWidget(QWidget):
             "Data Files (*.csv *.edf *.txt *.json);;All Files (*)"
         )
         if files:
-            print(f"Uploading files: {files}")
+            if not self.monitor_chart:
+                QMessageBox.warning(self, "Chart Not Available", "Monitor chart is not connected.")
+                return
+
+            selected_file = files[0]
+            lower_name = selected_file.lower()
+            if not lower_name.endswith((".csv", ".txt")):
+                QMessageBox.information(
+                    self,
+                    "Unsupported File",
+                    "Abhi graph plotting ke liye CSV/TXT upload supported hai.",
+                )
+                return
+
+            time_data, signals = self.monitor_chart.load_psg_data(selected_file)
+            if len(time_data) == 0 or not signals:
+                QMessageBox.warning(
+                    self,
+                    "Load Failed",
+                    f"Selected file load nahi ho payi:\n{selected_file}",
+                )
+                return
+
+            jumped = self.monitor_chart.focus_on_first_detected_event()
+            if not jumped:
+                self.monitor_chart.current_time_offset = 0
+                self.monitor_chart.refresh_charts()
+            self.monitor_chart.time_position_updated.emit()
+            QMessageBox.information(
+                self,
+                "Upload Complete",
+                (
+                    f"Data load ho gaya aur graph update ho gaya:\n{os.path.basename(selected_file)}"
+                    + ("\nFirst detected event par jump ho gaya." if jumped else "\nKoi detected event nahi mila.")
+                ),
+            )
 
     def create_raw_data_section(self):
         """Inline raw-data file list shown under patient details."""
@@ -471,9 +506,38 @@ class PatientInfoWidget(QWidget):
             "",
             "Data Files (*.csv *.edf *.txt);;All Files (*)"
         )
-        # Raw Data tab removed from the UI; keep chooser only as no-op.
         if files:
-            pass
+            if not self.monitor_chart:
+                QMessageBox.warning(self, "Chart Not Available", "Monitor chart is not connected.")
+                return
+
+            selected_file = files[0]
+            lower_name = selected_file.lower()
+            if not lower_name.endswith((".csv", ".txt")):
+                QMessageBox.information(
+                    self,
+                    "Unsupported File",
+                    "Abhi graph plotting ke liye CSV/TXT upload supported hai.",
+                )
+                return
+
+            time_data, signals = self.monitor_chart.load_psg_data(selected_file)
+            if len(time_data) == 0 or not signals:
+                QMessageBox.warning(
+                    self,
+                    "Load Failed",
+                    f"Selected file load nahi ho payi:\n{selected_file}",
+                )
+                return
+
+            self.monitor_chart.current_time_offset = 0
+            self.monitor_chart.refresh_charts()
+            self.monitor_chart.time_position_updated.emit()
+            QMessageBox.information(
+                self,
+                "Upload Complete",
+                f"Data load ho gaya aur graph update ho gaya:\n{os.path.basename(selected_file)}",
+            )
     
     def save_current_data(self):
         """Save current data"""
@@ -949,6 +1013,7 @@ class SleepSenseDashboard(QMainWindow):
         self.monitor_chart = SleepMonitorChart()
         self.monitor_chart.set_patient_id("--------")
         self.monitor_chart.raw_data_saved.connect(self.patient_info.add_saved_raw_file)
+        self.monitor_chart.apnea_events_updated.connect(self.patient_info.update_detected_events_list)
         
         # Connect monitor chart reference to patient info for save functionality
         self.patient_info.monitor_chart = self.monitor_chart

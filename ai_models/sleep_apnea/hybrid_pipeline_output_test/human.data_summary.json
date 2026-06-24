@@ -1,0 +1,32 @@
+{
+  "source_csv": "sleep_sense_3/extracted_data/human.data.csv",
+  "output_dir": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test",
+  "candidate_count": 42,
+  "report_csv": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/human.data_event_report.csv",
+  "report_json": "sleep_sense_3/ai_models/sleep_apnea/hybrid_pipeline_output_test/human.data_event_report.json",
+  "preprocessing": {
+    "source_rows": 83963,
+    "processed_rows": 83963,
+    "estimated_sample_rate_hz": 3.1152647975086354,
+    "target_sample_rate_hz": 10.0,
+    "smoothing_seconds": 1.5,
+    "channels": [
+      "airflow",
+      "spo2",
+      "pulse",
+      "body_movement",
+      "snoring"
+    ]
+  },
+  "model_meta": {
+    "model_path": "/Users/indresh/Downloads/sleep_sense_3/sleep_sense_3/ai_models/sleep_apnea/models/event_image_cnn_custom.keras",
+    "class_names_path": "/Users/indresh/Downloads/sleep_sense_3/sleep_sense_3/ai_models/sleep_apnea/models/event_image_cnn_class_names.json",
+    "image_size": [
+      64,
+      64
+    ],
+    "backend": "keras_custom_cnn",
+    "resolved_model_path": "/Users/indresh/Downloads/sleep_sense_3/sleep_sense_3/ai_models/sleep_apnea/models/event_image_cnn_custom.keras",
+    "resolved_class_names_path": "/Users/indresh/Downloads/sleep_sense_3/sleep_sense_3/ai_models/sleep_apnea/models/event_image_cnn_class_names.json"
+  }
+}

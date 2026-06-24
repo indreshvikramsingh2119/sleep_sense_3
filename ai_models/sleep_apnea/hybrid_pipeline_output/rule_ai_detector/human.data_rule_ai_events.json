@@ -1,0 +1,47 @@
+{
+  "baseline_source": "raw_airflow_top10_percent_median",
+  "pipeline_mode": "rule_first_ai_second",
+  "rule_scan_used": true,
+  "ai_enabled_requested": false,
+  "ai_model_loaded": false,
+  "rule_candidate_segments_found": 1,
+  "rule_candidates_after_filter": 0,
+  "rule_candidates_after_merge": 0,
+  "ai_candidates_processed": 0,
+  "baseline_airflow": 23.0,
+  "baseline_occurrence": 2700,
+  "stable_peak_baseline": 34.0,
+  "stable_peak_occurrence": 37,
+  "apnea_threshold": 4.599999999999999,
+  "hypopnea_threshold": 16.099999999999998,
+  "recovery_threshold": 19.55,
+  "recovery_sec": 2.0,
+  "estimated_sample_rate_hz": 10.0,
+  "preprocess_meta": {
+    "source_rows": 83963,
+    "processed_rows": 83963,
+    "estimated_sample_rate_hz": 10.0,
+    "target_sample_rate_hz": 10.0,
+    "smoothing_seconds": 1.5,
+    "channels": [
+      "airflow",
+      "spo2",
+      "pulse",
+      "body_movement",
+      "snoring"
+    ]
+  },
+  "model_meta": {},
+  "debug_summary": [
+    "baseline_source=raw_airflow_top10_percent_median",
+    "baseline_airflow=23.00",
+    "apnea_threshold=4.60",
+    "hypopnea_threshold=16.10",
+    "raw_candidate_segments=1",
+    "after_filter_segments=0",
+    "after_merge_segments=0"
+  ],
+  "debug_events": [],
+  "events": [],
+  "source_csv": "sleep_sense_3/extracted_data/human.data.csv"
+}

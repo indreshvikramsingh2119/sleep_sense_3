@@ -122,19 +122,26 @@ class SleepSenseDashboard(QMainWindow):
         self.monitor_chart = SleepMonitorChart()
         self.monitor_chart.set_patient_id("--------")
         self.monitor_chart.raw_data_saved.connect(self.patient_info.add_saved_raw_file)
-        
-        # Auto-load PSG data from CSV file
+        self.monitor_chart.apnea_events_updated.connect(self.patient_info.update_detected_events_list)
+
+        # Connect monitor chart reference to patient info for upload/save/event jump functionality
+        self.patient_info.monitor_chart = self.monitor_chart
+
+        # Connect dashboard slider to chart navigation updates
+        self.monitor_chart.time_position_updated.connect(self.update_slider_position)
+
+        # Auto-load PSG data only after all chart/patient-panel wiring is ready
         self.auto_load_psg_data()
+
+        # If detection already exists after auto-load, mirror it in the side event list immediately
+        if self.monitor_chart.auto_rule_ai_result:
+            self.patient_info.update_detected_events_list(
+                self.monitor_chart.auto_rule_ai_result.get("events", [])
+            )
         
         # Start playback automatically after a short delay to show full data
         from PyQt5.QtCore import QTimer
         QTimer.singleShot(1000, self.start_auto_playback)
-        
-        # Connect monitor chart reference to patient info for save functionality
-        self.patient_info.monitor_chart = self.monitor_chart
-        
-        # Connect dashboard slider to chart navigation updates
-        self.monitor_chart.time_position_updated.connect(self.update_slider_position)
         
         # Update button text to show initial count
         self.graph_dropdown_button.setText("Graphs (8/8) ▼")
@@ -323,10 +330,10 @@ class SleepSenseDashboard(QMainWindow):
             }
         """)
         # Add vertical divider line
-        divider3 = QFrame()
-        divider3.setFrameShape(QFrame.VLine)
-        divider3.setFrameShadow(QFrame.Sunken)
-        divider3.setStyleSheet("""
+        divider4 = QFrame()
+        divider4.setFrameShape(QFrame.VLine)
+        divider4.setFrameShadow(QFrame.Sunken)
+        divider4.setStyleSheet("""
             QFrame {
                 background-color: #d1d5db;
                 color: #d1d5db;
@@ -334,8 +341,8 @@ class SleepSenseDashboard(QMainWindow):
                 margin: 0 4px;
             }
         """)
-        divider3.setFixedWidth(1)
-        controls_layout.addWidget(divider3)
+        divider4.setFixedWidth(1)
+        controls_layout.addWidget(divider4)
 
         # Event Navigation Buttons
         event_label = QLabel("Event Nav:")
@@ -1392,6 +1399,10 @@ class SleepSenseDashboard(QMainWindow):
         """Start playback automatically to show full SpO2 data"""
         try:
             if hasattr(self.monitor_chart, 'start_playback'):
+                if getattr(self.monitor_chart, "skip_next_auto_playback", False):
+                    self.monitor_chart.skip_next_auto_playback = False
+                    print("⏸ Auto-playback skipped because manual data load/upload already happened.")
+                    return
                 print("🎬 Starting auto-playback to show full SpO2 data...")
                 self.monitor_chart.start_playback()
                 print("✅ Auto-playback started - Full SpO2 graph should now be visible!")
@@ -1567,17 +1578,20 @@ class SleepSenseDashboard(QMainWindow):
         """Automatically load PSG data from CSV file"""
         import os
         try:
-            # Try to load from default path first
-            csv_path = os.path.join(os.getcwd(), "extracted_data", "human.data.csv")
-            
-            if os.path.exists(csv_path):
+            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            candidate_paths = [
+                os.path.join(os.getcwd(), "extracted_data", "human.data.csv"),
+                os.path.join(project_root, "extracted_data", "human.data.csv"),
+            ]
+
+            csv_path = next((path for path in candidate_paths if os.path.exists(path)), None)
+            if csv_path:
                 print(f"🎬 Auto-loading PSG data from: {csv_path}")
                 self.monitor_chart.load_psg_data(csv_path)
                 print("✅ PSG data loaded successfully - Playback ready!")
             else:
-                print(f"⚠️ Default PSG data file not found: {csv_path}")
+                print(f"⚠️ Default PSG data file not found in: {candidate_paths}")
                 print("💡 Use File → Load Data to select PSG data file")
-                # Don't auto-load, let user select file manually
         except Exception as e:
             print(f"❌ Error auto-loading PSG data: {e}")
             print("💡 Use File → Load Data to select PSG data file")
@@ -1596,7 +1610,6 @@ class SleepSenseDashboard(QMainWindow):
         
         if file_path:
             print(f"🎬 Loading PSG data from: {file_path}")
+            self.monitor_chart.skip_next_auto_playback = True
             self.monitor_chart.load_psg_data(file_path)
             print("✅ PSG data loaded successfully - Playback ready!")
-
-

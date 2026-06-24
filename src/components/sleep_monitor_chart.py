@@ -6,10 +6,12 @@ Sleep Monitor Chart Widget - Sleep Monitoring Chart Component
 """
 
 import os
+import sys
 import json
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 from scipy.signal import savgol_filter
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -23,12 +25,24 @@ import pyqtgraph as pg
 from .custom_viewbox import CustomViewBox
 from .amplitude_axis_properties_dialog import AmplitudeAxisPropertiesDialog
 
+APP_ROOT = Path(__file__).resolve().parents[2]
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+
+DETECTION_IMPORT_ERROR = None
+try:
+    from ai_models.sleep_apnea.detect_apnea_from_airflow import detect_apnea_events_from_csv
+except Exception as import_error:
+    detect_apnea_events_from_csv = None
+    DETECTION_IMPORT_ERROR = str(import_error)
+
 
 
 class SleepMonitorChart(QWidget):
     """Sleep Monitoring Chart Widget"""
     raw_data_saved = pyqtSignal(str, str)  # file_path, timestamp_iso
     time_position_updated = pyqtSignal()  # Signal when time position changes
+    apnea_events_updated = pyqtSignal(object)  # list[dict]
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -78,6 +92,11 @@ class SleepMonitorChart(QWidget):
         self.selection_labels = {}  # Store selection labels for each chart
         # Dynamic selections storage - store selections in absolute time coordinates
         self.dynamic_selections = {}  # {chart_name: [{'label': 'OSA', 'start_time': 123.5, 'end_time': 125.2, 'color': '#red'}]}
+        self.loaded_csv_path = None
+        self.auto_rule_ai_result = None
+        self.auto_focus_applied = False
+        self.skip_next_auto_playback = False
+        self.last_detection_error = None
         self.last_click_time = 0  # Debounce duplicate clicks
         
         # Apnea events storage
@@ -584,23 +603,11 @@ class SleepMonitorChart(QWidget):
                         
                         # Check if custom axis properties are set, if yes, use them instead of dynamic adjustment
                         if hasattr(plot_widget, 'axis_properties'):
-                            # Apply scaling first, then set the range
                             properties = plot_widget.axis_properties
                             low_value = properties.get('low_value', 35.0)
                             high_value = properties.get('high_value', 100.0)
-                            
-                            # Scale the data to fit within the custom range
-                            y_min_orig = np.min(y)
-                            y_max_orig = np.max(y)
-                            y_range_orig = y_max_orig - y_min_orig
-                            
-                            if y_range_orig > 0:
-                                y_range_new = high_value - low_value
-                                y_scaled = ((y - y_min_orig) / y_range_orig) * y_range_new + low_value
-                                plot_widget.plot_curve.setData(x, y_scaled, connect='finite')
-                                print(f"Scaled SpO2 data from {y_min_orig:.2f}-{y_max_orig:.2f} to {low_value:.2f}-{high_value:.2f}")
-                            
-                            # Set the range
+
+                            # Keep the original signal values intact and only update the viewport range.
                             try:
                                 plot_widget.setYRange(low_value, high_value, padding=0)
                             except TypeError:
@@ -663,25 +670,17 @@ class SleepMonitorChart(QWidget):
                     
                     # Apply custom axis properties if they exist
                     if hasattr(plot_widget, 'axis_properties'):
-                        
                         properties = plot_widget.axis_properties
                         low_value = properties.get('low_value', 35.0)
                         high_value = properties.get('high_value', 100.0)
-                        y_min_orig = np.min(y)
-                        y_max_orig = np.max(y)
-                        y_range_orig = y_max_orig - y_min_orig
-                        
-                        if y_range_orig > 0:
-                            y_range_new = high_value - low_value
-                            y_scaled = ((y - y_min_orig) / y_range_orig) * y_range_new + low_value
-                            plot_widget.plot_curve.setData(x, y_scaled)
-                            print(f"Scaled {chart_name} data from {y_min_orig:.2f}-{y_max_orig:.2f} to {low_value:.2f}-{high_value:.2f}")
-                        
-                        # Set the range
+
+                        # Manual axis range should not rewrite the underlying signal values.
                         try:
                             plot_widget.setYRange(low_value, high_value, padding=0)
                         except TypeError:
                             plot_widget.setRange(yRange=[low_value, high_value], padding=0)
+                    elif chart_name.strip() == "Airflow":
+                        self.apply_auto_signal_axis_range(plot_widget)
         
                 
         # Render dynamic selections for current time window
@@ -930,6 +929,76 @@ class SleepMonitorChart(QWidget):
         
         controls_layout.addWidget(self.speed_label)
         controls_layout.addWidget(self.speed_combo)
+
+        divider_two = QFrame()
+        divider_two.setFrameShape(QFrame.VLine)
+        divider_two.setFrameShadow(QFrame.Sunken)
+        divider_two.setStyleSheet("""
+            QFrame {
+                background-color: #d1d5db;
+                color: #d1d5db;
+                max-width: 1px;
+                min-width: 1px;
+            }
+        """)
+        controls_layout.addWidget(divider_two)
+
+        self.detection_summary_label = QLabel("Events: --")
+        self.detection_summary_label.setObjectName("detectionSummaryLabel")
+        self.detection_summary_label.setStyleSheet("""
+            QLabel#detectionSummaryLabel {
+                background-color: #f8fafc;
+                color: #1f2937;
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+        """)
+        controls_layout.addWidget(self.detection_summary_label)
+
+        self.jump_to_event_btn = QPushButton("First Event")
+        self.jump_to_event_btn.setEnabled(False)
+        self.jump_to_event_btn.setFixedHeight(24)
+        self.jump_to_event_btn.setMinimumWidth(84)
+        self.jump_to_event_btn.clicked.connect(self.focus_on_first_detected_event)
+        self.jump_to_event_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #fff7ed;
+                color: #9a3412;
+                border: 1px solid #fdba74;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 4px 8px;
+            }
+            QPushButton:hover:enabled {
+                background-color: #ffedd5;
+            }
+            QPushButton:disabled {
+                background-color: #f3f4f6;
+                color: #9ca3af;
+                border: 1px solid #e5e7eb;
+            }
+        """)
+        controls_layout.addWidget(self.jump_to_event_btn)
+
+        self.prev_event_btn = QPushButton("Prev Event")
+        self.prev_event_btn.setEnabled(False)
+        self.prev_event_btn.setFixedHeight(24)
+        self.prev_event_btn.setMinimumWidth(84)
+        self.prev_event_btn.clicked.connect(self.focus_on_previous_event)
+        self.prev_event_btn.setStyleSheet(self.jump_to_event_btn.styleSheet())
+        controls_layout.addWidget(self.prev_event_btn)
+
+        self.next_event_btn = QPushButton("Next Event")
+        self.next_event_btn.setEnabled(False)
+        self.next_event_btn.setFixedHeight(24)
+        self.next_event_btn.setMinimumWidth(84)
+        self.next_event_btn.clicked.connect(self.focus_on_next_event)
+        self.next_event_btn.setStyleSheet(self.jump_to_event_btn.styleSheet())
+        controls_layout.addWidget(self.next_event_btn)
         
         # Add controls container to main layout
         layout.addWidget(controls_container)
@@ -947,7 +1016,7 @@ class SleepMonitorChart(QWidget):
         # Format: (name, color, frequency, amplitude, offset, y_min, y_max)
         signals = [
             ("Body Position", "#3b82f6", 0.5, 10, 50, 0, 4),      # Categorical: 0-4
-            ("Airflow", "#8b5cf6", 0.3, 15, 50, -100, 100),        # Respiratory airflow: -100 to 100
+            ("Airflow", "#8b5cf6", 0.3, 15, 50, 0, 100),        # Respiratory airflow: 0 to 100
             ("Snoring", "#ef4444", 1.0, 8, 50, -40, 40),           # Snoring vibration: -40 to 40 (realistic waveform)
             ("Thorax", "#f59e0b", 0.2, 5, 50, -80, 80),            # Chest effort: -80 to 80
             ("Abdomen", "#10b981", 0.1, 2, 90, -80, 80),           # Abdomen effort: -80 to 80
@@ -985,12 +1054,74 @@ class SleepMonitorChart(QWidget):
                 pw.repaint()
                 print(f"Initial ViewBox sync for {pw.chart_name}: {start} → {end}")
 
+    def get_signal_auto_axis_range(self, chart_name):
+        """Return dynamic Y-axis range for airflow when auto-scaling is enabled."""
+        signal_name = str(chart_name).strip()
+
+        if signal_name == "Airflow":
+            stable_max_value = None
+            if self.auto_rule_ai_result:
+                stable_max_value = (
+                    self.auto_rule_ai_result.get("stable_peak_baseline")
+                    or self.auto_rule_ai_result.get("baseline_airflow")
+                )
+
+            try:
+                stable_max_value = float(stable_max_value)
+            except (TypeError, ValueError):
+                stable_max_value = None
+
+            if stable_max_value is None or stable_max_value <= 0:
+                return 0.0, 100.0
+
+            return 0.0, stable_max_value + 20.0
+
+        return 0.0, 100.0
+
+    def apply_auto_signal_axis_range(self, plot_widget):
+        """Apply auto Y-axis range to airflow when no manual override exists."""
+        chart_name = getattr(plot_widget, "chart_name", "").strip()
+        if chart_name != "Airflow":
+            return
+
+        if hasattr(plot_widget, "axis_properties"):
+            return
+
+        if getattr(plot_widget, "zoom_y_range", None) is not None:
+            return
+
+        y_min, y_max = self.get_signal_auto_axis_range(chart_name)
+        try:
+            plot_widget.setYRange(y_min, y_max, padding=0)
+        except TypeError:
+            plot_widget.setRange(yRange=[y_min, y_max], padding=0)
+
+        try:
+            plot_widget.setLimits(yMin=y_min, yMax=y_max)
+        except TypeError:
+            plot_widget.setLimits(yMin=y_min, yMax=y_max)
+
+        plot_widget.original_y_min = y_min
+        plot_widget.original_y_max = y_max
+        print(f"Applied {chart_name} auto axis range: {y_min} - {y_max}")
+
         
     def load_psg_data(self, csv_path):
         """Load PSG data from CSV file with medically appropriate scaling"""
         try:
+            if self.is_playing:
+                self.pause_playback()
+
+            self.current_time_offset = 0
+            self.auto_focus_applied = False
+            self._clear_auto_detected_selections()
+            self.update_detection_summary_label()
+
             # Read CSV file (no headers)
             df = pd.read_csv(csv_path, header=None)
+            df = df.apply(pd.to_numeric, errors='coerce')
+            df = df.dropna(how='all').reset_index(drop=True)
+            df = df.dropna(subset=[1]).reset_index(drop=True)
             
             print(f"CSV shape: {df.shape}")
             print(f"First few rows:\n{df.head()}")
@@ -1057,6 +1188,8 @@ class SleepMonitorChart(QWidget):
             
             # Update spo2_full_data for backward compatibility
             self.spo2_full_data = (time_data, signals['spo2'])
+            self.loaded_csv_path = str(csv_path)
+            self.run_rule_ai_apnea_detection()
             
             print(f"✅ Loaded PSG data: {len(time_data)} time points from {csv_path}")
             print(f"   Duration: {time_data[-1]/60:.1f} minutes")
@@ -1069,8 +1202,244 @@ class SleepMonitorChart(QWidget):
             # Return empty data if loading fails
             self.psg_full_data = None
             self.spo2_full_data = (np.array([]), np.array([]))
+            self.loaded_csv_path = None
+            self.auto_rule_ai_result = None
             return np.array([]), {}
 
+    def run_rule_ai_apnea_detection(self):
+        """Run airflow baseline rule detection plus AI label refinement on the loaded CSV."""
+        if not self.loaded_csv_path:
+            self.last_detection_error = "CSV path missing for detection."
+            self.auto_rule_ai_result = None
+            self.apnea_events_updated.emit([])
+            self.update_detection_summary_label()
+            return
+
+        if detect_apnea_events_from_csv is None:
+            self.last_detection_error = (
+                "Detector import failed."
+                + (f" {DETECTION_IMPORT_ERROR}" if DETECTION_IMPORT_ERROR else "")
+            )
+            self.auto_rule_ai_result = None
+            self.apnea_events_updated.emit([])
+            self.update_detection_summary_label()
+            return
+
+        try:
+            output_dir = APP_ROOT / "ai_models" / "sleep_apnea" / "hybrid_pipeline_output" / "chart_auto_events"
+            self.auto_rule_ai_result = detect_apnea_events_from_csv(
+                csv_path=self.loaded_csv_path,
+                output_dir=output_dir,
+                enable_ai=True,
+            )
+            self.auto_focus_applied = False
+            self.last_detection_error = None
+            print(
+                f"✅ Auto rule+AI apnea detection complete: "
+                f"{len(self.auto_rule_ai_result.get('events', []))} events"
+            )
+            self.refresh_charts()
+            self._sync_auto_detected_selections_into_overlays()
+            self.apnea_events_updated.emit(self.auto_rule_ai_result.get("events", []))
+            self.update_detection_summary_label()
+        except Exception as error:
+            print(f"⚠️ Auto rule+AI apnea detection failed: {error}")
+            try:
+                output_dir = APP_ROOT / "ai_models" / "sleep_apnea" / "hybrid_pipeline_output" / "chart_auto_events"
+                self.auto_rule_ai_result = detect_apnea_events_from_csv(
+                    csv_path=self.loaded_csv_path,
+                    output_dir=output_dir,
+                    enable_ai=False,
+                )
+                self.auto_focus_applied = False
+                self.last_detection_error = None
+                print(
+                    f"✅ Fallback rule-only apnea detection complete: "
+                    f"{len(self.auto_rule_ai_result.get('events', []))} events"
+                )
+                self.refresh_charts()
+                self._sync_auto_detected_selections_into_overlays()
+                self.apnea_events_updated.emit(self.auto_rule_ai_result.get("events", []))
+                self.update_detection_summary_label()
+            except Exception as fallback_error:
+                self.auto_rule_ai_result = None
+                self.auto_focus_applied = False
+                self.last_detection_error = f"Rule+AI failed: {error} | Rule-only failed: {fallback_error}"
+                self.apnea_events_updated.emit([])
+                self.update_detection_summary_label()
+                print(f"❌ Rule-only fallback detection also failed: {fallback_error}")
+
+    def _clear_auto_detected_selections(self):
+        """Remove previously inserted automatic overlays while preserving manual labels."""
+        for chart_name in list(self.selection_labels.keys()):
+            self.selection_labels[chart_name] = [
+                selection
+                for selection in self.selection_labels[chart_name]
+                if selection.get("source") != "auto_rule_ai"
+            ]
+            if not self.selection_labels[chart_name]:
+                self.selection_labels.pop(chart_name, None)
+
+        for chart_name in list(self.dynamic_selections.keys()):
+            self.dynamic_selections[chart_name] = [
+                selection
+                for selection in self.dynamic_selections[chart_name]
+                if selection.get("source") != "auto_rule_ai"
+            ]
+            if not self.dynamic_selections[chart_name]:
+                self.dynamic_selections.pop(chart_name, None)
+
+    def _sync_auto_detected_selections_into_overlays(self):
+        """Map automatic rule+AI events into the same overlay structure as manual drag labels."""
+        self._clear_auto_detected_selections()
+        if not self.auto_rule_ai_result:
+            return
+
+        events = self.auto_rule_ai_result.get("events", [])
+        if not events:
+            return
+
+        target_charts = ["Airflow"]
+
+        for chart_name in target_charts:
+            self.selection_labels.setdefault(chart_name, [])
+            self.dynamic_selections.setdefault(chart_name, [])
+
+            for event in events:
+                final_label = str(event.get("final_label") or event.get("rule_label") or "REVIEW")
+                if final_label == "REVIEW":
+                    continue
+                start_time = float(event["start_sec"])
+                end_time = float(event["end_sec"])
+                selection_data = {
+                    "label": final_label,
+                    "start": start_time,
+                    "end": end_time,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "color": self.get_label_color(final_label),
+                    "source": "auto_rule_ai",
+                }
+                dynamic_data = {
+                    "label": final_label,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "color": self.get_label_color(final_label),
+                    "source": "auto_rule_ai",
+                }
+                self.selection_labels[chart_name].append(selection_data)
+                self.dynamic_selections[chart_name].append(dynamic_data)
+
+    def get_first_detected_event(self):
+        """Return the earliest automatically detected event."""
+        if not self.auto_rule_ai_result:
+            return None
+        events = self.auto_rule_ai_result.get("events", [])
+        if not events:
+            return None
+        return min(events, key=lambda event: float(event.get("start_sec", 0.0)))
+
+    def focus_on_first_detected_event(self, padding_seconds: float = 30.0) -> bool:
+        """Jump the chart window to the first detected event."""
+        first_event = self.get_first_detected_event()
+        if not first_event:
+            return False
+
+        self.current_time_offset = max(0.0, float(first_event["start_sec"]) - float(padding_seconds))
+        self.auto_focus_applied = True
+        self.refresh_charts()
+        self.update_time_position_label()
+        self.update_detection_summary_label()
+        return True
+
+    def focus_on_event(self, event_data, padding_seconds: float = 30.0) -> bool:
+        """Jump the chart window to a specific event dictionary."""
+        if not event_data:
+            return False
+        self.current_time_offset = max(0.0, float(event_data["start_sec"]) - float(padding_seconds))
+        self.auto_focus_applied = True
+        self.refresh_charts()
+        self.update_time_position_label()
+        self.update_detection_summary_label()
+        return True
+
+    def focus_on_next_event(self) -> bool:
+        """Jump to the next event after the current window center."""
+        if not self.auto_rule_ai_result:
+            return False
+        events = sorted(self.auto_rule_ai_result.get("events", []), key=lambda event: float(event["start_sec"]))
+        if not events:
+            return False
+        center_time = self.current_time_offset + (self.current_time_window / 2.0)
+        for event in events:
+            if float(event["start_sec"]) > center_time:
+                return self.focus_on_event(event)
+        return self.focus_on_event(events[-1])
+
+    def focus_on_previous_event(self) -> bool:
+        """Jump to the previous event before the current window center."""
+        if not self.auto_rule_ai_result:
+            return False
+        events = sorted(self.auto_rule_ai_result.get("events", []), key=lambda event: float(event["start_sec"]))
+        if not events:
+            return False
+        center_time = self.current_time_offset + (self.current_time_window / 2.0)
+        for event in reversed(events):
+            if float(event["start_sec"]) < center_time:
+                return self.focus_on_event(event)
+        return self.focus_on_event(events[0])
+
+    def update_detection_summary_label(self):
+        """Show event detection summary in the control bar."""
+        if not hasattr(self, "detection_summary_label"):
+            return
+
+        if not self.auto_rule_ai_result:
+            if self.last_detection_error:
+                error_text = str(self.last_detection_error).replace("\n", " ")
+                if len(error_text) > 120:
+                    error_text = error_text[:117] + "..."
+                self.detection_summary_label.setText(f"Detection failed | {error_text}")
+            else:
+                self.detection_summary_label.setText("Events: --")
+            if hasattr(self, "jump_to_event_btn"):
+                self.jump_to_event_btn.setEnabled(False)
+            if hasattr(self, "prev_event_btn"):
+                self.prev_event_btn.setEnabled(False)
+            if hasattr(self, "next_event_btn"):
+                self.next_event_btn.setEnabled(False)
+            return
+
+        events = self.auto_rule_ai_result.get("events", [])
+        if not events:
+            self.detection_summary_label.setText("Events: 0 | No apnea event detected")
+            if hasattr(self, "jump_to_event_btn"):
+                self.jump_to_event_btn.setEnabled(False)
+            if hasattr(self, "prev_event_btn"):
+                self.prev_event_btn.setEnabled(False)
+            if hasattr(self, "next_event_btn"):
+                self.next_event_btn.setEnabled(False)
+            return
+
+        counts = {}
+        for event in events:
+            label = str(event.get("final_label") or event.get("rule_label") or "REVIEW")
+            counts[label] = counts.get(label, 0) + 1
+
+        first_event = self.get_first_detected_event()
+        first_time = self.format_timestamp(float(first_event["start_sec"])) if first_event else "--:--:--"
+        counts_text = " | ".join(f"{label}:{count}" for label, count in sorted(counts.items()))
+        status = "focused" if self.auto_focus_applied else "detected"
+        self.detection_summary_label.setText(
+            f"Events: {len(events)} | First: {first_time} | {counts_text} | {status}"
+        )
+        if hasattr(self, "jump_to_event_btn"):
+            self.jump_to_event_btn.setEnabled(True)
+        if hasattr(self, "prev_event_btn"):
+            self.prev_event_btn.setEnabled(True)
+        if hasattr(self, "next_event_btn"):
+            self.next_event_btn.setEnabled(True)
+ 
     def generate_realistic_snoring(self, raw_snoring, airflow):
         """Generate realistic snoring vibration waveforms from single-point values
         
@@ -1826,7 +2195,7 @@ class SleepMonitorChart(QWidget):
             # Fallback to hardcoded medical ranges if parameters not provided
             y_axis_ranges = {
                 "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
-                "Airflow": (-100, 100),     # Respiratory airflow waveform
+                "Airflow": (0, 100),     # Respiratory airflow waveform
                 "Snoring": (0, 100),        # Snoring intensity spikes
                 "Thorax": (-80, 80),        # Chest effort belt movement
                 "Abdomen": (-80, 80),       # Abdomen effort belt movement
@@ -1836,6 +2205,9 @@ class SleepMonitorChart(QWidget):
             }
             signal_name = name.strip()
             initial_y_min, initial_y_max = y_axis_ranges.get(signal_name, (0, 100))
+
+        if name.strip() == "Airflow":
+            initial_y_min, initial_y_max = self.get_signal_auto_axis_range(name.strip())
         
         # Set fixed Y-axis range based on medical standards
         try:
@@ -1843,6 +2215,9 @@ class SleepMonitorChart(QWidget):
         except TypeError:
             # Try alternative method for older pyqtgraph versions
             plot_widget.setRange(yRange=[initial_y_min, initial_y_max])
+
+        plot_widget.original_y_min = initial_y_min
+        plot_widget.original_y_max = initial_y_max
         
         # Restrict zoom to Y-axis only (amplitude zoom) - disable X-axis to prevent sliding
         plot_widget.setMouseEnabled(x=False, y=True)
@@ -1850,10 +2225,10 @@ class SleepMonitorChart(QWidget):
         # Disable auto-range and set fixed limits
         plot_widget.enableAutoRange(axis='y', enable=False)
         try:
-            plot_widget.setLimits(yMin=y_min, yMax=y_max)
+            plot_widget.setLimits(yMin=initial_y_min, yMax=initial_y_max)
         except TypeError:
             # Try alternative method for older pyqtgraph versions
-            plot_widget.setLimits(yMin=y_min, yMax=y_max)
+            plot_widget.setLimits(yMin=initial_y_min, yMax=initial_y_max)
             
         # Set X-axis to show time values based on current time window
         bottom_axis = plot_widget.getAxis('bottom')
@@ -2281,13 +2656,14 @@ class SleepMonitorChart(QWidget):
         
         # Get chart name to apply proper limits
         chart_name = getattr(plot_widget, 'chart_name', '')
+        airflow_auto_range = self.get_signal_auto_axis_range("Airflow")
         
         # Define medical standard Y-axis ranges for each signal type
         y_axis_ranges = {
             "Body Position": (0, 4),     
-            "Airflow": (-2, 2),        
+            "Airflow": airflow_auto_range,
             "Snoring": (0, 100),       
-            "Thorax": (-100, 100),     
+            "Thorax": (0, 100),     
             "Abdomen": (-100, 100),     
             "SpO2": (70, 100),
             "Pulse": (30, 250),
@@ -2320,9 +2696,10 @@ class SleepMonitorChart(QWidget):
     def reset_zoom(self, plot_widget):
         """Reset zoom to original medical standard range"""
         # Define medical standard Y-axis ranges
+        airflow_auto_range = self.get_signal_auto_axis_range("Airflow")
         y_axis_ranges = {
             "Body Position": (0, 4),   
-            "Airflow": (-2, 2),         
+            "Airflow": airflow_auto_range,
             "Snoring": (0, 100),        
             "Thorax": (-100, 100),     
             "Abdomen": (-100, 100),     
@@ -2822,30 +3199,8 @@ class SleepMonitorChart(QWidget):
             low_value = properties.get('low_value', 35.0)
             high_value = properties.get('high_value', 100.0)
             
-            # Get current data and transform it to fit within the new range
-            if hasattr(plot_widget, 'plot_curve') and plot_widget.plot_curve:
-                current_data = plot_widget.plot_curve.getData()
-                if current_data[0] is not None and len(current_data[0]) > 0:
-                    x_data, y_data = current_data
-                    
-                    # Calculate the original data range
-                    y_min_orig = np.min(y_data)
-                    y_max_orig = np.max(y_data)
-                    y_range_orig = y_max_orig - y_min_orig
-                    
-                    if y_range_orig > 0:
-                        # Scale the data to fit within the new range
-                        y_range_new = high_value - low_value
-                        
-                        # Transform data: map original range to new range
-                        y_scaled = ((y_data - y_min_orig) / y_range_orig) * y_range_new + low_value
-                        
-                        # Update the plot with scaled data
-                        plot_widget.plot_curve.setData(x_data, y_scaled)
-                        
-                        print(f"Scaled data from {y_min_orig:.2f}-{y_max_orig:.2f} to {low_value:.2f}-{high_value:.2f}")
-            
-            # Force the Y-axis range to exactly match the specified values
+            # Force the Y-axis range to exactly match the specified values without
+            # modifying the plotted signal values.
             try:
                 plot_widget.setYRange(low_value, high_value, padding=0)
             except TypeError:
@@ -3276,7 +3631,8 @@ class SleepMonitorChart(QWidget):
             'end': end_time_abs,
             'start_time': start_time_abs,
             'end_time': end_time_abs,
-            'color': self.get_label_color(label_type)
+            'color': self.get_label_color(label_type),
+            'source': 'manual',
         }
 
         # Calculate SpO2 info for SpO2 chart only
@@ -3317,7 +3673,8 @@ class SleepMonitorChart(QWidget):
             'start_time': start_time_abs,
             'end_time': end_time_abs,
             'color': self.get_label_color(label_type),
-            'spo2_info': spo2_info  
+            'spo2_info': spo2_info,
+            'source': 'manual',
         }
 
         self.selection_labels[chart_name].append(selection_data)
@@ -3494,6 +3851,10 @@ class SleepMonitorChart(QWidget):
             'CSA': 'rgba(59, 130, 246, 0.2)', 
             'MSA': 'rgba(245, 158, 11, 0.2)',  
             'HSA': 'rgba(16, 185, 129, 0.2)',   
+            'POSSIBLE_OSA': 'rgba(239, 68, 68, 0.2)',
+            'POSSIBLE_CSA': 'rgba(59, 130, 246, 0.2)',
+            'POSSIBLE_MSA': 'rgba(245, 158, 11, 0.2)',
+            'APNEA_REVIEW': 'rgba(107, 114, 128, 0.2)',
             'SATURATION': 'rgba(239, 68, 68, 0.2)'  
         }
         return colors.get(label_type, 'rgba(107, 114, 128, 0.2)')
@@ -3840,10 +4201,11 @@ class SleepMonitorChart(QWidget):
             print(f"Error in render_dynamic_selections: {e}")
 
     def update_apnea_events_display(self):
-        """Update apnea events display for current time window (placeholder method)"""
-        # This method is called during refresh_charts but doesn't need to do anything
-        # unless apnea events functionality is implemented
-        pass
+        """Ensure automatic apnea overlays stay synced with current chart set."""
+        if self.auto_rule_ai_result:
+            self._sync_auto_detected_selections_into_overlays()
+            self.render_dynamic_selections()
+        self.update_detection_summary_label()
     
     def update_all_overlays_on_resize(self):
         """Update all overlay positions when window is resized"""
@@ -3934,6 +4296,7 @@ Desaturations: {self.spo2_statistics['desaturation_events']}
     
     def resizeEvent(self, event):
         """Handle resize for watermark centering"""
+
         super().resizeEvent(event)
         if hasattr(self, 'watermark'):
-            self.watermark.setGeometry(self.charts_widget.rect())
+            self.watermark.setGeometry(self.charts_widget.rect()) 

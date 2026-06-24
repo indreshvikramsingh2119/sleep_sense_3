@@ -1,0 +1,9 @@
+{
+  "model_path": "/Users/indresh/Downloads/sleep_sense_3/sleep_sense_3/ai_models/sleep_apnea/models/event_image_cnn_custom.keras",
+  "class_names_path": "/Users/indresh/Downloads/sleep_sense_3/sleep_sense_3/ai_models/sleep_apnea/models/event_image_cnn_class_names.json",
+  "image_size": [
+    64,
+    64
+  ],
+  "backend": "keras_custom_cnn"
+}

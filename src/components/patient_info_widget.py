@@ -143,6 +143,27 @@ class PatientInfoWidget(QWidget):
         raw_container_layout.addWidget(raw_section)
         
         container_layout.addWidget(raw_container)
+
+        events_container = QFrame()
+        events_container.setObjectName("autoEventsContainer")
+        events_container.setStyleSheet("""
+            QFrame#autoEventsContainer {
+                background-color: rgba(255, 255, 255, 0.9);
+                border: 2px solid #cbd5e1;
+                border-radius: 10px;
+                padding: 8px;
+                margin: 4px;
+            }
+            QFrame#autoEventsContainer:hover {
+                border: 2px solid #94a3b8;
+                background-color: rgba(255, 255, 255, 1.0);
+            }
+        """)
+        events_layout = QVBoxLayout(events_container)
+        events_layout.setContentsMargins(8, 8, 8, 8)
+        events_layout.setSpacing(8)
+        events_layout.addWidget(self.create_detected_events_section())
+        container_layout.addWidget(events_container)
         
         container_layout.addStretch()
         scroll_layout.addWidget(main_container)
@@ -228,7 +249,46 @@ class PatientInfoWidget(QWidget):
             "Data Files (*.csv *.edf *.txt *.json);;All Files (*)"
         )
         if files:
-            print(f"Uploading files: {files}")
+            if not self.monitor_chart:
+                QMessageBox.warning(self, "Chart Not Available", "Monitor chart not connected.")
+                return
+
+            selected_file = files[0]
+            lower_name = selected_file.lower()
+            if not lower_name.endswith((".csv", ".txt")):
+                QMessageBox.information(
+                    self,
+                    "Unsupported File",
+                    "Abhi graph plotting ke liye CSV/TXT upload supported hai.",
+                )
+                return
+
+            if getattr(self.monitor_chart, "is_playing", False):
+                self.monitor_chart.pause_playback()
+            self.monitor_chart.skip_next_auto_playback = True
+
+            time_data, signals = self.monitor_chart.load_psg_data(selected_file)
+            if len(time_data) == 0 or not signals:
+                QMessageBox.warning(
+                    self,
+                    "Load Failed",
+                    f"Selected file load nahi ho payi:\n{selected_file}",
+                )
+                return
+
+            jumped = self.monitor_chart.focus_on_first_detected_event()
+            if not jumped:
+                self.monitor_chart.current_time_offset = 0
+            self.monitor_chart.refresh_charts()
+            self.monitor_chart.time_position_updated.emit()
+            QMessageBox.information(
+                self,
+                "Upload Complete",
+                (
+                    f"Data load ho gaya aur graph update ho gaya:\n{os.path.basename(selected_file)}"
+                    + ("\nFirst detected event par jump ho gaya." if jumped else "\nKoi detected event nahi mila.")
+                ),
+            )
 
     def create_raw_data_section(self):
         """Inline raw-data file list shown under patient details."""
@@ -293,6 +353,63 @@ class PatientInfoWidget(QWidget):
 
         return frame
 
+    def create_detected_events_section(self):
+        """Auto detected apnea events list with jump support."""
+        frame = QFrame()
+        frame.setObjectName("detectedEventsSection")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(12, 12, 12, 12)
+        frame_layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        title = QLabel("Detected Events")
+        title.setStyleSheet("font-weight: 700; color: #111827;")
+        header.addWidget(title)
+        header.addStretch()
+
+        self.detected_count_label = QLabel("0")
+        self.detected_count_label.setStyleSheet("font-weight: 700; color: #dc2626;")
+        header.addWidget(self.detected_count_label)
+        frame_layout.addLayout(header)
+
+        self.detected_hint_label = QLabel("Upload data to populate automatic apnea events.")
+        self.detected_hint_label.setStyleSheet("font-size: 11px; color: #6b7280;")
+        self.detected_hint_label.setWordWrap(True)
+        frame_layout.addWidget(self.detected_hint_label)
+
+        self.detected_events_list = QListWidget()
+        self.detected_events_list.setMinimumHeight(240)
+        self.detected_events_list.setVisible(False)
+        self.detected_events_list.itemClicked.connect(self.jump_to_detected_event)
+        self.detected_events_list.setStyleSheet("""
+            QListWidget {
+                background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 6px;
+                padding: 4px;
+                spacing: 2px;
+            }
+            QListWidget::item {
+                background-color: white;
+                border: 1px solid #e5e7eb;
+                border-radius: 4px;
+                padding: 6px 8px;
+                margin: 1px;
+                min-height: 26px;
+            }
+            QListWidget::item:selected {
+                background-color: #eff6ff;
+                color: #1e40af;
+                border: 1px solid #93c5fd;
+            }
+            QListWidget::item:hover {
+                background-color: #f1f5f9;
+                border: 1px solid #cbd5e1;
+            }
+        """)
+        frame_layout.addWidget(self.detected_events_list)
+        return frame
+
     def add_saved_raw_file(self, file_path: str, timestamp_iso: str):
         """Append a saved raw-data file to the inline list UI."""
         filename = os.path.basename(file_path)
@@ -307,6 +424,47 @@ class PatientInfoWidget(QWidget):
         item = QListWidgetItem(item_text)
         item.setToolTip(file_path)
         self.raw_file_list.insertItem(0, item)
+
+    def update_detected_events_list(self, events):
+        """Render automatic detected events and make them clickable."""
+        events = [
+            event
+            for event in list(events or [])
+            if str(event.get("final_label") or event.get("rule_label") or "REVIEW")
+            not in {"REVIEW", "APNEA_REVIEW", "NO_EVENT"}
+        ]
+        self.detected_count_label.setText(str(len(events)))
+        self.detected_hint_label.setVisible(len(events) == 0)
+        self.detected_events_list.setVisible(len(events) > 0)
+        self.detected_events_list.clear()
+
+        if not events:
+            self.detected_hint_label.setText("Upload data to populate automatic apnea events.")
+            return
+
+        self.detected_hint_label.setText("Click an event to jump the graph to that time.")
+        for event in sorted(events, key=lambda row: float(row.get("start_sec", 0.0))):
+            start_text = self._format_timestamp(float(event["start_sec"]))
+            end_text = self._format_timestamp(float(event["end_sec"]))
+            label = str(event.get("final_label") or event.get("rule_label") or "REVIEW")
+            duration = float(event.get("duration_sec", 0.0))
+            item = QListWidgetItem(f"{start_text} - {end_text} | {label} | {duration:.1f}s")
+            item.setData(Qt.UserRole, event)
+            self.detected_events_list.addItem(item)
+
+    def jump_to_detected_event(self, item):
+        """Jump monitor chart to the selected detected event."""
+        if not self.monitor_chart:
+            return
+        event_data = item.data(Qt.UserRole)
+        if event_data:
+            self.monitor_chart.focus_on_event(event_data)
+
+    def _format_timestamp(self, time_seconds: float) -> str:
+        hours = int(time_seconds // 3600)
+        minutes = int((time_seconds % 3600) // 60)
+        seconds = int(time_seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def create_summary_section(self):
         """Stub summary section to prevent runtime errors if called."""

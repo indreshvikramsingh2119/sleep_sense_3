@@ -1,0 +1,35 @@
+{
+  "source_csv": "/Users/indresh/Downloads/sleep_sense_3/sleep_sense_3/extracted_data/human.data.csv",
+  "raw_shape": [
+    83964,
+    11
+  ],
+  "clean_shape": [
+    83963,
+    11
+  ],
+  "window_seconds": 60,
+  "target_sample_rate_hz": 10,
+  "samples_per_window": 180,
+  "channels": [
+    "airflow",
+    "spo2",
+    "pulse",
+    "body_movement",
+    "snoring"
+  ],
+  "label_to_index": {
+    "Normal": 0,
+    "OSA": 1,
+    "CSA": 2,
+    "HSA": 3,
+    "MSA": 4
+  },
+  "dataset_shape": [
+    447,
+    180,
+    5
+  ],
+  "duration_seconds": 26865.305,
+  "note": "Rule-based labels are for dataset bootstrapping, not clinical diagnosis."
+}

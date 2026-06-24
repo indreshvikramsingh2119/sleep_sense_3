@@ -1,0 +1,8 @@
+{
+  "backend": "sklearn_knn",
+  "image_size": [
+    32,
+    32
+  ],
+  "color_mode": "grayscale"
+}
