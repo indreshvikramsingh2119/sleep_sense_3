@@ -42,8 +42,8 @@ except ImportError:
 SKIP_MINUTES = 20.0
 BASELINE_MINUTES = 45.0
 MIN_CANDIDATE_SEC = 4.0
-HSA_MIN_SEC = 4.0
-OSA_MIN_SEC = 4.0
+HSA_MIN_SEC = 10.0
+OSA_MIN_SEC = 10.0
 CSA_MIN_SEC = 10.0
 MAX_EVENT_SEC = 120.0
 MIN_STABLE_OCCURRENCE = 30
@@ -52,10 +52,15 @@ BASELINE_OCCURRENCE_TOLERANCE = 50
 CANDIDATE_WINDOW_SEC = 1.0
 CANDIDATE_MIN_FRACTION = 0.60
 BAND_MAX_GAP_SAMPLES = 3
+MIN_HSA_AIRFLOW_AMPLITUDE = 3.0
+MIN_HSA_AIRFLOW_AMPLITUDE_RATIO = 0.08
 
-APNEA_DROP = 0.80
-HYPOPNEA_DROP = 0.30
-MSA_DROP = 0.70
+APNEA_DROP = 0.70
+HYPOPNEA_DROP = 0.15
+CSA_DROP = 0.80
+HSA_DROP_PERCENT_RANGE = (15.0, 30.0)
+OSA_DROP_PERCENT_RANGE = (70.0, 80.0)
+CSA_DROP_PERCENT_RANGE = (80.0, 90.0)
 MERGE_GAP_SEC = 0.0
 
 SPO2_APNEA_DROP = 3.0
@@ -76,6 +81,9 @@ class DetectedApneaEvent:
     baseline_airflow: float
     event_min_airflow: float
     event_mean_airflow: float
+    event_peak_airflow: float
+    event_airflow_amplitude: float
+    airflow_amplitude_ratio: float
     airflow_drop_percent: float
     spo2_drop: float
     snoring_mean: float
@@ -101,6 +109,43 @@ def stable_max(values: pd.Series | np.ndarray, min_occurrence: int = MIN_STABLE_
             return float(value), int(count)
     max_value = float(rounded.max())
     return max_value, int((rounded == max_value).sum())
+
+
+def stable_min_from_occurrence_band(
+    values: pd.Series | np.ndarray,
+    target_occurrence: int = BASELINE_TARGET_OCCURRENCE,
+    tolerance: int = BASELINE_OCCURRENCE_TOLERANCE,
+) -> tuple[float, int]:
+    series = pd.Series(values).dropna()
+    series = pd.to_numeric(series, errors="coerce").dropna()
+
+    rounded = series.round(2)
+    counts = rounded.value_counts().sort_index(ascending=True)
+
+    lower = target_occurrence - tolerance
+    upper = target_occurrence + tolerance
+
+    candidates: list[tuple[float, int]] = []
+    for value, count in counts.items():
+        if lower <= int(count) <= upper:
+            candidates.append((float(value), int(count)))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0]
+
+    closest: list[tuple[float, int]] = []
+    min_diff: int | None = None
+    for value, count in counts.items():
+        diff = abs(int(count) - target_occurrence)
+        if min_diff is None or diff < min_diff:
+            min_diff = diff
+            closest = [(float(value), int(count))]
+        elif diff == min_diff:
+            closest.append((float(value), int(count)))
+
+    closest.sort(key=lambda item: item[0])
+    return closest[0]
 
 
 def baseline_from_occurrence_band(
@@ -173,64 +218,12 @@ def _rolling_fraction_mask(mask: np.ndarray, window_size: int, min_fraction: flo
     return fraction >= float(min_fraction)
 
 
-def _longest_true_run(mask: np.ndarray) -> tuple[int, int] | None:
-    best_start: int | None = None
-    best_end: int | None = None
-    run_start: int | None = None
-
-    for index, is_true in enumerate(mask):
-        if is_true and run_start is None:
-            run_start = index
-            continue
-
-        if not is_true and run_start is not None:
-            run_end = index - 1
-            if best_start is None or (run_end - run_start) > (best_end - best_start):
-                best_start = run_start
-                best_end = run_end
-            run_start = None
-
-    if run_start is not None:
-        run_end = len(mask) - 1
-        if best_start is None or (run_end - run_start) > (best_end - best_start):
-            best_start = run_start
-            best_end = run_end
-
-    if best_start is None or best_end is None:
-        return None
-
-    return best_start, best_end
-
-
-def _fill_short_false_gaps(mask: np.ndarray, max_gap: int) -> np.ndarray:
-    filled = mask.astype(bool).copy()
-    gap_start: int | None = None
-
-    for index, is_true in enumerate(filled):
-        if not is_true and gap_start is None:
-            gap_start = index
-            continue
-
-        if is_true and gap_start is not None:
-            gap_len = index - gap_start
-            if gap_len <= max_gap:
-                filled[gap_start:index] = True
-            gap_start = None
-
-    return filled
-
-
-def _band_limits_for_label(baseline_airflow: float, label: str) -> tuple[float, float] | None:
-    if label == "HSA":
-        return 0.0, baseline_airflow * 0.30
-
-    if label == "OSA":
-        return baseline_airflow * 0.50, baseline_airflow * 0.70
-
-    if label == "CSA":
-        return baseline_airflow * 0.80, baseline_airflow * 0.90
-
-    return None
+def _robust_signal_amplitude(values: pd.Series | np.ndarray) -> float:
+    series = pd.Series(values)
+    series = pd.to_numeric(series, errors="coerce").dropna()
+    if len(series) == 0:
+        return 0.0
+    return float(np.nanpercentile(series, 95) - np.nanpercentile(series, 5))
 
 
 def _label_min_duration_sec(label: str) -> float:
@@ -245,6 +238,8 @@ def _label_min_duration_sec(label: str) -> float:
 
 def _build_debug_summary(
     baseline_airflow: float,
+    stable_min_airflow: float,
+    airflow_reduction_range: float,
     apnea_threshold: float,
     hypopnea_threshold: float,
     raw_segments: int,
@@ -255,6 +250,9 @@ def _build_debug_summary(
     return [
         f"baseline_source={baseline_source}",
         f"baseline_airflow={baseline_airflow:.2f}",
+        f"stable_min_airflow={stable_min_airflow:.2f}",
+        f"reduction_scale=percent_drop_from_baseline",
+        f"airflow_reduction_range={airflow_reduction_range:.2f}",
         f"apnea_threshold={apnea_threshold:.2f}",
         f"hypopnea_threshold={hypopnea_threshold:.2f}",
         f"raw_candidate_segments={raw_segments}",
@@ -269,7 +267,9 @@ def _build_event_debug_line(event: dict[str, Any], event_id: int) -> str:
         f"{float(event['start_sec']):.1f}s - {float(event['end_sec']):.1f}s | "
         f"duration={float(event['duration_sec']):.1f}s | "
         f"baseline={float(event['baseline_airflow']):.2f} | "
+        f"peak_airflow={float(event['event_peak_airflow']):.2f} | "
         f"min_airflow={float(event['event_min_airflow']):.2f} | "
+        f"amp_ratio={float(event.get('airflow_amplitude_ratio', 0.0)):.2f} | "
         f"drop={float(event['airflow_drop_percent']):.1f}% | "
         f"rule={str(event['rule_label'])}"
     )
@@ -282,23 +282,9 @@ def classify_rule_event(
     movement_mean: float,
     variability_score: float,
     duration_sec: float | None = None,
+    airflow_amplitude: float | None = None,
+    airflow_amplitude_ratio: float | None = None,
 ) -> str:
-    # AIRFLOW-ONLY MODE
-    # HSA
-    # airflow_drop 70% to 100%
-    # >>>>>>>>>>>>>>>>>>>>>
-    #
-    # OSA
-    # airflow_drop 40% to <70%
-    # >>>>>>>>>>>>>>>>>>>>>
-    #
-    # CSA
-    # airflow_drop 10% to <40%
-    # >>>>>>>>>>>>>>>>>>>>>
-    #
-    # NO_EVENT
-    # duration < candidate sec
-    # >>>>>>>>>>>>>>>>>>>>>
     if duration_sec is not None and duration_sec > MAX_EVENT_SEC:
         return "NO_EVENT"
 
@@ -307,13 +293,13 @@ def classify_rule_event(
 
     drop_percent = drop_ratio * 100.0
 
-    if 70.0 <= drop_percent <= 100.0:
+    if HSA_DROP_PERCENT_RANGE[0] <= drop_percent <= HSA_DROP_PERCENT_RANGE[1]:
         return "HSA"
 
-    if 30.0 <= drop_percent < 50.0:
+    if OSA_DROP_PERCENT_RANGE[0] <= drop_percent <= OSA_DROP_PERCENT_RANGE[1]:
         return "OSA"
 
-    if 10.0 <= drop_percent < 20.0:
+    if CSA_DROP_PERCENT_RANGE[0] < drop_percent <= CSA_DROP_PERCENT_RANGE[1]:
         return "CSA"
 
     return "NO_EVENT"
@@ -339,8 +325,10 @@ def detect_apnea_events_from_dataframe(
     enable_ai: bool = False,
 ) -> dict[str, Any]:
     processed_df, preprocess_meta = preprocess_signals(signal_df)
+
     raw_time_sec = signal_df["time_sec"].to_numpy(dtype=float)
     raw_airflow = signal_df["airflow"].to_numpy(dtype=float)
+
     time_sec = signal_df["time_sec"].to_numpy(dtype=float)
     airflow = signal_df["airflow"].to_numpy(dtype=float)
     spo2 = signal_df["spo2"].to_numpy(dtype=float)
@@ -349,6 +337,8 @@ def detect_apnea_events_from_dataframe(
 
     estimated_fs = estimate_sample_rate_hz(signal_df)
     sample_dt = 1.0 / estimated_fs if estimated_fs else 0.1
+    peak_window_points = max(1, int(round(estimated_fs * CANDIDATE_WINDOW_SEC)))
+
     skip_sec = SKIP_MINUTES * 60.0
     baseline_end_sec = skip_sec + (BASELINE_MINUTES * 60.0)
 
@@ -362,20 +352,57 @@ def detect_apnea_events_from_dataframe(
         target_occurrence=BASELINE_TARGET_OCCURRENCE,
         tolerance=BASELINE_OCCURRENCE_TOLERANCE,
     )
+    stable_min_airflow, stable_min_occurrence = stable_min_from_occurrence_band(
+        baseline_airflow_window,
+        target_occurrence=BASELINE_TARGET_OCCURRENCE,
+        tolerance=BASELINE_OCCURRENCE_TOLERANCE,
+    )
+    airflow_reduction_range = float(airflow_baseline - stable_min_airflow)
+    if airflow_reduction_range <= 0:
+        airflow_reduction_range = float(airflow_baseline) if airflow_baseline else 1.0
+    baseline_airflow_amplitude = _robust_signal_amplitude(baseline_airflow_window)
+    if baseline_airflow_amplitude <= 0:
+        baseline_airflow_amplitude = airflow_reduction_range
+
     apnea_threshold = airflow_baseline * (1.0 - APNEA_DROP)
     hypopnea_threshold = airflow_baseline * (1.0 - HYPOPNEA_DROP)
+
     analysis_mask = time_sec >= skip_sec
     analysis_time = time_sec[analysis_mask]
     analysis_airflow = airflow[analysis_mask]
-    raw_candidate_mask = analysis_airflow <= hypopnea_threshold
-    candidate_window_points = max(1, int(round(estimated_fs * CANDIDATE_WINDOW_SEC)))
-    candidate_mask = _rolling_fraction_mask(
-        raw_candidate_mask,
-        window_size=candidate_window_points,
-        min_fraction=CANDIDATE_MIN_FRACTION,
-    )
-    segments = _segment_mask(candidate_mask, analysis_time, MIN_CANDIDATE_SEC)
     global_indices = np.where(analysis_mask)[0]
+
+    analysis_peak_envelope = (
+        pd.Series(analysis_airflow)
+        .rolling(window=peak_window_points, center=True, min_periods=1)
+        .max()
+        .to_numpy()
+    )
+
+    analysis_drop_percent = (
+        ((airflow_baseline - analysis_peak_envelope) / airflow_baseline) * 100.0
+        if airflow_baseline
+        else np.zeros_like(analysis_peak_envelope)
+    )
+    analysis_drop_percent = np.clip(analysis_drop_percent, 0.0, 100.0)
+
+    label_specs = [
+        (
+            "HSA",
+            lambda x: (x >= HSA_DROP_PERCENT_RANGE[0]) & (x <= HSA_DROP_PERCENT_RANGE[1]),
+            MIN_CANDIDATE_SEC,
+        ),
+        (
+            "OSA",
+            lambda x: (x >= OSA_DROP_PERCENT_RANGE[0]) & (x <= OSA_DROP_PERCENT_RANGE[1]),
+            MIN_CANDIDATE_SEC,
+        ),
+        (
+            "CSA",
+            lambda x: (x > CSA_DROP_PERCENT_RANGE[0]) & (x <= CSA_DROP_PERCENT_RANGE[1]),
+            MIN_CANDIDATE_SEC,
+        ),
+    ]
 
     model = None
     class_names: list[str] = []
@@ -392,106 +419,97 @@ def detect_apnea_events_from_dataframe(
     event_output_dir.mkdir(parents=True, exist_ok=True)
 
     preliminary_events: list[dict[str, Any]] = []
-    for local_start, local_end, duration_sec in segments:
-        start_index = int(global_indices[local_start])
-        end_index = int(global_indices[local_end])
+    raw_segment_count = 0
 
-        event_airflow = airflow[start_index:end_index + 1]
-        event_spo2 = spo2[start_index:end_index + 1]
-        event_snoring = snoring[start_index:end_index + 1]
-        event_movement = body_movement[start_index:end_index + 1]
+    for expected_label, label_mask_fn, label_min_sec in label_specs:
+        label_mask = label_mask_fn(analysis_drop_percent)
+        label_segments = _segment_mask(label_mask, analysis_time, label_min_sec)
+        raw_segment_count += len(label_segments)
 
-        event_min_airflow = float(np.nanmin(event_airflow))
-        event_mean_airflow = float(np.nanmean(event_airflow))
-        drop_ratio = 1.0 - (event_min_airflow / airflow_baseline) if airflow_baseline else 0.0
-        drop_percent = drop_ratio * 100.0
+        for local_start, local_end, duration_sec in label_segments:
+            start_index = int(global_indices[local_start])
+            end_index = int(global_indices[local_end])
 
-        pre_mask = (time_sec >= max(0.0, time_sec[start_index] - 30.0)) & (time_sec < time_sec[start_index])
-        pre_spo2 = spo2[pre_mask]
-        pre_spo2_ref = float(np.nanmax(pre_spo2)) if len(pre_spo2) > 0 else float(np.nanmax(spo2))
-        post_mask = (time_sec > time_sec[end_index]) & (time_sec <= (time_sec[end_index] + 30.0))
-        post_spo2 = spo2[post_mask]
-        post_spo2_min = float(np.nanmin(post_spo2)) if len(post_spo2) > 0 else float(np.nanmin(event_spo2))
-        spo2_drop = float(pre_spo2_ref - post_spo2_min)
+            event_airflow = airflow[start_index:end_index + 1]
+            event_spo2 = spo2[start_index:end_index + 1]
+            event_snoring = snoring[start_index:end_index + 1]
+            event_movement = body_movement[start_index:end_index + 1]
 
-        snoring_mean = float(np.nanmean(event_snoring))
-        movement_mean = float(np.nanmean(event_movement))
-        airflow_std = float(np.nanstd(event_airflow))
-        variability_score = airflow_std / airflow_baseline if airflow_baseline else 0.0
-
-        valid_band_candidates: list[tuple[float, str, int, int]] = []
-        for candidate_label in ("HSA", "OSA", "CSA"):
-            band_limits = _band_limits_for_label(airflow_baseline, candidate_label)
-            if band_limits is None:
-                continue
-
-            band_low, band_high = band_limits
-            band_mask = (event_airflow >= band_low) & (event_airflow <= band_high)
-
-            if candidate_label in {"HSA", "OSA"}:
-                band_mask = _fill_short_false_gaps(band_mask, max_gap=BAND_MAX_GAP_SAMPLES)
-
-            band_run = _longest_true_run(band_mask)
-            if band_run is None:
-                continue
-
-            local_band_start, local_band_end = band_run
-            band_duration_sec = (local_band_end - local_band_start + 1) * sample_dt
-            if band_duration_sec < _label_min_duration_sec(candidate_label):
-                continue
-
-            valid_band_candidates.append(
-                (band_duration_sec, candidate_label, local_band_start, local_band_end)
+            event_min_airflow = float(np.nanmin(event_airflow))
+            event_mean_airflow = float(np.nanmean(event_airflow))
+            event_peak_airflow = float(np.nanmax(event_airflow))
+            event_airflow_amplitude = _robust_signal_amplitude(event_airflow)
+            airflow_amplitude_ratio = (
+                event_airflow_amplitude / baseline_airflow_amplitude
+                if baseline_airflow_amplitude
+                else 0.0
             )
 
-        if not valid_band_candidates:
-            continue
+            drop_ratio = (
+                (airflow_baseline - event_peak_airflow) / airflow_baseline
+                if airflow_baseline
+                else 0.0
+            )
+            drop_ratio = float(np.clip(drop_ratio, 0.0, 1.0))
+            drop_percent = drop_ratio * 100.0
 
-        valid_band_candidates.sort(key=lambda item: item[0], reverse=True)
-        band_duration_sec, rule_label, local_band_start, local_band_end = valid_band_candidates[0]
+            pre_mask = (time_sec >= max(0.0, time_sec[start_index] - 30.0)) & (time_sec < time_sec[start_index])
+            pre_spo2 = spo2[pre_mask]
+            pre_spo2_ref = float(np.nanmax(pre_spo2)) if len(pre_spo2) > 0 else float(np.nanmax(spo2))
 
-        trimmed_start_index = start_index + local_band_start
-        trimmed_end_index = start_index + local_band_end
+            post_mask = (time_sec > time_sec[end_index]) & (time_sec <= (time_sec[end_index] + 30.0))
+            post_spo2 = spo2[post_mask]
+            post_spo2_min = float(np.nanmin(post_spo2)) if len(post_spo2) > 0 else float(np.nanmin(event_spo2))
+            spo2_drop = float(pre_spo2_ref - post_spo2_min)
 
-        start_index = trimmed_start_index
-        end_index = trimmed_end_index
-        duration_sec = band_duration_sec
+            snoring_mean = float(np.nanmean(event_snoring))
+            movement_mean = float(np.nanmean(event_movement))
+            airflow_std = float(np.nanstd(event_airflow))
+            variability_score = airflow_std / airflow_baseline if airflow_baseline else 0.0
 
-        event_airflow = airflow[start_index:end_index + 1]
-        event_spo2 = spo2[start_index:end_index + 1]
-        event_snoring = snoring[start_index:end_index + 1]
-        event_movement = body_movement[start_index:end_index + 1]
+            rule_label = classify_rule_event(
+                drop_ratio=drop_ratio,
+                spo2_drop=spo2_drop,
+                snoring_mean=snoring_mean,
+                movement_mean=movement_mean,
+                variability_score=variability_score,
+                duration_sec=float(duration_sec),
+                airflow_amplitude=float(event_airflow_amplitude),
+                airflow_amplitude_ratio=float(airflow_amplitude_ratio),
+            )
+            if rule_label == "NO_EVENT":
+                continue
 
-        event_min_airflow = float(np.nanmin(event_airflow))
-        event_mean_airflow = float(np.nanmean(event_airflow))
-        drop_ratio = 1.0 - (event_min_airflow / airflow_baseline) if airflow_baseline else 0.0
-        drop_percent = drop_ratio * 100.0
+            if rule_label != expected_label:
+                continue
 
-        snoring_mean = float(np.nanmean(event_snoring))
-        movement_mean = float(np.nanmean(event_movement))
-        airflow_std = float(np.nanstd(event_airflow))
-        variability_score = airflow_std / airflow_baseline if airflow_baseline else 0.0
+            preliminary_events.append(
+                {
+                    "start_index": start_index,
+                    "end_index": end_index,
+                    "start_sec": float(time_sec[start_index]),
+                    "end_sec": float(time_sec[end_index]),
+                    "duration_sec": float(duration_sec),
+                    "baseline_airflow": float(airflow_baseline),
+                    "event_min_airflow": event_min_airflow,
+                    "event_mean_airflow": event_mean_airflow,
+                    "event_peak_airflow": event_peak_airflow,
+                    "event_airflow_amplitude": float(event_airflow_amplitude),
+                    "airflow_amplitude_ratio": float(airflow_amplitude_ratio),
+                    "airflow_drop_percent": float(drop_percent),
+                    "spo2_drop": spo2_drop,
+                    "snoring_mean": snoring_mean,
+                    "movement_mean": movement_mean,
+                    "variability_score": float(variability_score),
+                    "rule_label": rule_label,
+                }
+            )
 
-        preliminary_events.append(
-            {
-                "start_index": start_index,
-                "end_index": end_index,
-                "start_sec": float(time_sec[start_index]),
-                "end_sec": float(time_sec[end_index]),
-                "duration_sec": float(duration_sec),
-                "baseline_airflow": float(airflow_baseline),
-                "event_min_airflow": event_min_airflow,
-                "event_mean_airflow": event_mean_airflow,
-                "airflow_drop_percent": float(drop_percent),
-                "spo2_drop": spo2_drop,
-                "snoring_mean": snoring_mean,
-                "movement_mean": movement_mean,
-                "variability_score": float(variability_score),
-                "rule_label": rule_label,
-            }
-        )
+    filtered_events = sorted(
+        preliminary_events,
+        key=lambda item: (item["start_sec"], item["end_sec"], item["rule_label"]),
+    )
 
-    filtered_events = sorted(preliminary_events, key=lambda item: (item["start_sec"], item["end_sec"], item["rule_label"]))
     merged_events: list[dict[str, Any]] = []
     for event in filtered_events:
         if not merged_events:
@@ -502,11 +520,22 @@ def detect_apnea_events_from_dataframe(
         same_label = previous["rule_label"] == event["rule_label"]
         small_gap = (event["start_sec"] - previous["end_sec"]) <= MERGE_GAP_SEC
         merged_duration = float(event["end_sec"]) - float(previous["start_sec"])
+
         if same_label and small_gap and merged_duration <= MAX_EVENT_SEC:
             previous["end_sec"] = max(previous["end_sec"], event["end_sec"])
             previous["end_index"] = max(previous["end_index"], event["end_index"])
             previous["duration_sec"] = previous["end_sec"] - previous["start_sec"]
             previous["event_min_airflow"] = min(previous["event_min_airflow"], event["event_min_airflow"])
+            previous["event_mean_airflow"] = min(previous["event_mean_airflow"], event["event_mean_airflow"])
+            previous["event_peak_airflow"] = max(previous["event_peak_airflow"], event["event_peak_airflow"])
+            previous["event_airflow_amplitude"] = max(
+                previous["event_airflow_amplitude"],
+                event["event_airflow_amplitude"],
+            )
+            previous["airflow_amplitude_ratio"] = max(
+                previous["airflow_amplitude_ratio"],
+                event["airflow_amplitude_ratio"],
+            )
             previous["airflow_drop_percent"] = max(previous["airflow_drop_percent"], event["airflow_drop_percent"])
             previous["spo2_drop"] = max(previous["spo2_drop"], event["spo2_drop"])
             previous["snoring_mean"] = max(previous["snoring_mean"], event["snoring_mean"])
@@ -518,12 +547,15 @@ def detect_apnea_events_from_dataframe(
 
     events: list[DetectedApneaEvent] = []
     ai_candidates_processed = 0
+
     for event_id, event in enumerate(merged_events, start=1):
         if float(event["duration_sec"]) > MAX_EVENT_SEC:
             continue
+
         ai_label = None
         ai_confidence = None
         image_path = None
+
         if model is not None and str(event["rule_label"]) in {"OSA", "CSA", "HSA"}:
             try:
                 ai_candidates_processed += 1
@@ -555,6 +587,7 @@ def detect_apnea_events_from_dataframe(
                 image_path = None
 
         final_label = _finalize_label(str(event["rule_label"]), ai_label, ai_confidence)
+
         events.append(
             DetectedApneaEvent(
                 event_id=event_id,
@@ -564,6 +597,9 @@ def detect_apnea_events_from_dataframe(
                 baseline_airflow=float(event["baseline_airflow"]),
                 event_min_airflow=float(event["event_min_airflow"]),
                 event_mean_airflow=float(event["event_mean_airflow"]),
+                event_peak_airflow=float(event["event_peak_airflow"]),
+                event_airflow_amplitude=float(event["event_airflow_amplitude"]),
+                airflow_amplitude_ratio=float(event["airflow_amplitude_ratio"]),
                 airflow_drop_percent=float(event["airflow_drop_percent"]),
                 spo2_drop=float(event["spo2_drop"]),
                 snoring_mean=float(event["snoring_mean"]),
@@ -579,22 +615,24 @@ def detect_apnea_events_from_dataframe(
 
     debug_summary = _build_debug_summary(
         baseline_airflow=float(airflow_baseline),
+        stable_min_airflow=float(stable_min_airflow),
+        airflow_reduction_range=float(airflow_reduction_range),
         apnea_threshold=float(apnea_threshold),
         hypopnea_threshold=float(hypopnea_threshold),
-        raw_segments=int(len(segments)),
+        raw_segments=int(raw_segment_count),
         filtered_segments=int(len(preliminary_events)),
         merged_segments=int(len(merged_events)),
-        baseline_source="raw_airflow_occurrence_band_500pm50",
+        baseline_source="raw_airflow_occurrence_band_500pm50_upper_peak",
     )
     debug_events = [_build_event_debug_line(event.to_dict(), event.event_id) for event in events]
 
     return {
-        "baseline_source": "raw_airflow_occurrence_band_500pm50",
+        "baseline_source": "raw_airflow_occurrence_band_500pm50_upper_peak",
         "pipeline_mode": "rule_first_ai_second",
         "rule_scan_used": True,
         "ai_enabled_requested": bool(enable_ai),
         "ai_model_loaded": model is not None,
-        "rule_candidate_segments_found": int(len(segments)),
+        "rule_candidate_segments_found": int(raw_segment_count),
         "rule_candidates_after_filter": int(len(preliminary_events)),
         "rule_candidates_after_merge": int(len(merged_events)),
         "ai_candidates_processed": int(ai_candidates_processed),
@@ -602,6 +640,10 @@ def detect_apnea_events_from_dataframe(
         "baseline_occurrence": int(baseline_occurrence),
         "stable_peak_baseline": float(airflow_baseline),
         "stable_peak_occurrence": int(baseline_occurrence),
+        "stable_min_baseline": float(stable_min_airflow),
+        "stable_min_occurrence": int(stable_min_occurrence),
+        "airflow_reduction_scale": "percent_drop_from_baseline",
+        "airflow_reduction_range": float(airflow_reduction_range),
         "apnea_threshold": float(apnea_threshold),
         "hypopnea_threshold": float(hypopnea_threshold),
         "estimated_sample_rate_hz": float(estimated_fs),
@@ -655,8 +697,8 @@ def main() -> None:
     print("=" * 80)
     print(f"Stable airflow baseline     : {result['baseline_airflow']:.2f}")
     print(f"Baseline occurrence         : {result['baseline_occurrence']}")
-    print(f"Apnea threshold 90% drop    : airflow <= {result['apnea_threshold']:.2f}")
-    print(f"Hypopnea threshold 30% drop : airflow <= {result['hypopnea_threshold']:.2f}")
+    print(f"OSA threshold 70% drop      : airflow <= {result['apnea_threshold']:.2f}")
+    print(f"HSA threshold 15% drop      : airflow <= {result['hypopnea_threshold']:.2f}")
     print("=" * 80)
     print(f"Total candidate events found: {len(result['events'])}")
     print("=" * 80)

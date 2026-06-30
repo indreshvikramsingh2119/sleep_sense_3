@@ -141,28 +141,36 @@ def preprocess_signals(
 
 
 def _classify_rule_hint(airflow_drop: float, spo2_drop: float, movement_mean: float, snoring_mean: float) -> str:
-    if airflow_drop >= 90 and spo2_drop >= 3 and (snoring_mean >= 20 or movement_mean >= 20):
-        return "OSA"
-    if airflow_drop >= 85 and spo2_drop >= 3 and snoring_mean < 15 and movement_mean < 15:
-        return "CSA"
-    if airflow_drop >= 50 and spo2_drop >= 2:
+    # HSA: 10-30% reduction from max value
+    if 10.0 <= airflow_drop <= 30.0:
         return "HSA"
-    if airflow_drop >= 70 and movement_mean >= 25:
+    
+    # OSA: 50-70% drop from max value
+    if 50.0 <= airflow_drop <= 70.0:
+        return "OSA"
+    
+    # CSA: 80-90% drop from max value
+    if 80.0 <= airflow_drop <= 90.0:
+        return "CSA"
+    
+    # MSA: Mixed Sleep Apnea (70% drop with high movement)
+    if airflow_drop >= 70.0 and movement_mean >= 25:
         return "MSA"
+    
     return "REVIEW"
 
 
 def detect_rule_candidates(
     signal_df: pd.DataFrame,
     min_event_seconds: float = 10.0,
-    airflow_drop_threshold_percent: float = 45.0,
+    airflow_drop_threshold_percent: float = 10.0,
     spo2_drop_threshold: float = 2.0,
 ) -> list[CandidateEvent]:
     time_values = signal_df["time_sec"].to_numpy(dtype=float)
     if len(time_values) == 0:
         return []
 
-    global_airflow_drop = max(float(airflow_drop_threshold_percent), 20.0)
+    global_airflow_drop = max(float(airflow_drop_threshold_percent), 10.0)
     window_seconds = max(60.0, min_event_seconds * 4.0)
     step_seconds = max(10.0, min_event_seconds)
     movement_threshold = float(signal_df["body_movement"].quantile(0.90))
