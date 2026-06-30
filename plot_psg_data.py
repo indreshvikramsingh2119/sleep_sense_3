@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+SAMPLE_RATE_HZ = 10.0
+
 # Load the CSV file (no headers)
 csv_path = 'extracted_data/human.data.csv'
 df = pd.read_csv(csv_path, header=None)
@@ -36,8 +38,9 @@ body_movement = df[5].values
 airflow = df[6].values
 snoring = df[8].values
 
-# Create time in seconds (relative to first timestamp)
-time_seconds = (timestamp - timestamp[0]) / 1000.0  # Convert ms to seconds
+# Project timing is fixed at 10 Hz. The timestamp column in this export does not
+# advance at 0.1s/sample, so use the sample index for plotting duration.
+time_seconds = np.arange(len(df), dtype=float) / SAMPLE_RATE_HZ
 # Plot all signals
 fig, axes = plt.subplots(8, 1, figsize=(15, 12), sharex=True)
 fig.suptitle('PSG Signal Data - Column Position Verification', fontsize=16)

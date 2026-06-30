@@ -133,15 +133,17 @@ class SleepSenseDashboard(QMainWindow):
         # Auto-load PSG data only after all chart/patient-panel wiring is ready
         self.auto_load_psg_data()
 
+        # Keep the time-window control aligned with any one-hour external array data.
+        for index in range(self.time_window_dropdown.count()):
+            if self.time_window_dropdown.itemData(index) == self.monitor_chart.current_time_window:
+                self.time_window_dropdown.setCurrentIndex(index)
+                break
+
         # If detection already exists after auto-load, mirror it in the side event list immediately
         if self.monitor_chart.auto_rule_ai_result:
             self.patient_info.update_detected_events_list(
                 self.monitor_chart.auto_rule_ai_result.get("events", [])
             )
-        
-        # Start playback automatically after a short delay to show full data
-        from PyQt5.QtCore import QTimer
-        QTimer.singleShot(1000, self.start_auto_playback)
         
         # Update button text to show initial count
         self.graph_dropdown_button.setText("Graphs (8/8) ▼")
@@ -203,6 +205,7 @@ class SleepSenseDashboard(QMainWindow):
             ("2m", 120),
             ("5m", 300),
             ("10m", 600),
+            ("1h", 3600),
         ]
         for label, value in time_windows:
             self.time_window_dropdown.addItem(label, value)
@@ -717,7 +720,6 @@ class SleepSenseDashboard(QMainWindow):
         
         # Update button text to show selected count
         selected_count = sum(1 for visible in self.graph_visibility.values() if visible)
-        total_count = len(self.graph_visibility)
         self.graph_dropdown_button.setText(f"Graphs ({selected_count}/8) ▼")
     
         
@@ -1396,18 +1398,10 @@ class SleepSenseDashboard(QMainWindow):
         view_menu.addAction(event_list_action)
     
     def start_auto_playback(self):
-        """Start playback automatically to show full SpO2 data"""
-        try:
-            if hasattr(self.monitor_chart, 'start_playback'):
-                if getattr(self.monitor_chart, "skip_next_auto_playback", False):
-                    self.monitor_chart.skip_next_auto_playback = False
-                    print("⏸ Auto-playback skipped because manual data load/upload already happened.")
-                    return
-                print("🎬 Starting auto-playback to show full SpO2 data...")
-                self.monitor_chart.start_playback()
-                print("✅ Auto-playback started - Full SpO2 graph should now be visible!")
-        except Exception as e:
-            print(f"❌ Error starting auto-playback: {e}")
+        """Playback is intentionally manual only."""
+        if hasattr(self, "monitor_chart"):
+            self.monitor_chart.skip_next_auto_playback = False
+        print("Auto-playback disabled. Use Play/Pause manually.")
 
     def get_all_events_sorted(self):
         """Gather all events from dynamic_selections and sort chronologically"""

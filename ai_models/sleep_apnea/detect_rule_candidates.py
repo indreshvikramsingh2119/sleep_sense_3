@@ -10,7 +10,7 @@ def main():
     parser = argparse.ArgumentParser(description="Detect apnea event candidates from raw SleepSense CSV.")
     parser.add_argument("csv_path")
     parser.add_argument("--min-event-seconds", type=float, default=10.0)
-    parser.add_argument("--airflow-drop-threshold", type=float, default=45.0)
+    parser.add_argument("--airflow-drop-threshold", type=float, default=10.0)
     parser.add_argument("--spo2-drop-threshold", type=float, default=2.0)
     args = parser.parse_args()
 
