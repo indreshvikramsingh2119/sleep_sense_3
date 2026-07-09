@@ -8,12 +8,11 @@ Sleep Monitor Chart Widget - Sleep Monitoring Chart Component
 import os
 import sys
 import json
-import ast
 import numpy as np
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
-from scipy.signal import savgol_filter
+from scipy.signal import find_peaks
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog, QApplication, QDialog
@@ -25,22 +24,32 @@ from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen
 import pyqtgraph as pg
 from .custom_viewbox import CustomViewBox
 from .amplitude_axis_properties_dialog import AmplitudeAxisPropertiesDialog
+from .airflow_display_processing import enhance_airflow_for_graph_and_detection
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 EXTERNAL_ARRAY_SAMPLE_RATE_HZ = 10
-EXTERNAL_ARRAY_DURATION_SEC = 60 * 60
-EXTERNAL_ARRAY_FILES = {
-    "airflow": Path("/Users/ptr/Downloads/airflow_array.py"),
-    "abdomen": Path("/Users/ptr/Downloads/abdomen_array.py"),
+ACTIVE_SIGNAL_CONFIGS = [
+    ("Body Position", "#3b82f6", 0.5, 10, 50, 0, 4),
+    ("Airflow", "#8b5cf6", 0.3, 15, 50, 0, 100),
+    ("Snoring", "#ef4444", 1.0, 8, 50, 0, 100),
+    ("Thorax", "#f59e0b", 0.2, 5, 50, 0, 80),
+    ("Abdomen", "#10b981", 0.1, 2, 90, 0, 80),
+    ("SpO2", "#06b6d4", 1.5, 12, 50, 60, 100),
+    ("Pulse", "#f97316", 0.0, 0, 30, 40, 140),
+    ("Body Movement", "#8b5cf6", 0.1, 5, 20, 0, 100),
+]
+ACTIVE_SIGNAL_NAMES = tuple(name for name, *_rest in ACTIVE_SIGNAL_CONFIGS)
+SIGNAL_Y_RANGES = {
+    name: (y_min, y_max)
+    for name, _color, _freq, _amp, _offset, y_min, y_max in ACTIVE_SIGNAL_CONFIGS
 }
-AIRFLOW_DROP_THRESHOLD = 85.0
+PLOTTED_SIGNAL_NAMES = set(ACTIVE_SIGNAL_NAMES)
 AIRFLOW_DROP_MIN_DURATION_SEC = 2.0
-AIRFLOW_EVENT_BASELINE = 90.0
 AIRFLOW_EVENT_MAX_DURATION_SEC = None
-AIRFLOW_Y_RANGE = (0.0, 90.0)
+AIRFLOW_BASELINE_MIN_OCCURRENCE = 30
 
 DETECTION_IMPORT_ERROR = None
 try:
@@ -48,6 +57,25 @@ try:
 except Exception as import_error:
     detect_apnea_events_from_csv = None
     DETECTION_IMPORT_ERROR = str(import_error)
+
+CSV_IMPORT_ERROR = None
+try:
+    from ai_models.sleep_apnea.hybrid_pipeline_common import CSV_SIGNAL_NAMES, load_sleep_csv
+except Exception as import_error:
+    CSV_SIGNAL_NAMES = ()
+    load_sleep_csv = None
+    CSV_IMPORT_ERROR = str(import_error)
+
+CHART_SIGNAL_MAPPING = {
+    "Body Position": "body_position",
+    "Airflow": "airflow",
+    "Snoring": "snoring",
+    "Thorax": "thorax",
+    "Abdomen": "abdomen",
+    "SpO2": "spo2",
+    "Pulse": "pulse",
+    "Body Movement": "body_movement",
+}
 
 
 
@@ -110,19 +138,19 @@ class SleepMonitorChart(QWidget):
         self.auto_focus_applied = False
         self.skip_next_auto_playback = False
         self.last_detection_error = None
-        self.external_arrays_loaded = False
         self.last_click_time = 0  # Debounce duplicate clicks
         
         # Apnea events storage
         self.apnea_events = []  # Store apnea event data
         self.event_plot_items = {}  # Store plot items for apnea events
         self.airflow_event_items = []  # Store automatic airflow drop event boxes
+        self.airflow_detected_events = []  # Full-timeline airflow events for navigation
+        self.current_window_airflow_events = []  # Visible-window airflow events fallback
         
         # Timer for detecting selection completion
         self.selection_timer = QTimer(self)
         self.selection_timer.setSingleShot(True)
         self.selection_timer.timeout.connect(self.finish_selection)
-        self.load_external_array_graph_data()
         self.init_ui()
         self.init_charts()
         
@@ -360,23 +388,10 @@ class SleepMonitorChart(QWidget):
         file_path = os.path.join(out_dir, filename)
 
         
-        signals = [
-            ("Body Position", "#3b82f6", 0.5, 10, 50),
-            ("Airflow", "#8b5cf6", 0.3, 15, 50),
-            ("Snoring", "#ef4444", 1.0, 8, 50),
-            ("Thorax", "#f59e0b", 0.2, 5, 50),
-            ("Abdomen", "#10b981", 0.1, 2, 90),
-            ("SpO2", "#06b6d4", 1.5, 12, 50),
-            ("Pulse", "#f97316", 0.0, 0, 30),
-            ("Body Movement", "#8b5cf6", 0.1, 5, 20),
-        ]
-
-        time_points = 1000
-        x = np.linspace(0, 10, time_points).tolist()
         channels = {}
-        for name, color, freq, amp, offset in signals:
-            y = (np.sin(np.linspace(0, 10, time_points) * freq * 2 * np.pi) * amp + offset + (np.random.rand(time_points) - 0.5) * amp * 0.1)
-            channels[name] = {"x": x, "y": y.tolist(), "color": color}
+        for name, color, _freq, _amp, _offset, _y_min, _y_max in ACTIVE_SIGNAL_CONFIGS:
+            x, y = self.get_signal_data_for_window(name, self.current_time_window, self.current_time_offset)
+            channels[name] = {"x": x.tolist(), "y": y.tolist(), "color": color}
 
         payload = {
             "patient_id": self.patient_id,
@@ -416,15 +431,46 @@ class SleepMonitorChart(QWidget):
             self.restore_all_selections()
             self.update_time_position_label()
             print(f"Time window changed from {old_time_window}s to {seconds}s (playing: {self.is_playing})")
+
+    def _get_playback_sample_count(self):
+        """Return sample count from the loaded timeline, regardless of signal source."""
+        if not self.psg_full_data or "time" not in self.psg_full_data:
+            return 0
+
+        time_values = np.asarray(self.psg_full_data.get("time", []))
+        if len(time_values) > 0:
+            return len(time_values)
+
+        signals = self.psg_full_data.get("signals", {})
+        for values in signals.values():
+            signal_values = np.asarray(values)
+            if len(signal_values) > 0:
+                return len(signal_values)
+
+        return 0
+
+    def _get_playback_max_duration(self):
+        """Return playback duration in seconds for any loaded dataset."""
+        sample_count = self._get_playback_sample_count()
+        if sample_count <= 0:
+            return 0.0
+        return sample_count / float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+
+    def _get_playback_max_offset(self):
+        """Return the last offset that still keeps the final window visible on screen."""
+        max_duration = self._get_playback_max_duration()
+        if max_duration <= 0:
+            return 0.0
+        return max(0.0, max_duration - float(self.current_time_window))
     
     def navigate_backward(self):
         """Navigate backward in time"""
         if self.block_if_selection_active():
             return
         
-        if self.spo2_full_data and len(self.spo2_full_data[1]) > 0:
+        max_duration = self._get_playback_max_duration()
+        if max_duration > 0:
             # Calculate maximum possible time based on data length
-            max_duration = len(self.spo2_full_data[1]) / 10.0  # 10 samples per second
             # Move back by the current time window
             self.current_time_offset = max(0, self.current_time_offset - self.current_time_window)
             self.refresh_charts()
@@ -436,28 +482,29 @@ class SleepMonitorChart(QWidget):
         if self.block_if_selection_active():
             return
         
-        if self.spo2_full_data and len(self.spo2_full_data[1]) > 0:
-            # Calculate maximum possible time based on data length
-            max_duration = len(self.spo2_full_data[1]) / 10.0  
-           
+        max_duration = self._get_playback_max_duration()
+        if max_duration > 0:
+            max_offset = self._get_playback_max_offset()
             new_offset = self.current_time_offset + self.current_time_window
-            if new_offset < max_duration:
-                self.current_time_offset = new_offset
-                self.refresh_charts()
-                self.update_time_position_label()
-                print(f"Navigated forward to: {self.current_time_offset}s (max: {max_duration:.1f}s)")
+            self.current_time_offset = min(max_offset, new_offset)
+            self.refresh_charts()
+            self.update_time_position_label()
+            print(f"Navigated forward to: {self.current_time_offset}s (max: {max_duration:.1f}s, max_offset: {max_offset:.1f}s)")
     
     def start_playback(self):
         """Start movie-like playback of recorded data"""
-        print(f"🎬 start_playback called - data available: {self.spo2_full_data is not None}")
+        sample_count = self._get_playback_sample_count()
+        print(f"🎬 start_playback called - active sample count: {sample_count}")
         
         if self.block_if_selection_active():
             print("🎬 Blocked by selection active")
             return
         
-        if not self.spo2_full_data or len(self.spo2_full_data[1]) == 0:
+        if sample_count == 0:
             print("No data available for playback")
             return
+
+        self.current_time_offset = min(self.current_time_offset, self._get_playback_max_offset())
         
         self.is_playing = True
         print(f"🎬 Timer starting... is_playing: {self.is_playing}")
@@ -486,20 +533,23 @@ class SleepMonitorChart(QWidget):
         if not self.is_playing:
             return
         
-        if not self.spo2_full_data or len(self.spo2_full_data[1]) == 0:
+        max_time = self._get_playback_max_duration()
+        if max_time <= 0:
             self.pause_playback()
             return
+
+        max_offset = self._get_playback_max_offset()
         
         # Move forward in time 
         self.current_time_offset += 0.1 * self.playback_speed
         
-        # Calculate maximum time based on data length
-        max_time = len(self.spo2_full_data[1]) / 10.0  
-        
-        # Check if we've reached the end
-        if self.current_time_offset >= max_time:
+        # Stop on the last full visible window instead of sliding past the final samples.
+        if self.current_time_offset >= max_offset:
+            self.current_time_offset = max_offset
+            self.refresh_charts()
+            self.update_time_position_label()
             self.pause_playback()
-            print(f"🎬 Playback completed at {max_time:.1f}s")
+            print(f"🎬 Playback completed at visible end window: offset={max_offset:.1f}s, duration={max_time:.1f}s")
             return
             
         # Update all charts with new time position (skip overlay updates during rapid playback)
@@ -657,6 +707,8 @@ class SleepMonitorChart(QWidget):
                                     plot_widget.removeItem(label)
                                 plot_widget.value_labels = []
                             print(f"Removed SpO2 value labels for {self.current_time_window}s time window")
+                    else:
+                        plot_widget.plot_curve.setData([], [])
                 else:
                     # Try to use real PSG data first
                     x, y = self.get_signal_data_for_window(chart_name, self.current_time_window, self.current_time_offset)
@@ -666,18 +718,8 @@ class SleepMonitorChart(QWidget):
                         plot_widget.plot_curve.setData(x, y, connect='finite')
                         print(f"Updated {chart_name} with real data: {len(x)} points")
                     else:
-                        # Fallback to simulated data if real data not available
-                        samples_per_second = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
-                        time_points = int(round(self.current_time_window * samples_per_second))
-                        x = np.arange(time_points, dtype=float) / float(samples_per_second)
-                        freq = plot_widget.graph_frequency
-                        amp = plot_widget.graph_amplitude
-                        offset = plot_widget.graph_offset
-                        # Remove random noise for stable rendering
-                        y = np.sin(x * freq * 2 * np.pi) * amp + offset
-                        y = self.smooth_data(x, y, window_size=5)
-                        plot_widget.plot_curve.setData(x, y, connect='finite')
-                        print(f"Updated {chart_name} with simulated data: {time_points} points")
+                        plot_widget.plot_curve.setData([], [])
+                        print(f"Left {chart_name} blank because no active signal data is mapped")
                     
                     # Apply custom axis properties if they exist
                     if hasattr(plot_widget, 'axis_properties'):
@@ -691,8 +733,18 @@ class SleepMonitorChart(QWidget):
                         except TypeError:
                             plot_widget.setRange(yRange=[low_value, high_value], padding=0)
                     elif chart_name.strip() == "Airflow":
-                        plot_widget.setYRange(*AIRFLOW_Y_RANGE, padding=0)
-                        self.mark_airflow_drop_events(plot_widget, x, y)
+                        airflow_y_min, airflow_y_max = self.get_signal_auto_axis_range("Airflow")
+                        plot_widget.setYRange(airflow_y_min, airflow_y_max, padding=0)
+                        _event_x, detection_y = self.get_airflow_detection_data_for_window(
+                            self.current_time_window,
+                            self.current_time_offset,
+                        )
+                        self.mark_airflow_drop_events(
+                            plot_widget,
+                            x,
+                            y,
+                            detection_y_data=detection_y,
+                        )
         
                 
         # Render dynamic selections for current time window
@@ -758,23 +810,12 @@ class SleepMonitorChart(QWidget):
         self.dragged_graph = None
                 
         # Generate new data based on time window
-        signals = [
-            ("Body Position", "#3b82f6", 0.5, 10, 50),
-            ("Airflow", "#8b5cf6", 0.3, 15, 50),
-            ("Snoring", "#ef4444", 1.0, 8, 50),
-            ("Thorax", "#f59e0b", 0.2, 5, 50),
-            ("Abdomen", "#10b981", 0.1, 2, 90),
-            ("SpO2", "#06b6d4", 1.5, 12, 50),
-            ("Pulse", "#f97316", 0.0, 0, 30),
-            ("Body Movement", "#8b5cf6", 0.1, 5, 20),
-        ]
-        
         # Adjust frequency based on time window (longer window = lower frequency for visibility)
         frequency_factor = max(0.1, 10.0 / (seconds / 10.0))
         
-        for position, (name, color, base_freq, amp, offset) in enumerate(signals):
+        for position, (name, color, base_freq, amp, offset, y_min, y_max) in enumerate(ACTIVE_SIGNAL_CONFIGS):
             adjusted_freq = base_freq * frequency_factor
-            chart = self.create_signal_chart(name, color, adjusted_freq, amp, offset)
+            chart = self.create_signal_chart(name, color, adjusted_freq, amp, offset, y_min, y_max)
             self.charts_layout.addWidget(chart, stretch=1)
           
             self.graph_order.append(name)
@@ -1019,25 +1060,12 @@ class SleepMonitorChart(QWidget):
         return frame
     
     def init_charts(self):
-        """Initialize signal trace charts with medically appropriate ranges"""
+        """Initialize only the active respiratory charts."""
         pg.setConfigOption('background', 'w')
         pg.setConfigOption('foreground', 'k')
         pg.setConfigOptions(antialias=True)
-        
-        # Medically appropriate signal configurations with proper Y-axis ranges
-        # Format: (name, color, frequency, amplitude, offset, y_min, y_max)
-        signals = [
-            ("Body Position", "#3b82f6", 0.5, 10, 50, 0, 4),      # Categorical: 0-4
-            ("Airflow", "#8b5cf6", 0.3, 15, 50, 0, 90),         # Respiratory airflow: 0 to 90
-            ("Snoring", "#ef4444", 1.0, 8, 50, -40, 40),           # Snoring vibration: -40 to 40 (realistic waveform)
-            ("Thorax", "#f59e0b", 0.2, 5, 50, -80, 80),            # Chest effort: -80 to 80
-            ("Abdomen", "#10b981", 0.1, 2, 90, -80, 80),           # Abdomen effort: -80 to 80
-            ("SpO2", "#06b6d4", 1.5, 12, 50, 60, 100),             # Oxygen saturation: 60-100%
-            ("Pulse", "#f97316", 0.0, 0, 30, 40, 140),             # Heart rate: 40-140 bpm
-            ("Body Movement", "#8b5cf6", 0.1, 5, 20, 0, 100),      # Activity level: 0-100
-        ]
-        
-        for position, (name, color, freq, amp, offset, y_min, y_max) in enumerate(signals):
+
+        for position, (name, color, freq, amp, offset, y_min, y_max) in enumerate(ACTIVE_SIGNAL_CONFIGS):
             print(f"DEBUG: Creating chart for {name} with range {y_min}-{y_max}")
             chart = self.create_signal_chart(name, color, freq, amp, offset, y_min, y_max)
             self.charts_layout.addWidget(chart, stretch=1)
@@ -1066,131 +1094,211 @@ class SleepMonitorChart(QWidget):
                 pw.repaint()
                 print(f"Initial ViewBox sync for {pw.chart_name}: {start} → {end}")
 
-    def _read_python_array_file(self, file_path, variable_name):
-        """Safely read a Python file containing one list assignment."""
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(path)
-
-        tree = ast.parse(path.read_text())
-        selected_node = None
-        for node in tree.body:
-            if not isinstance(node, ast.Assign):
-                continue
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == variable_name:
-                    selected_node = node
-                    break
-            if selected_node is not None:
-                break
-
-        if selected_node is None:
-            selected_node = next((node for node in tree.body if isinstance(node, ast.Assign)), None)
-
-        if selected_node is None:
-            raise ValueError(f"No array assignment found in {path}")
-
-        values = ast.literal_eval(selected_node.value)
-        return np.asarray(values, dtype=float)
-
     def _prepare_external_array_signal(
         self,
         values,
         sample_rate_hz=EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
-        duration_sec=EXTERNAL_ARRAY_DURATION_SEC,
     ):
-        """Trim to one hour and use linear interpolation to clean/resample samples."""
-        target_count = int(sample_rate_hz * duration_sec)
+        """Clean samples and preserve the full available duration."""
         signal = np.asarray(values, dtype=float).reshape(-1)
         if len(signal) == 0:
             return signal
 
-        signal = signal[:target_count]
         signal = pd.Series(signal).replace([np.inf, -np.inf], np.nan)
         signal = signal.interpolate(method="linear", limit_direction="both")
         signal = signal.ffill().bfill().fillna(0.0)
         signal = signal.to_numpy(dtype=float)
+        return signal
 
-        if len(signal) == target_count:
-            return signal
+    def _load_uploaded_psg_signals(self, csv_path):
+        """Load chart signals directly from an uploaded PSG CSV."""
+        if load_sleep_csv is None:
+            raise RuntimeError(
+                "CSV loader import failed."
+                + (f" {CSV_IMPORT_ERROR}" if CSV_IMPORT_ERROR else "")
+            )
 
-        source_time = np.arange(len(signal), dtype=float) / float(sample_rate_hz)
-        target_time = np.arange(target_count, dtype=float) / float(sample_rate_hz)
-        return np.interp(target_time, source_time, signal)
+        signal_df = load_sleep_csv(csv_path)
+        if signal_df.empty:
+            raise ValueError("Uploaded CSV did not contain any usable rows.")
 
-    def _load_external_respiratory_arrays(self):
-        loaded_signals = {}
-        for signal_name, file_path in EXTERNAL_ARRAY_FILES.items():
-            raw_signal = self._read_python_array_file(file_path, signal_name)
-            loaded_signals[signal_name] = self._prepare_external_array_signal(raw_signal)
+        time_data = signal_df["time_sec"].to_numpy(dtype=float)
+        signals = {}
+        for signal_name in CSV_SIGNAL_NAMES:
+            if signal_name not in signal_df.columns:
+                continue
+            prepared_signal = self._prepare_external_array_signal(
+                signal_df[signal_name].to_numpy(dtype=float)
+            )
+            signals[signal_name] = prepared_signal
 
-        sample_count = min(len(signal) for signal in loaded_signals.values())
-        if sample_count == 0:
-            return None, {}
+            if signal_name == "airflow":
+                raw_airflow = np.asarray(prepared_signal, dtype=float)
+                enhanced_airflow = enhance_airflow_for_graph_and_detection(
+                    raw_airflow,
+                    amplitude=1.15,
+                    max_limit=None,
+                    spike_threshold=20.0,
+                    kernel_size=5,
+                    low_protect_margin=2.0,
+                    keep_integer=True,
+                )
+                signals["airflow_raw"] = raw_airflow
+                signals["airflow_enhanced"] = enhanced_airflow
+                signals["airflow_display"] = enhanced_airflow
+                signals["airflow_detection"] = enhanced_airflow
 
-        sample_count = min(sample_count, EXTERNAL_ARRAY_SAMPLE_RATE_HZ * EXTERNAL_ARRAY_DURATION_SEC)
-        time_data = np.arange(sample_count, dtype=float) / float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
-        return time_data, {name: signal[:sample_count] for name, signal in loaded_signals.items()}
+        return time_data, signals
 
-    def _apply_external_respiratory_arrays(self, time_data, signals):
-        """Overlay the one-hour airflow/abdomen arrays onto the current PSG signals."""
+    def _get_airflow_signal_variant(self, variant="raw"):
+        """Return the preferred airflow series for raw or enhanced airflow use."""
+        if self.psg_full_data is None or "signals" not in self.psg_full_data:
+            return np.array([])
+
+        signals = self.psg_full_data["signals"]
+        variant_map = {
+            "raw": signals.get("airflow_raw"),
+            "enhanced": signals.get("airflow_enhanced"),
+            "display": signals.get("airflow_enhanced", signals.get("airflow_display")),
+            "detection": signals.get("airflow_enhanced", signals.get("airflow_detection")),
+        }
+        selected = variant_map.get(variant)
+        if selected is None:
+            selected = signals.get("airflow", np.array([]))
+        return np.asarray(selected, dtype=float)
+
+    def save_airflow_smoothing_debug_report(self, csv_path, raw_airflow, enhanced_airflow):
+        """Write a text report showing how the shared enhanced airflow differs from raw data."""
         try:
-            external_time, external_signals = self._load_external_respiratory_arrays()
-        except Exception as error:
-            print(f"External respiratory arrays not applied: {error}")
-            return time_data, signals
+            report_dir = APP_ROOT / "debug_reports"
+            report_dir.mkdir(parents=True, exist_ok=True)
 
-        if external_time is None:
-            return time_data, signals
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            source_name = Path(csv_path).stem if csv_path else "airflow"
+            report_path = report_dir / f"{source_name}_airflow_debug_{timestamp}.txt"
 
-        sample_count = len(external_time)
-        updated_signals = {}
-        for signal_name, signal_values in signals.items():
-            values = np.asarray(signal_values)
-            if len(values) >= sample_count:
-                updated_signals[signal_name] = values[:sample_count]
-            elif len(values) > 0:
-                source_time = np.linspace(0.0, external_time[-1], len(values))
-                updated_signals[signal_name] = np.interp(external_time, source_time, values)
+            raw_airflow = np.asarray(raw_airflow, dtype=float).reshape(-1)
+            enhanced_airflow = np.asarray(enhanced_airflow, dtype=float).reshape(-1)
+
+            point_count = min(len(raw_airflow), len(enhanced_airflow))
+            raw_airflow = raw_airflow[:point_count]
+            enhanced_airflow = enhanced_airflow[:point_count]
+
+            enhanced_diff = np.abs(enhanced_airflow - raw_airflow)
+            enhanced_changed = not np.allclose(raw_airflow, enhanced_airflow) if point_count else False
+            enhanced_mean = float(np.mean(enhanced_diff)) if point_count else 0.0
+            enhanced_max = float(np.max(enhanced_diff)) if point_count else 0.0
+
+            lines = [
+                "AIRFLOW DEBUG REPORT",
+                "====================",
+                "",
+                "SECTION 1: FILE INFO",
+                "--------------------",
+                f"Source CSV: {csv_path}",
+                f"Generated: {datetime.now().isoformat()}",
+                f"Samples compared: {point_count}",
+                f"Sample rate used for timestamps: {EXTERNAL_ARRAY_SAMPLE_RATE_HZ} Hz",
+                "",
+                "SECTION 2: QUICK ANSWER",
+                "-----------------------",
+                f"Enhanced changed vs raw? {'YES' if enhanced_changed else 'NO'}",
+                "",
+                "SECTION 3: RAW VS ENHANCED",
+                "--------------------------",
+                f"Enhanced mean abs diff: {enhanced_mean:.6f}",
+                f"Enhanced max abs diff: {enhanced_max:.6f}",
+                "",
+                "SECTION 4: TOP 20 BIGGEST ENHANCED CHANGES",
+                "-------------------------------------------",
+                "Rank | Index | Time (sec) | Raw | Enhanced | Abs Diff",
+            ]
+
+            if point_count:
+                enhanced_top_indices = np.argsort(enhanced_diff)[-20:][::-1]
+                for rank, index in enumerate(enhanced_top_indices, start=1):
+                    time_sec = index / float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+                    lines.append(
+                        f"{rank:02d} | {index:05d} | {time_sec:8.2f} | "
+                        f"{raw_airflow[index]:.6f} | {enhanced_airflow[index]:.6f} | {enhanced_diff[index]:.6f}"
+                    )
             else:
-                updated_signals[signal_name] = np.zeros(sample_count)
+                lines.append("No samples available.")
 
-        updated_signals["airflow"] = external_signals["airflow"]
-        updated_signals["abdomen"] = external_signals["abdomen"]
-        self.current_time_window = EXTERNAL_ARRAY_DURATION_SEC
-        self.external_arrays_loaded = True
-        print(
-            "Loaded one-hour external arrays: "
-            f"airflow={len(updated_signals['airflow'])}, abdomen={len(updated_signals['abdomen'])}"
-        )
-        return external_time, updated_signals
+            lines.extend([
+                "",
+                "SECTION 5: FIRST 120 SAMPLE PREVIEW",
+                "-----------------------------------",
+                "Index | Time (sec) | Raw | Enhanced | |Enhanced-Raw|",
+            ])
 
-    def load_external_array_graph_data(self):
-        """Initialize chart data from airflow_array.py and abdomen_array.py when available."""
-        try:
-            time_data, external_signals = self._load_external_respiratory_arrays()
-            if time_data is None:
-                return
+            preview_count = min(120, point_count)
+            for index in range(preview_count):
+                time_sec = index / float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+                lines.append(
+                    f"{index:05d} | {time_sec:8.2f} | "
+                    f"{raw_airflow[index]:.6f} | "
+                    f"{enhanced_airflow[index]:.6f} | "
+                    f"{enhanced_diff[index]:.6f}"
+                )
 
-            sample_count = len(time_data)
-            signals = {
-                "body_position": np.zeros(sample_count),
-                "pulse": np.full(sample_count, 70.0),
-                "spo2": np.full(sample_count, 98.0),
-                "body_movement": np.zeros(sample_count),
-                "airflow": external_signals["airflow"],
-                "snoring": np.zeros(sample_count),
-                "thorax": np.zeros(sample_count),
-                "abdomen": external_signals["abdomen"],
-            }
-            self.psg_full_data = {"time": time_data, "signals": signals}
-            self.spo2_full_data = (time_data, signals["spo2"])
-            self.loaded_csv_path = None
-            self.current_time_window = EXTERNAL_ARRAY_DURATION_SEC
-            self.external_arrays_loaded = True
-            print(f"Initialized chart with one-hour external array data: {sample_count} samples")
+            report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            print(f"📝 Airflow debug report saved: {report_path}")
         except Exception as error:
-            print(f"External array graph data not loaded: {error}")
+            print(f"⚠️ Could not save airflow debug report: {error}")
+
+    def _slice_signal_for_window(self, signal_values, time_window_seconds, time_offset=0):
+        """Slice a full signal into the requested fixed-duration time window."""
+        signal_values = np.asarray(signal_values, dtype=float)
+        if len(signal_values) == 0:
+            return np.array([]), np.array([])
+
+        samples_per_second = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
+        expected_samples = int(round(time_window_seconds * samples_per_second))
+        start_sample = max(0, int(round(time_offset * samples_per_second)))
+        end_sample = min(len(signal_values), start_sample + expected_samples)
+
+        window_signal = signal_values[start_sample:end_sample]
+        if len(window_signal) == 0:
+            return np.array([]), np.array([])
+
+        window_time = np.arange(len(window_signal)) / samples_per_second
+        return window_time, window_signal
+
+    def get_airflow_detection_data_for_window(self, time_window_seconds, time_offset=0):
+        """Return the airflow window reserved for event detection."""
+        return self._slice_signal_for_window(
+            self._get_airflow_signal_variant("detection"),
+            time_window_seconds,
+            time_offset,
+        )
+
+    def get_airflow_event_baseline(self, airflow, min_occurrence=AIRFLOW_BASELINE_MIN_OCCURRENCE):
+        """Pick the most frequent peak value as the airflow event baseline."""
+        airflow_series = pd.Series(np.asarray(airflow, dtype=float).reshape(-1)).dropna()
+        airflow_series = pd.to_numeric(airflow_series, errors="coerce").dropna()
+        if airflow_series.empty:
+            return 0.0, 0
+
+        signal = airflow_series.to_numpy(dtype=float)
+        peak_indices, _ = find_peaks(signal)
+        if len(peak_indices) == 0:
+            rounded = airflow_series.round(2)
+            counts = rounded.value_counts()
+        else:
+            counts = pd.Series(signal[peak_indices]).round(2).value_counts()
+        candidates = [
+            (float(value), int(count))
+            for value, count in counts.items()
+            if int(count) >= int(min_occurrence)
+        ]
+        if candidates:
+            candidates.sort(key=lambda item: (item[1], item[0]), reverse=True)
+            return candidates[0]
+
+        fallback_value = float(counts.idxmax())
+        fallback_count = int(counts.max())
+        return fallback_value, fallback_count
 
     def get_signal_auto_axis_range(self, chart_name):
         """Return dynamic Y-axis range for airflow when auto-scaling is enabled."""
@@ -1230,7 +1338,7 @@ class SleepMonitorChart(QWidget):
             print(f"Stable min airflow: {stable_min_value} (occurrence: {stable_min_occurrence})")
             print(f"Stable max airflow: {stable_max_value} (occurrence: {stable_max_occurrence})")
 
-            return stable_min_value - 20.0, stable_max_value + 20.0
+            return stable_min_value - 20.0, stable_max_value + 40.0
 
         return 0.0, 100.0
 
@@ -1263,103 +1371,57 @@ class SleepMonitorChart(QWidget):
 
         
     def load_psg_data(self, csv_path):
-        """Load PSG data from CSV file with medically appropriate scaling"""
+        """Reload the chart from the provided PSG CSV file."""
         try:
             if self.is_playing:
                 self.pause_playback()
 
             self.current_time_offset = 0
             self.auto_focus_applied = False
-            self.external_arrays_loaded = False
             self._clear_auto_detected_selections()
-            self.update_detection_summary_label()
 
-            # Read CSV file (no headers)
-            df = pd.read_csv(csv_path, header=None)
-            df = df.apply(pd.to_numeric, errors='coerce')
-            df = df.dropna(how='all').reset_index(drop=True)
-            df = df.dropna(subset=[1]).reset_index(drop=True)
-            
-            print(f"CSV shape: {df.shape}")
-            print(f"First few rows:\n{df.head()}")
-            
-            # According to user's specification, the CSV format is:
-            # Column 0: empty
-            # Column 1: timestamp
-            # Column 2: body_position
-            # Column 3: pulse
-            # Column 4: spo2
-            # Column 5: body_movement
-            # Column 6: airflow
-            # Column 7: null
-            # Column 8: snoring
-            # Column 9: null
-            # Column 10: null
-            
-            # Timing is fixed at 10 Hz. The CSV timestamp column can advance at
-            # a different interval, so derive graph time from sample index.
-            timestamp = df[1].values
-            time_data = np.arange(len(df), dtype=float) / float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
-            
-            # Store all signals in a dictionary with medically appropriate scaling
-            signals = {}
-            
-            # Body Position: categorical (0-4), scale to 0-4
-            signals['body_position'] = df[2].values
-            print(f"Loaded body_position: {len(signals['body_position'])} data points")
-            
-            # Pulse: heart rate, medical range 40-180 bpm
-            signals['pulse'] = df[3].values
-            print(f"Loaded pulse: {len(signals['pulse'])} data points")
-            
-            # SpO2: oxygen saturation, medical range 70-100%
-            signals['spo2'] = df[4].values
-            print(f"Loaded spo2: {len(signals['spo2'])} data points")
-            
-            # Body Movement: activity level, scale to 0-5
-            signals['body_movement'] = df[5].values
-            print(f"Loaded body_movement: {len(signals['body_movement'])} data points")
-            
-            # Airflow: respiratory signal, scale to 0-50
-            signals['airflow'] = df[6].values
-            print(f"Loaded airflow: {len(signals['airflow'])} data points")
-            
-            # Snoring: sound intensity - generate realistic vibration waveforms
-            raw_snoring = df[8].values
-            snoring_waveform = self.generate_realistic_snoring(raw_snoring, signals['airflow'])
-            signals['snoring'] = snoring_waveform
-            print(f"Generated realistic snoring waveform: {len(signals['snoring'])} data points")
-            
-            # Thorax: respiratory effort, scale to 0-50 (not in this CSV, set to zeros)
-            signals['thorax'] = np.zeros(len(time_data))
-            print(f"Created thorax: {len(signals['thorax'])} data points (zeros)")
-            
-            # Abdomen: respiratory effort, scale to 0-50 (not in this CSV, set to zeros)
-            signals['abdomen'] = np.zeros(len(time_data))
-            print(f"Created abdomen: {len(signals['abdomen'])} data points (zeros)")
+            time_data, signals = self._load_uploaded_psg_signals(csv_path)
+            if len(time_data) == 0 or not signals:
+                raise ValueError("Uploaded PSG CSV data could not be loaded.")
 
-            time_data, signals = self._apply_external_respiratory_arrays(time_data, signals)
-            
-            # Store full data for time window filtering
-            self.psg_full_data = {
-                'time': time_data,
-                'signals': signals
-            }
-            
-            # Update spo2_full_data for backward compatibility
-            self.spo2_full_data = (time_data, signals['spo2'])
+            self.psg_full_data = {"time": time_data, "signals": signals}
+            self.spo2_full_data = (
+                np.asarray(time_data, dtype=float),
+                np.asarray(signals.get("spo2", []), dtype=float),
+            )
             self.loaded_csv_path = str(csv_path)
-            if self.external_arrays_loaded:
-                self.auto_rule_ai_result = None
-                self.last_detection_error = None
-                self._clear_auto_detected_selections()
-                self.apnea_events_updated.emit([])
-                self.update_detection_summary_label()
-                print("Auto Rule/AI detection skipped: using external airflow/abdomen arrays.")
-            else:
-                self.run_rule_ai_apnea_detection()
-            
-            print(f"✅ Loaded PSG data: {len(time_data)} time points from {csv_path}")
+            self.current_time_window = min(60, int(time_data[-1]) if len(time_data) else 60)
+            self.auto_rule_ai_result = None
+            self.last_detection_error = None
+            for i in range(self.charts_layout.count()):
+                container = self.charts_layout.itemAt(i).widget()
+                if not container or not hasattr(container, "plot_widget"):
+                    continue
+                plot_widget = container.plot_widget
+                if hasattr(plot_widget, "axis_properties"):
+                    delattr(plot_widget, "axis_properties")
+                plot_widget.zoom_y_range = None
+            enhanced_airflow = signals.get("airflow_enhanced", signals.get("airflow", []))
+            self.save_airflow_smoothing_debug_report(
+                csv_path=csv_path,
+                raw_airflow=signals.get("airflow_raw", signals.get("airflow", [])),
+                enhanced_airflow=enhanced_airflow,
+            )
+            global_events = self._build_airflow_navigation_events(enhanced_airflow)
+            windowed_events = self._build_windowed_airflow_navigation_events(
+                enhanced_airflow,
+                window_seconds=max(1.0, float(self.current_time_window)),
+            )
+            self.airflow_detected_events = (
+                windowed_events if len(windowed_events) >= len(global_events) else global_events
+            )
+            self.current_window_airflow_events = []
+            self.emit_detected_events_panel()
+            self.update_detection_summary_label()
+            print(
+                "✅ Loaded respiratory graph data from uploaded CSV "
+                f"{csv_path}"
+            )
             print(f"   Duration: {time_data[-1]/60:.1f} minutes")
             return time_data, signals
             
@@ -1372,14 +1434,35 @@ class SleepMonitorChart(QWidget):
             self.spo2_full_data = (np.array([]), np.array([]))
             self.loaded_csv_path = None
             self.auto_rule_ai_result = None
+            self.airflow_detected_events = []
+            self.current_window_airflow_events = []
             return np.array([]), {}
+
+    def emit_current_navigation_events(self):
+        """Emit whichever event source is currently available to the side panel."""
+        self.apnea_events_updated.emit(self.get_available_navigation_events())
+
+    def get_all_detected_events(self):
+        """Return the full-dataset event list for stable counts and side-panel display."""
+        if self.auto_rule_ai_result is not None:
+            return list(self.auto_rule_ai_result.get("events", []))
+
+        airflow_events = list(getattr(self, "airflow_detected_events", []))
+        if airflow_events:
+            return airflow_events
+
+        return list(getattr(self, "current_window_airflow_events", []))
+
+    def emit_detected_events_panel(self):
+        """Emit the full detected-event list for the side panel."""
+        self.apnea_events_updated.emit(self.get_all_detected_events())
 
     def run_rule_ai_apnea_detection(self):
         """Run airflow baseline rule detection plus AI label refinement on the loaded CSV."""
         if not self.loaded_csv_path:
             self.last_detection_error = "CSV path missing for detection."
             self.auto_rule_ai_result = None
-            self.apnea_events_updated.emit([])
+            self.emit_detected_events_panel()
             self.update_detection_summary_label()
             return
 
@@ -1389,7 +1472,7 @@ class SleepMonitorChart(QWidget):
                 + (f" {DETECTION_IMPORT_ERROR}" if DETECTION_IMPORT_ERROR else "")
             )
             self.auto_rule_ai_result = None
-            self.apnea_events_updated.emit([])
+            self.emit_detected_events_panel()
             self.update_detection_summary_label()
             return
 
@@ -1408,7 +1491,7 @@ class SleepMonitorChart(QWidget):
             )
             self.refresh_charts()
             self._sync_auto_detected_selections_into_overlays()
-            self.apnea_events_updated.emit(self.auto_rule_ai_result.get("events", []))
+            self.emit_detected_events_panel()
             self.update_detection_summary_label()
         except Exception as error:
             print(f"⚠️ Auto rule+AI apnea detection failed: {error}")
@@ -1427,13 +1510,13 @@ class SleepMonitorChart(QWidget):
                 )
                 self.refresh_charts()
                 self._sync_auto_detected_selections_into_overlays()
-                self.apnea_events_updated.emit(self.auto_rule_ai_result.get("events", []))
+                self.emit_detected_events_panel()
                 self.update_detection_summary_label()
             except Exception as fallback_error:
                 self.auto_rule_ai_result = None
                 self.auto_focus_applied = False
                 self.last_detection_error = f"Rule+AI failed: {error} | Rule-only failed: {fallback_error}"
-                self.apnea_events_updated.emit([])
+                self.emit_detected_events_panel()
                 self.update_detection_summary_label()
                 print(f"❌ Rule-only fallback detection also failed: {fallback_error}")
 
@@ -1500,9 +1583,7 @@ class SleepMonitorChart(QWidget):
 
     def get_first_detected_event(self):
         """Return the earliest automatically detected event."""
-        if not self.auto_rule_ai_result:
-            return None
-        events = self.auto_rule_ai_result.get("events", [])
+        events = self.get_available_navigation_events()
         if not events:
             return None
         return min(events, key=lambda event: float(event.get("start_sec", 0.0)))
@@ -1513,7 +1594,9 @@ class SleepMonitorChart(QWidget):
         if not first_event:
             return False
 
-        self.current_time_offset = max(0.0, float(first_event["start_sec"]) - float(padding_seconds))
+        max_offset = self._get_playback_max_offset()
+        requested_offset = max(0.0, float(first_event["start_sec"]) - float(padding_seconds))
+        self.current_time_offset = min(max_offset, requested_offset)
         self.auto_focus_applied = True
         self.refresh_charts()
         self.update_time_position_label()
@@ -1524,7 +1607,9 @@ class SleepMonitorChart(QWidget):
         """Jump the chart window to a specific event dictionary."""
         if not event_data:
             return False
-        self.current_time_offset = max(0.0, float(event_data["start_sec"]) - float(padding_seconds))
+        max_offset = self._get_playback_max_offset()
+        requested_offset = max(0.0, float(event_data["start_sec"]) - float(padding_seconds))
+        self.current_time_offset = min(max_offset, requested_offset)
         self.auto_focus_applied = True
         self.refresh_charts()
         self.update_time_position_label()
@@ -1533,9 +1618,7 @@ class SleepMonitorChart(QWidget):
 
     def focus_on_next_event(self) -> bool:
         """Jump to the next event after the current window center."""
-        if not self.auto_rule_ai_result:
-            return False
-        events = sorted(self.auto_rule_ai_result.get("events", []), key=lambda event: float(event["start_sec"]))
+        events = sorted(self.get_available_navigation_events(), key=lambda event: float(event["start_sec"]))
         if not events:
             return False
         center_time = self.current_time_offset + (self.current_time_window / 2.0)
@@ -1546,9 +1629,7 @@ class SleepMonitorChart(QWidget):
 
     def focus_on_previous_event(self) -> bool:
         """Jump to the previous event before the current window center."""
-        if not self.auto_rule_ai_result:
-            return False
-        events = sorted(self.auto_rule_ai_result.get("events", []), key=lambda event: float(event["start_sec"]))
+        events = sorted(self.get_available_navigation_events(), key=lambda event: float(event["start_sec"]))
         if not events:
             return False
         center_time = self.current_time_offset + (self.current_time_window / 2.0)
@@ -1562,7 +1643,8 @@ class SleepMonitorChart(QWidget):
         if not hasattr(self, "detection_summary_label"):
             return
 
-        if not self.auto_rule_ai_result:
+        events = self.get_available_navigation_events()
+        if not events:
             if self.last_detection_error:
                 error_text = str(self.last_detection_error).replace("\n", " ")
                 if len(error_text) > 120:
@@ -1570,17 +1652,6 @@ class SleepMonitorChart(QWidget):
                 self.detection_summary_label.setText(f"Detection failed | {error_text}")
             else:
                 self.detection_summary_label.setText("Events: --")
-            if hasattr(self, "jump_to_event_btn"):
-                self.jump_to_event_btn.setEnabled(False)
-            if hasattr(self, "prev_event_btn"):
-                self.prev_event_btn.setEnabled(False)
-            if hasattr(self, "next_event_btn"):
-                self.next_event_btn.setEnabled(False)
-            return
-
-        events = self.auto_rule_ai_result.get("events", [])
-        if not events:
-            self.detection_summary_label.setText("Events: 0 | No apnea event detected")
             if hasattr(self, "jump_to_event_btn"):
                 self.jump_to_event_btn.setEnabled(False)
             if hasattr(self, "prev_event_btn"):
@@ -1729,53 +1800,38 @@ class SleepMonitorChart(QWidget):
         if self.psg_full_data is None or 'signals' not in self.psg_full_data:
             return np.array([]), np.array([])
         
-        full_time = self.psg_full_data['time']
         signals = self.psg_full_data['signals']
         
-        # Map chart names to signal column names
-        signal_mapping = {
-            'Body Position': 'body_position',
-            'Airflow': 'airflow',
-            'Snoring': 'snoring',
-            'Thorax': 'thorax',
-            'Abdomen': 'abdomen',
-            'SpO2': 'spo2',
-            'Pulse': 'pulse',
-            'Body Movement': 'body_movement'
-        }
+        if str(signal_name).strip() not in PLOTTED_SIGNAL_NAMES:
+            return np.array([]), np.array([])
         
         # Get the actual signal column name (use exact match first, then try stripped)
-        signal_col = signal_mapping.get(signal_name)
+        signal_col = CHART_SIGNAL_MAPPING.get(signal_name)
         if signal_col is None:
             # Try with stripped name as fallback
             clean_name = signal_name.strip().rstrip(')')
-            signal_col = signal_mapping.get(clean_name, clean_name.lower().replace(' ', '_'))
+            signal_col = CHART_SIGNAL_MAPPING.get(clean_name, clean_name.lower().replace(' ', '_'))
         
         if signal_col not in signals:
             print(f"Warning: Signal {signal_name} (mapped to {signal_col}) not found in loaded data")
             return np.array([]), np.array([])
         
-        full_signal = signals[signal_col]
-        
-        # Keep every window endpoint-exclusive: 60s at 10Hz must be exactly 600 samples.
-        samples_per_second = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
-        expected_samples = int(round(time_window_seconds * samples_per_second))
-        start_sample = int(round(time_offset * samples_per_second))
-        end_sample = start_sample + expected_samples
-        
-        # Ensure we don't exceed data bounds
-        start_sample = max(0, start_sample)
-        end_sample = min(len(full_signal), end_sample)
-        
-        # Extract the data for this window
-        window_signal = full_signal[start_sample:end_sample]
-        
-        num_samples = len(window_signal)
-        if num_samples == 0:
+        if signal_col == "airflow":
+            full_signal = self._get_airflow_signal_variant("display")
+        else:
+            full_signal = signals[signal_col]
+
+        window_time, window_signal = self._slice_signal_for_window(
+            full_signal,
+            time_window_seconds,
+            time_offset,
+        )
+
+        if len(window_signal) == 0:
             return np.array([]), np.array([])
-        
-        # Generate time points: 0, 0.1, 0.2, ... up to time_window_seconds
-        window_time = np.arange(num_samples) / samples_per_second
+
+        num_samples = len(window_signal)
+        expected_samples = int(round(time_window_seconds * EXTERNAL_ARRAY_SAMPLE_RATE_HZ))
         
         print(f"{signal_name} window: {time_window_seconds}s, Samples: {num_samples}, Expected: {expected_samples}")
         
@@ -1783,6 +1839,9 @@ class SleepMonitorChart(QWidget):
     
     def get_spo2_data_for_window(self, time_window_seconds, time_offset=0):
         """Get SpO2 data filtered for specific time window"""
+        if "SpO2" not in PLOTTED_SIGNAL_NAMES:
+            return np.array([]), np.array([])
+
         if self.spo2_full_data is None or len(self.spo2_full_data[0]) == 0:
             return np.array([]), np.array([])
         
@@ -1829,7 +1888,7 @@ class SleepMonitorChart(QWidget):
 
         self.airflow_event_items = remaining_items
 
-    def calculate_airflow_event_drop(self, airflow, start_idx, end_idx, baseline_airflow=AIRFLOW_EVENT_BASELINE):
+    def calculate_airflow_event_drop(self, airflow, start_idx, end_idx, baseline_airflow):
         """Calculate drop ratio for an event, excluding the recovery sample at end_idx."""
         airflow = np.asarray(airflow, dtype=float)
         event_airflow = airflow[start_idx:end_idx]
@@ -1863,37 +1922,195 @@ class SleepMonitorChart(QWidget):
 
         return "NO_EVENT"
 
+    def _build_airflow_navigation_events(self, airflow, fs=EXTERNAL_ARRAY_SAMPLE_RATE_HZ):
+        """Build a reusable event list from the full airflow signal for navigation."""
+        airflow = np.asarray(airflow, dtype=float)
+        if len(airflow) == 0:
+            return []
+
+        baseline_airflow, baseline_occurrence = self.get_airflow_event_baseline(airflow)
+        threshold = baseline_airflow
+        min_samples = max(1, int(round(AIRFLOW_DROP_MIN_DURATION_SEC * fs)))
+        events = []
+        in_event = False
+        start_index = None
+
+        for index, value in enumerate(airflow):
+            if not np.isfinite(value):
+                continue
+
+            if value < threshold:
+                if not in_event:
+                    in_event = True
+                    start_index = index
+            elif in_event:
+                events.append((start_index, index))
+                in_event = False
+                start_index = None
+
+        if in_event and start_index is not None:
+            events.append((start_index, len(airflow) - 1))
+
+        navigation_events = []
+        for event_start, event_end in events:
+            if event_end - event_start + 1 < min_samples:
+                continue
+
+            duration_sec = (event_end - event_start) / float(fs)
+            drop_ratio = self.calculate_airflow_event_drop(
+                airflow=airflow,
+                start_idx=event_start,
+                end_idx=event_end,
+                baseline_airflow=baseline_airflow,
+            )
+            event_label = self.classify_airflow_event(drop_ratio, duration_sec)
+            if event_label == "NO_EVENT":
+                continue
+
+            start_sec = event_start / float(fs)
+            end_sec = min(len(airflow) / float(fs), (event_end + 1) / float(fs))
+            navigation_events.append({
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "duration_sec": max(0.0, end_sec - start_sec),
+                "final_label": event_label,
+                "rule_label": event_label,
+                "source": "airflow_threshold",
+                "baseline_airflow": baseline_airflow,
+                "baseline_occurrence": baseline_occurrence,
+                "drop_percent": drop_ratio * 100.0,
+            })
+
+        return navigation_events
+
+    def _build_windowed_airflow_navigation_events(
+        self,
+        airflow,
+        fs=EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
+        window_seconds=60.0,
+    ):
+        """Build full-data events using the same local-window baseline style as visible markers."""
+        airflow = np.asarray(airflow, dtype=float)
+        if len(airflow) == 0:
+            return []
+
+        window_samples = max(1, int(round(float(window_seconds) * float(fs))))
+        total_events = []
+
+        for window_start in range(0, len(airflow), window_samples):
+            window_end = min(len(airflow), window_start + window_samples)
+            window_signal = airflow[window_start:window_end]
+            if len(window_signal) == 0:
+                continue
+
+            baseline_airflow, baseline_occurrence = self.get_airflow_event_baseline(window_signal)
+            threshold = baseline_airflow
+            min_samples = max(1, int(round(AIRFLOW_DROP_MIN_DURATION_SEC * fs)))
+            events = []
+            in_event = False
+            start_index = None
+
+            for index, value in enumerate(window_signal):
+                if not np.isfinite(value):
+                    continue
+
+                if value < threshold:
+                    if not in_event:
+                        in_event = True
+                        start_index = index
+                elif in_event:
+                    events.append((start_index, index))
+                    in_event = False
+                    start_index = None
+
+            if in_event and start_index is not None:
+                events.append((start_index, len(window_signal) - 1))
+
+            for event_start, event_end in events:
+                if event_end - event_start + 1 < min_samples:
+                    continue
+
+                duration_sec = (event_end - event_start) / float(fs)
+                drop_ratio = self.calculate_airflow_event_drop(
+                    airflow=window_signal,
+                    start_idx=event_start,
+                    end_idx=event_end,
+                    baseline_airflow=baseline_airflow,
+                )
+                event_label = self.classify_airflow_event(drop_ratio, duration_sec)
+                if event_label == "NO_EVENT":
+                    continue
+
+                abs_start = (window_start + event_start) / float(fs)
+                abs_end = min(len(airflow) / float(fs), (window_start + event_end + 1) / float(fs))
+                total_events.append({
+                    "start_sec": abs_start,
+                    "end_sec": abs_end,
+                    "duration_sec": max(0.0, abs_end - abs_start),
+                    "final_label": event_label,
+                    "rule_label": event_label,
+                    "source": "airflow_window_threshold",
+                    "baseline_airflow": baseline_airflow,
+                    "baseline_occurrence": baseline_occurrence,
+                    "drop_percent": drop_ratio * 100.0,
+                })
+
+        return total_events
+
+    def get_available_navigation_events(self):
+        """Return whichever event source is currently available for navigation."""
+        if self.auto_rule_ai_result is not None:
+            return list(self.auto_rule_ai_result.get("events", []))
+
+        airflow_events = list(getattr(self, "airflow_detected_events", []))
+        if airflow_events:
+            return airflow_events
+
+        window_events = list(getattr(self, "current_window_airflow_events", []))
+        if window_events:
+            return window_events
+
+        return []
+
     def mark_airflow_drop_events(
         self,
         plot_widget,
         x_data,
         y_data,
-        threshold=AIRFLOW_DROP_THRESHOLD,
+        detection_y_data=None,
         min_duration_sec=AIRFLOW_DROP_MIN_DURATION_SEC,
         fs=EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
     ):
         """Mark Airflow events from below threshold until the next recovery threshold."""
         self.clear_airflow_event_items(plot_widget)
-
-        if not getattr(self, "external_arrays_loaded", False):
+        if self.auto_rule_ai_result is not None:
+            self.current_window_airflow_events = []
+            self.emit_detected_events_panel()
             return
 
         x_data = np.asarray(x_data, dtype=float)
         y_data = np.asarray(y_data, dtype=float)
+        if detection_y_data is None:
+            detection_y_data = y_data
+        detection_y_data = np.asarray(detection_y_data, dtype=float)
+        self.current_window_airflow_events = []
 
-        if len(x_data) == 0 or len(y_data) == 0:
+        if len(x_data) == 0 or len(y_data) == 0 or len(detection_y_data) == 0:
             return
 
-        point_count = min(len(x_data), len(y_data))
+        point_count = min(len(x_data), len(y_data), len(detection_y_data))
         x_data = x_data[:point_count]
         y_data = y_data[:point_count]
+        detection_y_data = detection_y_data[:point_count]
         min_samples = max(1, int(round(min_duration_sec * fs)))
+        baseline_airflow, _ = self.get_airflow_event_baseline(detection_y_data)
+        threshold = baseline_airflow
 
         events = []
         in_event = False
         start_index = None
 
-        for index, value in enumerate(y_data):
+        for index, value in enumerate(detection_y_data):
             if not np.isfinite(value):
                 continue
 
@@ -1919,14 +2136,30 @@ class SleepMonitorChart(QWidget):
         for event_start, event_end in events:
             duration_sec = (event_end - event_start) / float(fs)
             drop_ratio = self.calculate_airflow_event_drop(
-                airflow=y_data,
+                airflow=detection_y_data,
                 start_idx=event_start,
                 end_idx=event_end,
-                baseline_airflow=AIRFLOW_EVENT_BASELINE,
+                baseline_airflow=baseline_airflow,
             )
             event_label = self.classify_airflow_event(drop_ratio, duration_sec)
             if event_label == "NO_EVENT":
                 continue
+
+            start_time_abs = self.current_time_offset + (event_start / float(fs))
+            end_time_abs = min(
+                self.current_time_offset + (point_count / float(fs)),
+                self.current_time_offset + ((event_end + 1) / float(fs)),
+            )
+            self.current_window_airflow_events.append({
+                "start_sec": start_time_abs,
+                "end_sec": end_time_abs,
+                "duration_sec": max(0.0, end_time_abs - start_time_abs),
+                "final_label": event_label,
+                "rule_label": event_label,
+                "source": "airflow_window_threshold",
+                "baseline_airflow": baseline_airflow,
+                "drop_percent": drop_ratio * 100.0,
+            })
 
             x1 = float(x_data[event_start])
             x2 = float(x_data[event_end]) + (1.0 / float(fs))
@@ -1934,27 +2167,44 @@ class SleepMonitorChart(QWidget):
             if x2 <= x1:
                 x2 = x1 + (1.0 / float(fs))
 
+            event_brush_map = {
+                "HSA": (22, 163, 74, 105),
+                "OSA": (220, 38, 38, 110),
+                "CSA": (37, 99, 235, 110),
+            }
+            region_brush = event_brush_map.get(event_label, (185, 28, 28, 105))
+
             region = pg.LinearRegionItem(
                 values=[x1, x2],
                 orientation="vertical",
                 movable=False,
-                brush=(255, 80, 80, 45),
+                brush=region_brush,
             )
             region.setZValue(4)
             plot_widget.addItem(region)
 
+            duration_text = self.format_duration(duration_sec)
+            start_text = self.format_timestamp(start_time_abs)
+            drop_text = f"{drop_ratio * 100.0:.1f}% drop"
+            label_text = f"{event_label}\n{start_text}\n{duration_text}\n{drop_text}"
+
             label = pg.TextItem(
-                text=f"{event_label} ({drop_ratio * 100.0:.1f}%)",
-                color=(220, 30, 30),
-                anchor=(0.5, 1.0),
+                text=label_text,
+                color=(255, 255, 255),
+                anchor=(0.5, 0.5),
             )
-            label_y = min(float(threshold) - 2.0, float(AIRFLOW_Y_RANGE[1]) - 2.0)
+            view_range = plot_widget.getViewBox().viewRange()
+            y_min, y_max = view_range[1]
+            label_y = (float(y_min) + float(y_max)) / 2.0
             label.setPos((x1 + x2) / 2.0, label_y)
             label.setZValue(6)
             plot_widget.addItem(label)
 
             self.airflow_event_items.append((region, plot_widget))
             self.airflow_event_items.append((label, plot_widget))
+
+        # Keep the side-panel event list tied to the full detected dataset.
+        self.emit_detected_events_panel()
     
     def calculate_spo2_statistics(self, spo2_data):
         """Calculate medical-grade SpO2 statistics"""
@@ -2491,19 +2741,8 @@ class SleepMonitorChart(QWidget):
         if y_min is not None and y_max is not None:
             initial_y_min, initial_y_max = y_min, y_max
         else:
-            # Fallback to hardcoded medical ranges if parameters not provided
-            y_axis_ranges = {
-                "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
-                "Airflow": AIRFLOW_Y_RANGE,     # Respiratory airflow waveform
-                "Snoring": (0, 100),        # Snoring intensity spikes
-                "Thorax": (-80, 80),        # Chest effort belt movement
-                "Abdomen": (-80, 80),       # Abdomen effort belt movement
-                "SpO2": (60, 100),          # Oxygen saturation
-                "Pulse": (40, 140),         # Sleeping heart rate range
-                "Body Movement": (0, 100)    # Motion/activity spikes
-            }
             signal_name = name.strip()
-            initial_y_min, initial_y_max = y_axis_ranges.get(signal_name, (0, 100))
+            initial_y_min, initial_y_max = SIGNAL_Y_RANGES.get(signal_name, (0, 100))
 
         if name.strip() == "Airflow":
             initial_y_min, initial_y_max = self.get_signal_auto_axis_range(name.strip())
@@ -2556,11 +2795,18 @@ class SleepMonitorChart(QWidget):
         
         # Set time window limits on CustomViewBox to enforce zoom constraints
         vb = plot_widget.getViewBox()
+        if hasattr(vb, "owner_plot_widget"):
+            vb.owner_plot_widget = plot_widget
         if hasattr(vb, 'set_time_window_limits'):
             vb.set_time_window_limits(0, self.current_time_window)
         
         plot_widget.setMouseEnabled(x=False, y=True)
         plot_widget.hideButtons()  # Hide the 'A' button
+        container.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
+        label_frame.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
+        label.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
+        plot_container.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
+        zoom_frame.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
         
         # Center the plot widget in its container
         plot_container_layout.setAlignment(plot_widget, Qt.AlignCenter)
@@ -2570,28 +2816,13 @@ class SleepMonitorChart(QWidget):
             # Get SpO2 data for current time window
             # Get filtered data for current time window
             x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
-            
-            # If no data available, fallback to simulated data
-            if len(x) == 0:
-                print("Falling back to simulated SpO2 data")
-                time_points = 1000
-                x = np.arange(time_points, dtype=float) / float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
-                y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
-            else:
+
+            if len(x) > 0 and len(y) > 0:
                 # Use real SpO2 data as-is (no artificial baseline correction)
                 print(f"Using real SpO2 data: {len(y)} points, range: {np.min(y):.1f}-{np.max(y):.1f}")
         else:
             x, y = self.get_signal_data_for_window(name, self.current_time_window, self.current_time_offset)
-
-            if len(x) == 0 or len(y) == 0:
-                # Generate simulated data for other signals based on time window
-                time_points = int(self.current_time_window * 10)  # 10 Hz sampling rate
-                x = np.arange(time_points, dtype=float) / float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
-                y = np.sin(x * frequency * 2 * np.pi) * amplitude + offset + (np.random.rand(time_points) - 0.5) * amplitude * 0.1
-                
-                # Apply smoothing to all graph data for professional appearance
-                y = self.smooth_data(x, y, window_size=5)
-            else:
+            if len(x) > 0 and len(y) > 0:
                 print(f"Using real {name} data: {len(y)} points, range: {np.min(y):.1f}-{np.max(y):.1f}")
         
         # Plot the signal andltore reference for line visibility control
@@ -2601,7 +2832,16 @@ class SleepMonitorChart(QWidget):
         plot_curve = plot_widget.plot(x, y, pen=pen, fill=None)
 
         if name.strip() == "Airflow":
-            self.mark_airflow_drop_events(plot_widget, x, y)
+            _event_x, detection_y = self.get_airflow_detection_data_for_window(
+                self.current_time_window,
+                self.current_time_offset,
+            )
+            self.mark_airflow_drop_events(
+                plot_widget,
+                x,
+                y,
+                detection_y_data=detection_y,
+            )
 
         # Add value labels for SpO2 graph - only in 10s-30s time window
         if name.strip() == "SpO2" and len(x) > 0 and len(y) > 0:
@@ -2950,8 +3190,23 @@ class SleepMonitorChart(QWidget):
         current_range = plot_widget.getViewBox().viewRange()
         y_min, y_max = current_range[1]
         
-        # Calculate center point
+        # Anchor zoom around the visible waveform strip instead of empty space.
         center = (y_min + y_max) / 2
+        if hasattr(plot_widget, 'plot_curve'):
+            x_data, y_data = plot_widget.plot_curve.getData()
+            if x_data is not None and y_data is not None:
+                x_values = np.asarray(x_data, dtype=float)
+                y_values = np.asarray(y_data, dtype=float)
+                x_min, x_max = current_range[0]
+                visible_mask = (
+                    np.isfinite(x_values)
+                    & np.isfinite(y_values)
+                    & (x_values >= x_min)
+                    & (x_values <= x_max)
+                )
+                visible_y = y_values[visible_mask]
+                if visible_y.size > 0:
+                    center = float(np.median(visible_y))
         current_range_size = y_max - y_min
         
         # Calculate new range size
@@ -2963,20 +3218,7 @@ class SleepMonitorChart(QWidget):
         
         # Get chart name to apply proper limits
         chart_name = getattr(plot_widget, 'chart_name', '')
-        # Define medical standard Y-axis ranges for each signal type
-        y_axis_ranges = {
-            "Body Position": (0, 4),     
-            "Airflow": AIRFLOW_Y_RANGE,
-            "Snoring": (0, 100),       
-            "Thorax": (0, 100),     
-            "Abdomen": (-100, 100),     
-            "SpO2": (60, 100),
-            "Pulse": (40, 140),
-            "Body Movement": (0, 100)
-        }
-        
-        # Get proper Y-axis limits for this chart
-        y_min_limit, y_max_limit = y_axis_ranges.get(chart_name.strip(), (0, 100))
+        y_min_limit, y_max_limit = SIGNAL_Y_RANGES.get(chart_name.strip(), (0, 100))
         
         # Apply chart-specific limits
         if new_y_min < y_min_limit:
@@ -2997,24 +3239,55 @@ class SleepMonitorChart(QWidget):
             # Store zoom range to persist during playback
             plot_widget.zoom_y_range = (new_y_min, new_y_max)
             print(f"Stored zoom range for {chart_name}: {new_y_min} - {new_y_max}")
+
+    def zoom_vertical_at_ratio(self, plot_widget, zoom_factor, anchor_ratio):
+        """Zoom vertically while keeping the chosen relative Y position visually anchored."""
+        current_range = plot_widget.getViewBox().viewRange()
+        y_min, y_max = current_range[1]
+        current_range_size = y_max - y_min
+        if current_range_size <= 0:
+            return
+
+        anchor_ratio = max(0.0, min(1.0, float(anchor_ratio)))
+        anchor_y = y_max - (current_range_size * anchor_ratio)
+        new_y_min = anchor_y - ((anchor_y - y_min) * zoom_factor)
+        new_y_max = anchor_y + ((y_max - anchor_y) * zoom_factor)
+
+        chart_name = getattr(plot_widget, 'chart_name', '')
+        y_min_limit, y_max_limit = SIGNAL_Y_RANGES.get(chart_name.strip(), (0, 100))
+
+        if new_y_min < y_min_limit:
+            shift = y_min_limit - new_y_min
+            new_y_min += shift
+            new_y_max += shift
+        if new_y_max > y_max_limit:
+            shift = new_y_max - y_max_limit
+            new_y_min -= shift
+            new_y_max -= shift
+
+        try:
+            plot_widget.setYRange(new_y_min, new_y_max)
+        except TypeError:
+            plot_widget.setRange(yRange=[new_y_min, new_y_max])
+
+        plot_widget.zoom_y_range = (new_y_min, new_y_max)
+        print(f"Stored anchored zoom range for {chart_name}: {new_y_min} - {new_y_max}")
+
+    def handle_container_wheel_zoom(self, event, plot_widget):
+        """Route wheel zoom from non-plot container areas into centered graph zoom."""
+        delta = event.angleDelta().y() if hasattr(event, "angleDelta") else event.delta()
+        zoom_factor = 0.9 if delta > 0 else 1.1
+        self.zoom_vertical_at_ratio(plot_widget, zoom_factor, 0.5)
+        event.accept()
     
     def reset_zoom(self, plot_widget):
         """Reset zoom to original medical standard range"""
-        # Define medical standard Y-axis ranges
-        y_axis_ranges = {
-            "Body Position": (0, 4),   
-            "Airflow": AIRFLOW_Y_RANGE,
-            "Snoring": (0, 100),        
-            "Thorax": (-100, 100),     
-            "Abdomen": (-100, 100),     
-            "SpO2": (60, 100),
-            "Pulse": (40, 140),
-            "Body Movement": (0, 100)
-        }
-        
         # Get the chart name from the plot widget
         chart_name = getattr(plot_widget, 'chart_name', '')
-        y_min, y_max = y_axis_ranges.get(chart_name.strip(), (0, 100))
+        if chart_name.strip() == "Airflow":
+            y_min, y_max = self.get_signal_auto_axis_range("Airflow")
+        else:
+            y_min, y_max = SIGNAL_Y_RANGES.get(chart_name.strip(), (0, 100))
         
         try:
             plot_widget.setYRange(y_min, y_max)
@@ -4505,10 +4778,7 @@ class SleepMonitorChart(QWidget):
             print(f"Error in render_dynamic_selections: {e}")
 
     def update_apnea_events_display(self):
-        """Ensure automatic apnea overlays stay synced with current chart set."""
-        if self.auto_rule_ai_result:
-            self._sync_auto_detected_selections_into_overlays()
-            self.render_dynamic_selections()
+        """Refresh only the event summary; overlays are rendered elsewhere."""
         self.update_detection_summary_label()
     
     def update_all_overlays_on_resize(self):

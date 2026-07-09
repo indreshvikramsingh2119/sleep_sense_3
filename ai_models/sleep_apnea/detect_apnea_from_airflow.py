@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy.signal import find_peaks
 
 CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
@@ -38,9 +39,15 @@ except ImportError:
         preprocess_signals,
     )
 
+try:
+    from src.components.airflow_display_processing import enhance_airflow_for_graph_and_detection
+except ImportError:
+    enhance_airflow_for_graph_and_detection = None
+
 
 SKIP_MINUTES = 20.0
 BASELINE_MINUTES = 45.0
+BASELINE_HOURLY_WINDOW_SEC = 3600.0
 MIN_CANDIDATE_SEC = 4.0
 HSA_MIN_SEC = 10.0
 OSA_MIN_SEC = 10.0
@@ -56,9 +63,9 @@ MIN_HSA_AIRFLOW_AMPLITUDE = 3.0
 MIN_HSA_AIRFLOW_AMPLITUDE_RATIO = 0.08
 
 APNEA_DROP = 0.70
-HYPOPNEA_DROP = 0.15
+HYPOPNEA_DROP = 0.30
 CSA_DROP = 0.80
-HSA_DROP_PERCENT_RANGE = (15.0, 30.0)
+HSA_DROP_PERCENT_RANGE = (30.0, 70.0)
 OSA_DROP_PERCENT_RANGE = (70.0, 80.0)
 CSA_DROP_PERCENT_RANGE = (80.0, 90.0)
 MERGE_GAP_SEC = 0.0
@@ -103,12 +110,128 @@ def stable_max(values: pd.Series | np.ndarray, min_occurrence: int = MIN_STABLE_
     series = pd.Series(values).dropna()
     series = pd.to_numeric(series, errors="coerce").dropna()
     rounded = series.round(2)
-    counts = rounded.value_counts().sort_index(ascending=False)
-    for value, count in counts.items():
-        if int(count) >= int(min_occurrence):
-            return float(value), int(count)
-    max_value = float(rounded.max())
-    return max_value, int((rounded == max_value).sum())
+    counts = rounded.value_counts()
+    candidates = [
+        (float(value), int(count))
+        for value, count in counts.items()
+        if int(count) >= int(min_occurrence)
+    ]
+    if candidates:
+        candidates.sort(key=lambda item: (item[1], item[0]), reverse=True)
+        return candidates[0]
+    fallback_value = float(counts.idxmax())
+    fallback_count = int(counts.max())
+    return fallback_value, fallback_count
+
+
+def stable_peak_max(
+    values: pd.Series | np.ndarray,
+    min_occurrence: int = MIN_STABLE_OCCURRENCE,
+) -> tuple[float, int, np.ndarray]:
+    series = pd.Series(values).dropna()
+    series = pd.to_numeric(series, errors="coerce").dropna()
+    if series.empty:
+        return 0.0, 0, np.array([], dtype=int)
+
+    signal = series.to_numpy(dtype=float)
+    peak_indices, _ = find_peaks(signal)
+    if len(peak_indices) == 0:
+        value, count = stable_max(signal, min_occurrence=min_occurrence)
+        fallback_indices = np.where(np.round(signal, 2) == round(value, 2))[0]
+        return value, count, fallback_indices
+
+    peak_values = pd.Series(signal[peak_indices]).round(2)
+    counts = peak_values.value_counts()
+    candidates = [
+        (float(value), int(count))
+        for value, count in counts.items()
+        if int(count) >= int(min_occurrence)
+    ]
+    if candidates:
+        candidates.sort(key=lambda item: (item[1], item[0]), reverse=True)
+        selected_value, selected_count = candidates[0]
+    else:
+        selected_value = float(counts.idxmax())
+        selected_count = int(counts.max())
+
+    selected_indices = peak_indices[np.round(signal[peak_indices], 2) == round(selected_value, 2)]
+    return selected_value, selected_count, selected_indices
+
+
+def compute_hourly_peak_baselines(
+    time_sec: np.ndarray,
+    airflow: np.ndarray,
+    skip_sec: float,
+    min_occurrence: int = MIN_STABLE_OCCURRENCE,
+) -> list[dict[str, float | int | None]]:
+    hourly_results: list[dict[str, float | int | None]] = []
+    analysis_end_sec = float(time_sec[-1]) if len(time_sec) else skip_sec
+    window_start = float(skip_sec)
+    window_index = 1
+    full_window_end_limit = analysis_end_sec - BASELINE_HOURLY_WINDOW_SEC
+
+    while window_start <= full_window_end_limit + 1e-9:
+        window_end = window_start + BASELINE_HOURLY_WINDOW_SEC
+        window_mask = (time_sec >= window_start) & (time_sec < window_end)
+        window_airflow = airflow[window_mask]
+        window_time = time_sec[window_mask]
+        if len(window_airflow) == 0:
+            window_start += BASELINE_HOURLY_WINDOW_SEC
+            window_index += 1
+            continue
+
+        peak_value, peak_occurrence, peak_indices = stable_peak_max(
+            window_airflow,
+            min_occurrence=min_occurrence,
+        )
+        peak_times = window_time[peak_indices] if len(peak_indices) > 0 else np.array([], dtype=float)
+        hourly_results.append(
+            {
+                "window_index": int(window_index),
+                "window_label": f"Hour {window_index}",
+                "window_type": "hour",
+                "start_sec": float(window_start),
+                "end_sec": float(window_end),
+                "duration_sec": float(window_end - window_start),
+                "peak_value": float(peak_value),
+                "peak_occurrence": int(peak_occurrence),
+                "peak_first_time_sec": float(peak_times[0]) if len(peak_times) > 0 else None,
+                "peak_last_time_sec": float(peak_times[-1]) if len(peak_times) > 0 else None,
+            }
+        )
+
+        window_index += 1
+        window_start += BASELINE_HOURLY_WINDOW_SEC
+
+    remainder_start = float(skip_sec) + (window_index - 1) * BASELINE_HOURLY_WINDOW_SEC
+    remainder_duration_sec = float(analysis_end_sec - remainder_start)
+    if remainder_duration_sec > 0:
+        remainder_end = analysis_end_sec + 1e-9
+        remainder_mask = (time_sec >= remainder_start) & (time_sec <= analysis_end_sec)
+        remainder_airflow = airflow[remainder_mask]
+        remainder_time = time_sec[remainder_mask]
+        if len(remainder_airflow) > 0:
+            peak_value, peak_occurrence, peak_indices = stable_peak_max(
+                remainder_airflow,
+                min_occurrence=min_occurrence,
+            )
+            peak_times = remainder_time[peak_indices] if len(peak_indices) > 0 else np.array([], dtype=float)
+            hourly_results.append(
+                {
+                    "window_index": int(window_index),
+                    "window_label": "Remainder Window",
+                    "window_type": "remainder",
+                    "start_sec": float(remainder_start),
+                    "end_sec": float(remainder_end),
+                    "duration_sec": float(remainder_duration_sec),
+                    "peak_value": float(peak_value),
+                    "peak_occurrence": int(peak_occurrence),
+                    "peak_first_time_sec": float(peak_times[0]) if len(peak_times) > 0 else None,
+                    "peak_last_time_sec": float(peak_times[-1]) if len(peak_times) > 0 else None,
+                }
+            )
+
+    return hourly_results
 
 
 def stable_min_from_occurrence_band(
@@ -153,36 +276,8 @@ def baseline_from_occurrence_band(
     target_occurrence: int = BASELINE_TARGET_OCCURRENCE,
     tolerance: int = BASELINE_OCCURRENCE_TOLERANCE,
 ) -> tuple[float, int]:
-    series = pd.Series(values).dropna()
-    series = pd.to_numeric(series, errors="coerce").dropna()
-
-    rounded = series.round(2)
-    counts = rounded.value_counts().sort_index(ascending=False)
-
-    lower = target_occurrence - tolerance
-    upper = target_occurrence + tolerance
-
-    candidates: list[tuple[float, int]] = []
-    for value, count in counts.items():
-        if lower <= int(count) <= upper:
-            candidates.append((float(value), int(count)))
-
-    if candidates:
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        return candidates[0]
-
-    closest: list[tuple[float, int]] = []
-    min_diff: int | None = None
-    for value, count in counts.items():
-        diff = abs(int(count) - target_occurrence)
-        if min_diff is None or diff < min_diff:
-            min_diff = diff
-            closest = [(float(value), int(count))]
-        elif diff == min_diff:
-            closest.append((float(value), int(count)))
-
-    closest.sort(key=lambda item: item[0], reverse=True)
-    return closest[0]
+    baseline_value, baseline_count, _ = stable_peak_max(values, min_occurrence=MIN_STABLE_OCCURRENCE)
+    return baseline_value, baseline_count
 
 
 def _segment_mask(mask: np.ndarray, time_sec: np.ndarray, min_event_sec: float) -> list[tuple[int, int, float]]:
@@ -249,7 +344,7 @@ def _build_debug_summary(
 ) -> list[str]:
     return [
         f"baseline_source={baseline_source}",
-        f"baseline_airflow={baseline_airflow:.2f}",
+        f"summary_average_hourly_baseline={baseline_airflow:.2f}",
         f"stable_min_airflow={stable_min_airflow:.2f}",
         f"reduction_scale=percent_drop_from_baseline",
         f"airflow_reduction_range={airflow_reduction_range:.2f}",
@@ -275,6 +370,96 @@ def _build_event_debug_line(event: dict[str, Any], event_id: int) -> str:
     )
 
 
+def _format_window_duration(duration_sec: float) -> str:
+    total_seconds = max(0.0, float(duration_sec))
+    hours = int(total_seconds // 3600)
+    remaining_after_hours = total_seconds - (hours * 3600)
+    minutes = int(remaining_after_hours // 60)
+    seconds = remaining_after_hours - (minutes * 60)
+
+    if hours > 0:
+        return f"{hours}h {minutes}m {seconds:.1f}s"
+    if minutes > 0:
+        return f"{minutes}m {seconds:.1f}s"
+    return f"{seconds:.1f}s"
+
+
+def _build_hourly_baseline_array(
+    analysis_time: np.ndarray,
+    hourly_peak_baselines: list[dict[str, float | int | None]],
+) -> np.ndarray:
+    baseline_array = np.zeros(len(analysis_time), dtype=float)
+
+    for item in hourly_peak_baselines:
+        start_sec = float(item["start_sec"])
+        end_sec = float(item["end_sec"])
+        peak_value = float(item["peak_value"])
+        if str(item.get("window_type", "")) == "remainder":
+            window_mask = (analysis_time >= start_sec) & (analysis_time <= end_sec)
+        else:
+            window_mask = (analysis_time >= start_sec) & (analysis_time < end_sec)
+        baseline_array[window_mask] = peak_value
+
+    if len(baseline_array) > 0:
+        last_nonzero = next((value for value in baseline_array[::-1] if value > 0), 0.0)
+        if last_nonzero > 0:
+            baseline_array[baseline_array <= 0] = last_nonzero
+
+    return baseline_array
+
+
+def _write_text_report(result: dict[str, Any], csv_path: str | Path, output_dir: str | Path) -> Path:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = output_dir / f"{Path(csv_path).stem}_rule_ai_events_{timestamp}.txt"
+    generated_dt = datetime.now()
+
+    lines: list[str] = [
+        f"report_type=rule_based_apnea_detection | source_csv={csv_path} | generated_date={generated_dt.strftime('%Y-%m-%d')} | generated_time={generated_dt.strftime('%H:%M:%S')}",
+        "formula=drop_percent=((window_baseline-analysis_peak_envelope)/window_baseline)*100",
+        f"label_rules=HSA:30-<70 | OSA:70-80 | CSA:>80-90 | min_candidate_sec={MIN_CANDIDATE_SEC:.1f} | hsa_min_sec={HSA_MIN_SEC:.1f} | osa_min_sec={OSA_MIN_SEC:.1f} | csa_min_sec={CSA_MIN_SEC:.1f}",
+        "baseline_note=detection_uses_hourly_or_remainder_window_peak_baselines_not_one_combined_average",
+        f"baseline_source={result.get('baseline_source', '--')}",
+        "hourly_peak_baselines:",
+    ]
+
+    hourly_peak_baselines = result.get("hourly_peak_baselines", [])
+    if hourly_peak_baselines:
+        for item in hourly_peak_baselines:
+            display_item = dict(item)
+            window_label = str(display_item.get("window_label", "Window"))
+            if str(display_item.get("window_type", "")) == "remainder":
+                window_label = f"{window_label} ({_format_window_duration(float(display_item.get('duration_sec', 0.0)))})"
+            display_item["window_label"] = window_label
+            lines.append(
+                "window_label={window_label} | range={start_sec:.1f}s-{end_sec:.1f}s | duration={duration_sec:.1f}s | "
+                "peak={peak_value:.2f} | occurrence={peak_occurrence} | first={peak_first_time_sec} | "
+                "last={peak_last_time_sec}".format(
+                    **display_item,
+                )
+            )
+    else:
+        lines.append("No hourly peak baselines found.")
+
+    lines.append("summary:")
+
+    for line in result.get("debug_summary", []):
+        lines.append(str(line))
+
+    lines.append(f"total_detected_events={len(result.get('events', []))}")
+    lines.append("detected_events:")
+
+    debug_events = result.get("debug_events", [])
+    if debug_events:
+        lines.extend(str(line) for line in debug_events)
+    else:
+        lines.append("none")
+
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
+
+
 def classify_rule_event(
     drop_ratio: float,
     spo2_drop: float,
@@ -293,7 +478,7 @@ def classify_rule_event(
 
     drop_percent = drop_ratio * 100.0
 
-    if HSA_DROP_PERCENT_RANGE[0] <= drop_percent <= HSA_DROP_PERCENT_RANGE[1]:
+    if HSA_DROP_PERCENT_RANGE[0] <= drop_percent < HSA_DROP_PERCENT_RANGE[1]:
         return "HSA"
 
     if OSA_DROP_PERCENT_RANGE[0] <= drop_percent <= OSA_DROP_PERCENT_RANGE[1]:
@@ -324,6 +509,21 @@ def detect_apnea_events_from_dataframe(
     output_dir: str | Path | None = None,
     enable_ai: bool = False,
 ) -> dict[str, Any]:
+    signal_df = signal_df.copy()
+    airflow_enhancement_applied = False
+    if enhance_airflow_for_graph_and_detection is not None and "airflow" in signal_df.columns:
+        enhanced_airflow = enhance_airflow_for_graph_and_detection(
+            signal_df["airflow"].to_numpy(dtype=float),
+            amplitude=1.15,
+            max_limit=None,
+            spike_threshold=20.0,
+            kernel_size=5,
+            low_protect_margin=2.0,
+            keep_integer=True,
+        )
+        signal_df["airflow"] = enhanced_airflow
+        airflow_enhancement_applied = True
+
     processed_df, preprocess_meta = preprocess_signals(signal_df)
 
     raw_time_sec = signal_df["time_sec"].to_numpy(dtype=float)
@@ -340,17 +540,37 @@ def detect_apnea_events_from_dataframe(
     peak_window_points = max(1, int(round(estimated_fs * CANDIDATE_WINDOW_SEC)))
 
     skip_sec = SKIP_MINUTES * 60.0
-    baseline_end_sec = skip_sec + (BASELINE_MINUTES * 60.0)
-
-    baseline_mask = (raw_time_sec >= skip_sec) & (raw_time_sec < baseline_end_sec)
+    baseline_mask = raw_time_sec >= skip_sec
     baseline_airflow_window = raw_airflow[baseline_mask]
     if len(baseline_airflow_window) == 0:
         raise ValueError("Baseline airflow window is empty. Recording is too short.")
 
-    airflow_baseline, baseline_occurrence = baseline_from_occurrence_band(
-        baseline_airflow_window,
-        target_occurrence=BASELINE_TARGET_OCCURRENCE,
-        tolerance=BASELINE_OCCURRENCE_TOLERANCE,
+    hourly_peak_baselines = compute_hourly_peak_baselines(
+        time_sec=raw_time_sec,
+        airflow=raw_airflow,
+        skip_sec=skip_sec,
+        min_occurrence=MIN_STABLE_OCCURRENCE,
+    )
+    if not hourly_peak_baselines:
+        raise ValueError("Hourly baseline windows are empty. Recording is too short after skip period.")
+
+    hourly_peak_values = [float(item["peak_value"]) for item in hourly_peak_baselines]
+    airflow_baseline = float(np.mean(hourly_peak_values))
+    baseline_occurrence = int(sum(int(item["peak_occurrence"]) for item in hourly_peak_baselines))
+    baseline_occurrence_duration_sec = (
+        float(baseline_occurrence / estimated_fs) if estimated_fs and baseline_occurrence > 0 else 0.0
+    )
+    baseline_peak_first_time = next(
+        (item["peak_first_time_sec"] for item in hourly_peak_baselines if item["peak_first_time_sec"] is not None),
+        None,
+    )
+    baseline_peak_last_time = next(
+        (
+            item["peak_last_time_sec"]
+            for item in reversed(hourly_peak_baselines)
+            if item["peak_last_time_sec"] is not None
+        ),
+        None,
     )
     stable_min_airflow, stable_min_occurrence = stable_min_from_occurrence_band(
         baseline_airflow_window,
@@ -378,18 +598,19 @@ def detect_apnea_events_from_dataframe(
         .max()
         .to_numpy()
     )
+    analysis_window_baseline = _build_hourly_baseline_array(analysis_time, hourly_peak_baselines)
+    if len(analysis_window_baseline) != len(analysis_time) or np.any(analysis_window_baseline <= 0):
+        raise ValueError("Hourly baseline mapping failed for analysis window.")
 
     analysis_drop_percent = (
-        ((airflow_baseline - analysis_peak_envelope) / airflow_baseline) * 100.0
-        if airflow_baseline
-        else np.zeros_like(analysis_peak_envelope)
+        ((analysis_window_baseline - analysis_peak_envelope) / analysis_window_baseline) * 100.0
     )
     analysis_drop_percent = np.clip(analysis_drop_percent, 0.0, 100.0)
 
     label_specs = [
         (
             "HSA",
-            lambda x: (x >= HSA_DROP_PERCENT_RANGE[0]) & (x <= HSA_DROP_PERCENT_RANGE[1]),
+            lambda x: (x >= HSA_DROP_PERCENT_RANGE[0]) & (x < HSA_DROP_PERCENT_RANGE[1]),
             MIN_CANDIDATE_SEC,
         ),
         (
@@ -434,6 +655,12 @@ def detect_apnea_events_from_dataframe(
             event_spo2 = spo2[start_index:end_index + 1]
             event_snoring = snoring[start_index:end_index + 1]
             event_movement = body_movement[start_index:end_index + 1]
+            event_window_baseline = analysis_window_baseline[local_start:local_end + 1]
+            event_baseline_airflow = (
+                float(np.nanmean(event_window_baseline))
+                if len(event_window_baseline) > 0
+                else float(airflow_baseline)
+            )
 
             event_min_airflow = float(np.nanmin(event_airflow))
             event_mean_airflow = float(np.nanmean(event_airflow))
@@ -446,8 +673,8 @@ def detect_apnea_events_from_dataframe(
             )
 
             drop_ratio = (
-                (airflow_baseline - event_peak_airflow) / airflow_baseline
-                if airflow_baseline
+                (event_baseline_airflow - event_peak_airflow) / event_baseline_airflow
+                if event_baseline_airflow
                 else 0.0
             )
             drop_ratio = float(np.clip(drop_ratio, 0.0, 1.0))
@@ -465,7 +692,7 @@ def detect_apnea_events_from_dataframe(
             snoring_mean = float(np.nanmean(event_snoring))
             movement_mean = float(np.nanmean(event_movement))
             airflow_std = float(np.nanstd(event_airflow))
-            variability_score = airflow_std / airflow_baseline if airflow_baseline else 0.0
+            variability_score = airflow_std / event_baseline_airflow if event_baseline_airflow else 0.0
 
             rule_label = classify_rule_event(
                 drop_ratio=drop_ratio,
@@ -490,7 +717,7 @@ def detect_apnea_events_from_dataframe(
                     "start_sec": float(time_sec[start_index]),
                     "end_sec": float(time_sec[end_index]),
                     "duration_sec": float(duration_sec),
-                    "baseline_airflow": float(airflow_baseline),
+                    "baseline_airflow": float(event_baseline_airflow),
                     "event_min_airflow": event_min_airflow,
                     "event_mean_airflow": event_mean_airflow,
                     "event_peak_airflow": event_peak_airflow,
@@ -622,12 +849,12 @@ def detect_apnea_events_from_dataframe(
         raw_segments=int(raw_segment_count),
         filtered_segments=int(len(preliminary_events)),
         merged_segments=int(len(merged_events)),
-        baseline_source="raw_airflow_occurrence_band_500pm50_upper_peak",
+        baseline_source="hourly_average_of_most_frequent_peak_values",
     )
     debug_events = [_build_event_debug_line(event.to_dict(), event.event_id) for event in events]
 
     return {
-        "baseline_source": "raw_airflow_occurrence_band_500pm50_upper_peak",
+        "baseline_source": "hourly_average_of_most_frequent_peak_values",
         "pipeline_mode": "rule_first_ai_second",
         "rule_scan_used": True,
         "ai_enabled_requested": bool(enable_ai),
@@ -640,6 +867,10 @@ def detect_apnea_events_from_dataframe(
         "baseline_occurrence": int(baseline_occurrence),
         "stable_peak_baseline": float(airflow_baseline),
         "stable_peak_occurrence": int(baseline_occurrence),
+        "stable_peak_occurrence_duration_sec": float(baseline_occurrence_duration_sec),
+        "stable_peak_first_time_sec": float(baseline_peak_first_time) if baseline_peak_first_time is not None else None,
+        "stable_peak_last_time_sec": float(baseline_peak_last_time) if baseline_peak_last_time is not None else None,
+        "hourly_peak_baselines": hourly_peak_baselines,
         "stable_min_baseline": float(stable_min_airflow),
         "stable_min_occurrence": int(stable_min_occurrence),
         "airflow_reduction_scale": "percent_drop_from_baseline",
@@ -648,6 +879,7 @@ def detect_apnea_events_from_dataframe(
         "hypopnea_threshold": float(hypopnea_threshold),
         "estimated_sample_rate_hz": float(estimated_fs),
         "preprocess_meta": preprocess_meta,
+        "airflow_enhancement_applied": bool(airflow_enhancement_applied),
         "model_meta": model_meta,
         "debug_summary": debug_summary,
         "debug_events": debug_events,
@@ -663,6 +895,8 @@ def detect_apnea_events_from_csv(
     signal_df = load_sleep_csv(csv_path)
     result = detect_apnea_events_from_dataframe(signal_df, output_dir=output_dir, enable_ai=enable_ai)
     result["source_csv"] = str(csv_path)
+    if output_dir is not None:
+        result["text_report_path"] = str(_write_text_report(result, csv_path=csv_path, output_dir=output_dir))
     return result
 
 
@@ -695,10 +929,9 @@ def main() -> None:
     print("=" * 80)
     print("AIRFLOW BASELINE")
     print("=" * 80)
-    print(f"Stable airflow baseline     : {result['baseline_airflow']:.2f}")
-    print(f"Baseline occurrence         : {result['baseline_occurrence']}")
+    print("Detection uses hourly/remainder peak baselines listed in the report.")
     print(f"OSA threshold 70% drop      : airflow <= {result['apnea_threshold']:.2f}")
-    print(f"HSA threshold 15% drop      : airflow <= {result['hypopnea_threshold']:.2f}")
+    print(f"HSA threshold 30% drop      : airflow <= {result['hypopnea_threshold']:.2f}")
     print("=" * 80)
     print(f"Total candidate events found: {len(result['events'])}")
     print("=" * 80)

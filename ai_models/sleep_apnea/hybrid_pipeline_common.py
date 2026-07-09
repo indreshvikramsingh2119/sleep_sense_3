@@ -24,17 +24,27 @@ DEFAULT_CLASS_NAMES_PATH = MODELS_DIR / "event_image_cnn_class_names.json"
 DEFAULT_OUTPUT_DIR = CURRENT_DIR / "hybrid_pipeline_output"
 
 SIGNAL_COLUMNS = {
-    "timestamp": 1,
-    "body_position": 2,   
-    "pulse": 3,
-    "spo2": 4,
-    "body_movement": 5,
-    "airflow": 6,
-    "snoring": 8,
+    "timestamp": 0,
+    "body_position": 1,
+    "pulse": 2,
+    "spo2": 3,
+    "body_movement": 4,
+    "airflow": 5,
+    "snoring": 7,
+    "abdomen": 10,
 }
-
-CHANNEL_ORDER = ["airflow", "spo2", "pulse", "body_movement", "snoring"]
-Y_LIMITS = {
+CSV_SIGNAL_NAMES = tuple(
+    signal_name
+    for signal_name in SIGNAL_COLUMNS
+    if signal_name != "timestamp"
+)
+INTERPOLATED_SIGNAL_NAMES = tuple(
+    signal_name
+    for signal_name in CSV_SIGNAL_NAMES
+    if signal_name != "timestamp"
+)
+EVENT_IMAGE_CHANNEL_ORDER = ["airflow", "spo2", "pulse", "body_movement", "snoring"]
+EVENT_IMAGE_Y_LIMITS = {
     "airflow": (-10, 110),
     "spo2": (50, 105),
     "pulse": (30, 180),
@@ -75,22 +85,43 @@ def _resolve_existing_path(path_str: str | None, fallback: Path) -> Path:
     return fallback
 
 
+def _normalize_leading_empty_columns(numeric: pd.DataFrame) -> pd.DataFrame:
+    """Drop fully empty leading columns so signal mapping always starts from column 0."""
+    normalized = numeric.copy()
+    while normalized.shape[1] > 0:
+        first_col = pd.to_numeric(normalized.iloc[:, 0], errors="coerce")
+        if first_col.notna().sum() > 0:
+            break
+        normalized = normalized.iloc[:, 1:].reset_index(drop=True)
+    return normalized
+
+
 def load_sleep_csv(csv_path: str | Path) -> pd.DataFrame:
     csv_path = Path(csv_path)
     raw = pd.read_csv(csv_path, header=None)
     numeric = raw.apply(pd.to_numeric, errors="coerce")
     numeric = numeric.dropna(how="all").reset_index(drop=True)
+    numeric = _normalize_leading_empty_columns(numeric)
 
-    max_index = max(SIGNAL_COLUMNS.values())
-    if numeric.shape[1] <= max_index:
+    if numeric.shape[1] == 0:
         raise ValueError(
-            f"CSV {csv_path} has only {numeric.shape[1]} columns, expected at least {max_index + 1}."
+            f"CSV {csv_path} has no usable numeric columns."
         )
+
+    timestamp_index = SIGNAL_COLUMNS["timestamp"]
+    if numeric.shape[1] <= timestamp_index:
+        raise ValueError(f"CSV {csv_path} is missing the timestamp column at index {timestamp_index}.")
+
+    available_signal_columns = {
+        name: index
+        for name, index in SIGNAL_COLUMNS.items()
+        if index < numeric.shape[1]
+    }
 
     signal_df = pd.DataFrame(
         {
             name: numeric.iloc[:, index]
-            for name, index in SIGNAL_COLUMNS.items()
+            for name, index in available_signal_columns.items()
         }
     )
     signal_df = signal_df.dropna(subset=["timestamp"]).reset_index(drop=True)
@@ -99,7 +130,9 @@ def load_sleep_csv(csv_path: str | Path) -> pd.DataFrame:
     # Project timing is fixed at 10 Hz, so derive time from sample index
     signal_df["time_sec"] = np.arange(len(signal_df), dtype=float) / DEFAULT_SAMPLE_RATE_HZ
 
-    for channel in CHANNEL_ORDER + ["body_position"]:
+    for channel in INTERPOLATED_SIGNAL_NAMES:
+        if channel not in signal_df.columns:
+            continue
         signal_df[channel] = pd.to_numeric(signal_df[channel], errors="coerce")
         signal_df[channel] = signal_df[channel].interpolate(limit_direction="both")
         signal_df[channel] = signal_df[channel].ffill().bfill()
@@ -122,7 +155,7 @@ def preprocess_signals(
     if smoothing_points % 2 == 0:
         smoothing_points += 1
 
-    for channel in CHANNEL_ORDER:
+    for channel in EVENT_IMAGE_CHANNEL_ORDER:
         processed[channel] = (
             processed[channel]
             .rolling(window=smoothing_points, center=True, min_periods=1)
@@ -135,28 +168,18 @@ def preprocess_signals(
         "estimated_sample_rate_hz": estimated_rate_hz,
         "target_sample_rate_hz": float(target_sample_rate_hz),
         "smoothing_seconds": float(smoothing_seconds),
-        "channels": CHANNEL_ORDER,
+        "channels": EVENT_IMAGE_CHANNEL_ORDER,
     }
     return processed, metadata
 
 
 def _classify_rule_hint(airflow_drop: float, spo2_drop: float, movement_mean: float, snoring_mean: float) -> str:
-    # HSA: 10-30% reduction from max value
-    if 10.0 <= airflow_drop <= 30.0:
-        return "HSA"
-    
-    # OSA: 50-70% drop from max value
-    if 50.0 <= airflow_drop <= 70.0:
-        return "OSA"
-    
-    # CSA: 80-90% drop from max value
-    if 80.0 <= airflow_drop <= 90.0:
-        return "CSA"
-    
-    # MSA: Mixed Sleep Apnea (70% drop with high movement)
+    # Legacy candidate-generation flow should not maintain its own HSA/OSA/CSA
+    # subtype thresholds. The current detector in detect_apnea_from_airflow.py
+    # is the single source of truth for subtype labeling.
     if airflow_drop >= 70.0 and movement_mean >= 25:
         return "MSA"
-    
+
     return "REVIEW"
 
 
@@ -343,15 +366,15 @@ def create_event_window_image(
         raise ValueError(f"No samples found for {candidate.event_id} image window.")
 
     relative_time = window_df["time_sec"].to_numpy(dtype=float) - candidate.start_sec
-    fig, axes = plt.subplots(len(CHANNEL_ORDER), 1, figsize=(6, 6), dpi=140, sharex=True)
+    fig, axes = plt.subplots(len(EVENT_IMAGE_CHANNEL_ORDER), 1, figsize=(6, 6), dpi=140, sharex=True)
     fig.patch.set_facecolor("white")
 
-    for axis, channel in zip(axes, CHANNEL_ORDER):
+    for axis, channel in zip(axes, EVENT_IMAGE_CHANNEL_ORDER):
         y = window_df[channel].to_numpy(dtype=float)
         axis.plot(relative_time, y, color="#111111", linewidth=1.2)
         axis.axvspan(0.0, max(candidate.duration_sec, 0.1), color="#e5e7eb", alpha=0.9)
         axis.set_ylabel(channel, fontsize=8)
-        axis.set_ylim(*Y_LIMITS[channel])
+        axis.set_ylim(*EVENT_IMAGE_Y_LIMITS[channel])
         axis.grid(False)
         axis.tick_params(axis="both", labelsize=8)
 

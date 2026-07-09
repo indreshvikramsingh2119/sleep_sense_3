@@ -1,14 +1,19 @@
 """
 Plot PSG data from CSV to verify signal positions
 """
+import argparse
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
 SAMPLE_RATE_HZ = 10.0
 
+parser = argparse.ArgumentParser(description="Plot PSG signals from an uploaded CSV/TXT file.")
+parser.add_argument("csv_path", help="Path to the PSG CSV/TXT file to inspect")
+args = parser.parse_args()
+
 # Load the CSV file (no headers)
-csv_path = 'extracted_data/human.data.csv'
+csv_path = args.csv_path
 df = pd.read_csv(csv_path, header=None)
 
 print(f"CSV shape: {df.shape}")

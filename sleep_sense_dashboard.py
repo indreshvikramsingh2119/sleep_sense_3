@@ -722,7 +722,6 @@ class SleepMonitorChart(QWidget):#
         filename = f"raw_data_{self.patient_id}_{safe_ts}.json"
         file_path = os.path.join(out_dir, filename)
 
-        # Generate representative signal arrays similar to the plotted traces
         signals = [
             ("Body Position", "#3b82f6", 0.5, 10, 50),
             ("Airflow", "#8b5cf6", 0.3, 15, 50),
@@ -777,7 +776,6 @@ class SleepMonitorChart(QWidget):#
             if child:
                 child.setParent(None)
         
-        # Generate new data based on time window
         signals = [
             ("Body Position", "#3b82f6", 0.5, 10, 50),
             ("Airflow", "#8b5cf6", 0.3, 15, 50),
@@ -822,7 +820,7 @@ class SleepMonitorChart(QWidget):#
             ("Thorex ", "#f59e0b", 0.2, 5, 50),
             ("Abdomen ", "#10b981", 0.1, 2, 90),
             ("SpO2 ", "#06b6d4", 1.5, 12, 50),
-            ("Pulse ", "#f97316", 0.0, 0, 30),  # Flat line for position
+            ("Pulse ", "#f97316", 0.0, 0, 30),
             ("Body Movement", "#8b5cf6", 0.1, 5, 20),
             ("PR/HR)", "#5c61f6", 0.1, 5, 20),
         ]

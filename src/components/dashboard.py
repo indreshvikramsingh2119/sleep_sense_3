@@ -130,21 +130,18 @@ class SleepSenseDashboard(QMainWindow):
         # Connect dashboard slider to chart navigation updates
         self.monitor_chart.time_position_updated.connect(self.update_slider_position)
 
-        # Auto-load PSG data only after all chart/patient-panel wiring is ready
-        self.auto_load_psg_data()
-
         # Keep the time-window control aligned with any one-hour external array data.
         for index in range(self.time_window_dropdown.count()):
             if self.time_window_dropdown.itemData(index) == self.monitor_chart.current_time_window:
                 self.time_window_dropdown.setCurrentIndex(index)
                 break
 
-        # If detection already exists after auto-load, mirror it in the side event list immediately
+        # If detection already exists later, mirror it in the side event list immediately
         if self.monitor_chart.auto_rule_ai_result:
             self.patient_info.update_detected_events_list(
                 self.monitor_chart.auto_rule_ai_result.get("events", [])
             )
-        
+
         # Update button text to show initial count
         self.graph_dropdown_button.setText("Graphs (8/8) ▼")
         
@@ -946,10 +943,10 @@ class SleepSenseDashboard(QMainWindow):
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
         
-        if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+        max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
+        if max_duration > 0:
             # Step size equals the current time window size
             step_size = self.monitor_chart.current_time_window  
-            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0 
             
             # Move backward by step size
             self.monitor_chart.current_time_offset = max(0, self.monitor_chart.current_time_offset - step_size)
@@ -964,11 +961,11 @@ class SleepSenseDashboard(QMainWindow):
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
         
-        if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+        max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
+        if max_duration > 0:
             # Step size equals the current time window size
             step_size = self.monitor_chart.current_time_window  
-            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  
-            max_offset = max_duration - self.monitor_chart.current_time_window
+            max_offset = self.monitor_chart._get_playback_max_offset() if hasattr(self.monitor_chart, '_get_playback_max_offset') else max(0.0, max_duration - self.monitor_chart.current_time_window)
             
             # Move forward by step size
             self.monitor_chart.current_time_offset = min(max_offset, self.monitor_chart.current_time_offset + step_size)
@@ -1002,10 +999,9 @@ class SleepSenseDashboard(QMainWindow):
         """Handle slider value change"""
         print(f"DEBUG: on_slider_changed called with value={value}, current_event_index={self.current_event_index}")
         
-        if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+        max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
+        if max_duration > 0:
             # Calculate maximum time based on data length
-            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0
-            
             if max_duration > self.monitor_chart.current_time_window:
                 # Calculate time offset from slider value (0-100)
                 slider_progress = value / 100.0
@@ -1026,9 +1022,8 @@ class SleepSenseDashboard(QMainWindow):
     
     def update_slider_position(self):
         """Update slider position based on current time offset"""
-        if self.time_slider and hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
-          
-            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0  
+        max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
+        if self.time_slider and max_duration > 0:
             
             # Calculate slider value (0-100) based on current position
             if max_duration > self.monitor_chart.current_time_window:
@@ -1172,7 +1167,7 @@ class SleepSenseDashboard(QMainWindow):
         """Go to previous time window"""
         print("Previous button clicked")
         self.hide_extended_buttons()
-        if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+        if hasattr(self.monitor_chart, '_get_playback_max_duration') and self.monitor_chart._get_playback_max_duration() > 0:
             step_size = self.monitor_chart.current_time_window
             self.monitor_chart.current_time_offset = max(0, self.monitor_chart.current_time_offset - step_size)
             self.monitor_chart.refresh_charts()
@@ -1183,10 +1178,10 @@ class SleepSenseDashboard(QMainWindow):
         """Go to next time window"""
         print("Next button clicked")
         self.hide_extended_buttons()
-        if hasattr(self.monitor_chart, 'spo2_full_data') and self.monitor_chart.spo2_full_data and len(self.monitor_chart.spo2_full_data[1]) > 0:
+        max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
+        if max_duration > 0:
             step_size = self.monitor_chart.current_time_window
-            max_duration = len(self.monitor_chart.spo2_full_data[1]) / 10.0
-            max_offset = max_duration - self.monitor_chart.current_time_window
+            max_offset = self.monitor_chart._get_playback_max_offset() if hasattr(self.monitor_chart, '_get_playback_max_offset') else max(0.0, max_duration - self.monitor_chart.current_time_window)
             self.monitor_chart.current_time_offset = min(max_offset, self.monitor_chart.current_time_offset + step_size)
             self.monitor_chart.refresh_charts()
             self.update_slider_position()
@@ -1406,6 +1401,19 @@ class SleepSenseDashboard(QMainWindow):
     def get_all_events_sorted(self):
         """Gather all events from dynamic_selections and sort chronologically"""
         all_events = []
+
+        if hasattr(self.monitor_chart, "get_available_navigation_events"):
+            for selection in self.monitor_chart.get_available_navigation_events():
+                all_events.append({
+                    "chart_name": "Airflow",
+                    "label": selection.get("final_label") or selection.get("rule_label") or selection.get("label", "Unknown"),
+                    "start_time": selection.get("start_sec", selection.get("start_time", 0)),
+                    "end_time": selection.get("end_sec", selection.get("end_time", 0)),
+                    "color": selection.get("color", "#ff0000"),
+                })
+            if all_events:
+                all_events.sort(key=lambda x: x["start_time"])
+                return all_events
         
         if hasattr(self.monitor_chart, 'dynamic_selections'):
             # Iterate through all charts and their dynamic selections
@@ -1515,14 +1523,12 @@ class SleepSenseDashboard(QMainWindow):
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
-        
-        # Refresh the event list to get current events
+
         self.all_events = self.get_all_events_sorted()
-        
         if not self.all_events:
             print("No events found for navigation")
             return
-        
+
         # Navigate to last event (index len-1)
         self.current_event_index = len(self.all_events) - 1
         self.go_to_event(self.current_event_index)
@@ -1540,7 +1546,9 @@ class SleepSenseDashboard(QMainWindow):
         # Calculate viewport window size (center the event)
         window_size = self.monitor_chart.current_time_window
         # Position event at center of viewport (offset = event_time - window_size/2)
-        new_offset = max(0, event_time - window_size / 2)
+        requested_offset = max(0, event_time - window_size / 2)
+        max_offset = self.monitor_chart._get_playback_max_offset() if hasattr(self.monitor_chart, '_get_playback_max_offset') else requested_offset
+        new_offset = min(max_offset, requested_offset)
         
         # Update monitor chart time offset
         self.monitor_chart.current_time_offset = new_offset
@@ -1569,36 +1577,17 @@ class SleepSenseDashboard(QMainWindow):
         print(f"DEBUG: All navigation buttons enabled (permanently)")
 
     def auto_load_psg_data(self):
-        """Automatically load PSG data from CSV file"""
-        import os
-        try:
-            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-            candidate_paths = [
-                os.path.join(os.getcwd(), "extracted_data", "human.data.csv"),
-                os.path.join(project_root, "extracted_data", "human.data.csv"),
-            ]
-
-            csv_path = next((path for path in candidate_paths if os.path.exists(path)), None)
-            if csv_path:
-                print(f"🎬 Auto-loading PSG data from: {csv_path}")
-                self.monitor_chart.load_psg_data(csv_path)
-                print("✅ PSG data loaded successfully - Playback ready!")
-            else:
-                print(f"⚠️ Default PSG data file not found in: {candidate_paths}")
-                print("💡 Use File → Load Data to select PSG data file")
-        except Exception as e:
-            print(f"❌ Error auto-loading PSG data: {e}")
-            print("💡 Use File → Load Data to select PSG data file")
+        """Keep startup neutral; graphs should come from the user-selected upload."""
+        print("ℹ️ Auto-load disabled. Upload/select a PSG CSV file to plot its data.")
     
     def load_psg_data_from_file(self):
         """Open file dialog to select and load PSG data file"""
         from PyQt5.QtWidgets import QFileDialog
-        import os
         
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select PSG Data File",
-            os.path.join(os.getcwd(), "extracted_data"),
+            "",
             "CSV Files (*.csv);;All Files (*)"
         )
         

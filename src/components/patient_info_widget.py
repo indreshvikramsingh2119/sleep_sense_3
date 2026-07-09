@@ -275,18 +275,27 @@ class PatientInfoWidget(QWidget):
                     f"Selected file load nahi ho payi:\n{selected_file}",
                 )
                 return
-
+    
+            self.monitor_chart.run_rule_ai_apnea_detection()
             jumped = self.monitor_chart.focus_on_first_detected_event()
             if not jumped:
                 self.monitor_chart.current_time_offset = 0
             self.monitor_chart.refresh_charts()
             self.monitor_chart.time_position_updated.emit()
+            detected_events = []
+            if getattr(self.monitor_chart, "auto_rule_ai_result", None):
+                detected_events = list(self.monitor_chart.auto_rule_ai_result.get("events", []))
             QMessageBox.information(
                 self,
                 "Upload Complete",
                 (
                     f"Data load ho gaya aur graph update ho gaya:\n{os.path.basename(selected_file)}"
-                    + ("\nFirst detected event par jump ho gaya." if jumped else "\nKoi detected event nahi mila.")
+                    + (
+                        f"\nAuto-detect complete: {len(detected_events)} events."
+                        if detected_events
+                        else "\nAuto-detect me koi event nahi mila."
+                    )
+                    + ("\nFirst detected event par jump ho gaya." if jumped else "")
                 ),
             )
 
