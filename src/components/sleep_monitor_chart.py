@@ -25,6 +25,7 @@ import pyqtgraph as pg
 from .custom_viewbox import CustomViewBox
 from .amplitude_axis_properties_dialog import AmplitudeAxisPropertiesDialog
 from .airflow_display_processing import enhance_airflow_for_graph_and_detection
+from ..utils.report_metrics_calculator import calculate_sleep_metrics, save_sleep_metrics_json
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 if str(APP_ROOT) not in sys.path:
@@ -117,6 +118,8 @@ class SleepMonitorChart(QWidget):
         self.spo2_full_data = None  # Store full SpO2 data (time, spo2)
         self.psg_full_data = None  # Store full PSG data for all signals
         self.current_time_offset = 0  # Current starting time for window
+        self.analysis_results = None
+        self.analysis_json_path = None
         
                 
         # SpO2 specific statistics
@@ -580,11 +583,24 @@ class SleepMonitorChart(QWidget):
         print(f"🎬 Playback speed changed to {speed_text} ({self.playback_speed}x)")
     
     def update_time_position_label(self):
-        """Update the time position label"""
-        hours = int(self.current_time_offset // 3600)
-        minutes = int((self.current_time_offset % 3600) // 60)
-        seconds = int(self.current_time_offset % 60)
-        self.time_position_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        """Show the visible time range and the complete recording duration."""
+        total_duration = self._get_playback_max_duration()
+        def format_time(value):
+            hours = int(value // 3600)
+            minutes = int((value % 3600) // 60)
+            seconds = int(value % 60)
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        visible_end = min(
+            self.current_time_offset + self.current_time_window,
+            total_duration,
+        )
+        displayed_time = (
+            total_duration
+            if visible_end >= total_duration
+            else self.current_time_offset
+        )
+        self.time_position_label.setText(format_time(displayed_time))
         
         # Emit signal to update dashboard slider
         self.time_position_updated.emit()
@@ -657,15 +673,27 @@ class SleepMonitorChart(QWidget):
                 # Store current Y-axis range to preserve zoom settings
                 if not hasattr(plot_widget, 'zoom_y_range'):
                     plot_widget.zoom_y_range = None
+
+                self.remove_stale_plot_curves(plot_widget)
                 
                 # Update data for each chart
                 if chart_name.strip() == "SpO2":
                     x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
                     if len(x) > 0 and len(y) > 0:
+                        # Clear the previous line before updating to avoid stale artifacts.
+                        try:
+                            plot_widget.plot_curve.setData([], [])
+                        except Exception:
+                            pass
+
                         # Update normal line plot
                         plot_widget.plot_curve.setData(x, y, connect='finite')
                         # Ensure no fill for SpO2 graph
                         plot_widget.plot_curve.opts['fill'] = None
+                        
+                        # Force redraw on the plot widget
+                        plot_widget.repaint()
+                        plot_widget.getViewBox().update()
                         
                         # Check if custom axis properties are set, if yes, use them instead of dynamic adjustment
                         if hasattr(plot_widget, 'axis_properties'):
@@ -714,11 +742,23 @@ class SleepMonitorChart(QWidget):
                     x, y = self.get_signal_data_for_window(chart_name, self.current_time_window, self.current_time_offset)
                     
                     if len(x) > 0 and len(y) > 0:
+                        # Clear the previous trace before updating to avoid stale artifacts.
+                        try:
+                            plot_widget.plot_curve.setData([], [])
+                        except Exception:
+                            pass
+
                         # Use real data from CSV
                         plot_widget.plot_curve.setData(x, y, connect='finite')
+                        plot_widget.repaint()
+                        plot_widget.getViewBox().update()
                         print(f"Updated {chart_name} with real data: {len(x)} points")
                     else:
-                        plot_widget.plot_curve.setData([], [])
+                        try:
+                            plot_widget.plot_curve.setData([], [])
+                        except Exception:
+                            pass
+                        plot_widget.repaint()
                         print(f"Left {chart_name} blank because no active signal data is mapped")
                     
                     # Apply custom axis properties if they exist
@@ -733,7 +773,7 @@ class SleepMonitorChart(QWidget):
                         except TypeError:
                             plot_widget.setRange(yRange=[low_value, high_value], padding=0)
                     elif chart_name.strip() == "Airflow":
-                        airflow_y_min, airflow_y_max = self.get_signal_auto_axis_range("Airflow")
+                        airflow_y_min, airflow_y_max = self.get_signal_auto_axis_range(chart_name)
                         plot_widget.setYRange(airflow_y_min, airflow_y_max, padding=0)
                         _event_x, detection_y = self.get_airflow_detection_data_for_window(
                             self.current_time_window,
@@ -752,6 +792,17 @@ class SleepMonitorChart(QWidget):
         
         # Update apnea events display for current time window
         self.update_apnea_events_display()
+
+    def remove_stale_plot_curves(self, plot_widget):
+        """Keep only the primary signal curve so refreshes cannot leave duplicate traces."""
+        primary_curve = getattr(plot_widget, "plot_curve", None)
+        try:
+            for data_item in list(plot_widget.listDataItems()):
+                if primary_curve is not None and data_item is primary_curve:
+                    continue
+                plot_widget.removeItem(data_item)
+        except Exception:
+            pass
     
     def set_time_window(self, seconds):
         """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
@@ -891,7 +942,7 @@ class SleepMonitorChart(QWidget):
         self.time_position_label = QLabel("00:00:00")
         self.time_position_label.setObjectName("timePositionLabel")
         self.time_position_label.setFixedHeight(22)
-        self.time_position_label.setMinimumWidth(70)
+        self.time_position_label.setFixedWidth(84)
         self.time_position_label.setStyleSheet("""
             QLabel#timePositionLabel {
                 background-color: #f0f9ff;
@@ -1011,52 +1062,10 @@ class SleepMonitorChart(QWidget):
         """)
         controls_layout.addWidget(self.detection_summary_label)
 
-        self.jump_to_event_btn = QPushButton("First Event")
-        self.jump_to_event_btn.setEnabled(False)
-        self.jump_to_event_btn.setFixedHeight(24)
-        self.jump_to_event_btn.setMinimumWidth(84)
-        self.jump_to_event_btn.clicked.connect(self.focus_on_first_detected_event)
-        self.jump_to_event_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #fff7ed;
-                color: #9a3412;
-                border: 1px solid #fdba74;
-                border-radius: 4px;
-                font-size: 11px;
-                font-weight: 600;
-                padding: 4px 8px;
-            }
-            QPushButton:hover:enabled {
-                background-color: #ffedd5;
-            }
-            QPushButton:disabled {
-                background-color: #f3f4f6;
-                color: #9ca3af;
-                border: 1px solid #e5e7eb;
-            }
-        """)
-        controls_layout.addWidget(self.jump_to_event_btn)
-
-        self.prev_event_btn = QPushButton("Prev Event")
-        self.prev_event_btn.setEnabled(False)
-        self.prev_event_btn.setFixedHeight(24)
-        self.prev_event_btn.setMinimumWidth(84)
-        self.prev_event_btn.clicked.connect(self.focus_on_previous_event)
-        self.prev_event_btn.setStyleSheet(self.jump_to_event_btn.styleSheet())
-        controls_layout.addWidget(self.prev_event_btn)
-
-        self.next_event_btn = QPushButton("Next Event")
-        self.next_event_btn.setEnabled(False)
-        self.next_event_btn.setFixedHeight(24)
-        self.next_event_btn.setMinimumWidth(84)
-        self.next_event_btn.clicked.connect(self.focus_on_next_event)
-        self.next_event_btn.setStyleSheet(self.jump_to_event_btn.styleSheet())
-        controls_layout.addWidget(self.next_event_btn)
-        
         # Add controls container to main layout
         layout.addWidget(controls_container)
         layout.addStretch()
-        
+
         return frame
     
     def init_charts(self):
@@ -1136,12 +1145,14 @@ class SleepMonitorChart(QWidget):
                 raw_airflow = np.asarray(prepared_signal, dtype=float)
                 enhanced_airflow = enhance_airflow_for_graph_and_detection(
                     raw_airflow,
-                    amplitude=1.15,
+                    amplitude=1.10,
                     max_limit=None,
-                    spike_threshold=20.0,
-                    kernel_size=5,
+                    spike_threshold=15.0,
+                    kernel_size=11,
                     low_protect_margin=2.0,
-                    keep_integer=True,
+                    keep_integer=False,
+                    savgol_window=11,
+                    savgol_order=3,
                 )
                 signals["airflow_raw"] = raw_airflow
                 signals["airflow_enhanced"] = enhanced_airflow
@@ -1250,19 +1261,24 @@ class SleepMonitorChart(QWidget):
     def _slice_signal_for_window(self, signal_values, time_window_seconds, time_offset=0):
         """Slice a full signal into the requested fixed-duration time window."""
         signal_values = np.asarray(signal_values, dtype=float)
-        if len(signal_values) == 0:
-            return np.array([]), np.array([])
-
         samples_per_second = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
         expected_samples = int(round(time_window_seconds * samples_per_second))
+
+        if expected_samples == 0:
+            return np.array([]), np.array([])
+
+        if len(signal_values) == 0:
+            return np.arange(expected_samples) / samples_per_second, np.full(expected_samples, np.nan)
+
         start_sample = max(0, int(round(time_offset * samples_per_second)))
         end_sample = min(len(signal_values), start_sample + expected_samples)
 
         window_signal = signal_values[start_sample:end_sample]
-        if len(window_signal) == 0:
-            return np.array([]), np.array([])
+        if len(window_signal) < expected_samples:
+            pad = np.full(expected_samples - len(window_signal), np.nan)
+            window_signal = np.concatenate([window_signal, pad])
 
-        window_time = np.arange(len(window_signal)) / samples_per_second
+        window_time = np.arange(expected_samples) / samples_per_second
         return window_time, window_signal
 
     def get_airflow_detection_data_for_window(self, time_window_seconds, time_offset=0):
@@ -1300,45 +1316,22 @@ class SleepMonitorChart(QWidget):
         fallback_count = int(counts.max())
         return fallback_value, fallback_count
 
+    def get_airflow_display_axis_range(self, airflow):
+        """Return the airflow graph range from zero to baseline plus headroom."""
+        airflow = np.asarray(airflow, dtype=float).reshape(-1)
+        finite_airflow = airflow[np.isfinite(airflow)]
+        if finite_airflow.size == 0:
+            return 0.0, 100.0
+
+        baseline_airflow, _baseline_occurrence = self.get_airflow_event_baseline(finite_airflow)
+        return 0.0, float(max(baseline_airflow + 20.0, 20.0))
+
     def get_signal_auto_axis_range(self, chart_name):
-        """Return dynamic Y-axis range for airflow when auto-scaling is enabled."""
-        signal_name = str(chart_name).strip()
-
-        if signal_name == "Airflow":
-            stable_max_value = None
-            stable_min_value = None
-            if self.auto_rule_ai_result:
-                stable_max_value = (
-                    self.auto_rule_ai_result.get("stable_peak_baseline")
-                    or self.auto_rule_ai_result.get("baseline_airflow")
-                )
-                stable_min_value = self.auto_rule_ai_result.get("stable_min_baseline")
-                stable_max_occurrence = (
-                    self.auto_rule_ai_result.get("stable_peak_occurrence")
-                    or self.auto_rule_ai_result.get("baseline_occurrence")
-                )
-                stable_min_occurrence = self.auto_rule_ai_result.get("stable_min_occurrence")
-
-            try:
-                stable_max_value = float(stable_max_value)
-            except (TypeError, ValueError):
-                stable_max_value = None
-
-            try:
-                stable_min_value = float(stable_min_value)
-            except (TypeError, ValueError):
-                stable_min_value = None
-
-            if stable_max_value is None or stable_max_value <= 0:
-                return 0.0, 100.0
-
-            if stable_min_value is None:
-                stable_min_value = 0.0
-
-            print(f"Stable min airflow: {stable_min_value} (occurrence: {stable_min_occurrence})")
-            print(f"Stable max airflow: {stable_max_value} (occurrence: {stable_max_occurrence})")
-
-            return stable_min_value - 20.0, stable_max_value + 40.0
+        """Return the data-driven default Y-axis range for a chart."""
+        if str(chart_name).strip() == "Airflow":
+            return self.get_airflow_display_axis_range(
+                self._get_airflow_signal_variant("display")
+            )
 
         return 0.0, 100.0
 
@@ -1407,6 +1400,21 @@ class SleepMonitorChart(QWidget):
                 raw_airflow=signals.get("airflow_raw", signals.get("airflow", [])),
                 enhanced_airflow=enhanced_airflow,
             )
+            try:
+                self.analysis_results = calculate_sleep_metrics(
+                    time_data,
+                    signals,
+                    sample_rate_hz=EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
+                )
+                self.analysis_json_path = save_sleep_metrics_json(
+                    self.analysis_results,
+                    source_csv=csv_path,
+                )
+                print(f"📝 Analysis JSON saved: {self.analysis_json_path}")
+            except Exception as analysis_error:
+                self.analysis_results = None
+                self.analysis_json_path = None
+                print(f"⚠️ Could not calculate/save PSG metrics JSON: {analysis_error}")
             global_events = self._build_airflow_navigation_events(enhanced_airflow)
             windowed_events = self._build_windowed_airflow_navigation_events(
                 enhanced_airflow,
@@ -1436,7 +1444,23 @@ class SleepMonitorChart(QWidget):
             self.auto_rule_ai_result = None
             self.airflow_detected_events = []
             self.current_window_airflow_events = []
+            self.analysis_results = None
+            self.analysis_json_path = None
             return np.array([]), {}
+
+    def load_psg_data_and_detect(self, csv_path, padding_seconds: float = 30.0):
+        """Load uploaded PSG data, run rule-based detection, and jump to the first event."""
+        time_data, signals = self.load_psg_data(csv_path)
+        if len(time_data) == 0 or not signals:
+            return time_data, signals, False
+
+        self.run_rule_ai_apnea_detection()
+        jumped = self.focus_on_first_detected_event(padding_seconds=padding_seconds)
+        if not jumped:
+            self.current_time_offset = 0
+            self.refresh_charts()
+        self.time_position_updated.emit()
+        return time_data, signals, jumped
 
     def emit_current_navigation_events(self):
         """Emit whichever event source is currently available to the side panel."""
@@ -1458,7 +1482,7 @@ class SleepMonitorChart(QWidget):
         self.apnea_events_updated.emit(self.get_all_detected_events())
 
     def run_rule_ai_apnea_detection(self):
-        """Run airflow baseline rule detection plus AI label refinement on the loaded CSV."""
+        """Run airflow baseline rule detection on the loaded CSV."""
         if not self.loaded_csv_path:
             self.last_detection_error = "CSV path missing for detection."
             self.auto_rule_ai_result = None
@@ -1481,12 +1505,12 @@ class SleepMonitorChart(QWidget):
             self.auto_rule_ai_result = detect_apnea_events_from_csv(
                 csv_path=self.loaded_csv_path,
                 output_dir=output_dir,
-                enable_ai=True,
+                enable_ai=False,
             )
             self.auto_focus_applied = False
             self.last_detection_error = None
             print(
-                f"✅ Auto rule+AI apnea detection complete: "
+                f"✅ Auto rule-only apnea detection complete: "
                 f"{len(self.auto_rule_ai_result.get('events', []))} events"
             )
             self.refresh_charts()
@@ -1494,7 +1518,7 @@ class SleepMonitorChart(QWidget):
             self.emit_detected_events_panel()
             self.update_detection_summary_label()
         except Exception as error:
-            print(f"⚠️ Auto rule+AI apnea detection failed: {error}")
+            print(f"⚠️ Auto rule-only apnea detection failed: {error}")
             try:
                 output_dir = APP_ROOT / "ai_models" / "sleep_apnea" / "hybrid_pipeline_output" / "chart_auto_events"
                 self.auto_rule_ai_result = detect_apnea_events_from_csv(
@@ -1515,7 +1539,7 @@ class SleepMonitorChart(QWidget):
             except Exception as fallback_error:
                 self.auto_rule_ai_result = None
                 self.auto_focus_applied = False
-                self.last_detection_error = f"Rule+AI failed: {error} | Rule-only failed: {fallback_error}"
+                self.last_detection_error = f"Rule-only failed: {error} | Fallback failed: {fallback_error}"
                 self.emit_detected_events_panel()
                 self.update_detection_summary_label()
                 print(f"❌ Rule-only fallback detection also failed: {fallback_error}")
@@ -1832,6 +1856,15 @@ class SleepMonitorChart(QWidget):
 
         num_samples = len(window_signal)
         expected_samples = int(round(time_window_seconds * EXTERNAL_ARRAY_SAMPLE_RATE_HZ))
+
+        if signal_col == "airflow":
+            nan_count = int(np.count_nonzero(~np.isfinite(window_signal)))
+            zero_count = int(np.count_nonzero(window_signal == 0.0))
+            print(
+                f"DEBUG Airflow window offset={time_offset}s samples={num_samples}/{expected_samples} "
+                f"nan={nan_count} zero={zero_count} "
+                f"start={window_signal[:5]!r} end={window_signal[-5:]!r}"
+            )
         
         print(f"{signal_name} window: {time_window_seconds}s, Samples: {num_samples}, Expected: {expected_samples}")
         
@@ -2825,13 +2858,16 @@ class SleepMonitorChart(QWidget):
             if len(x) > 0 and len(y) > 0:
                 print(f"Using real {name} data: {len(y)} points, range: {np.min(y):.1f}-{np.max(y):.1f}")
         
-        # Plot the signal andltore reference for line visibility control
+        # Plot the signal and store reference for line visibility control
         pen = pg.mkPen(color=color, width=1.5)
         
         # Plot all graphs as normal line plots (no step ladder, no fill)
-        plot_curve = plot_widget.plot(x, y, pen=pen, fill=None)
+        # Use connect='finite' so NaN gaps do not draw as vertical connector lines.
+        plot_curve = plot_widget.plot(x, y, pen=pen, fill=None, connect='finite')
 
         if name.strip() == "Airflow":
+            airflow_y_min, airflow_y_max = self.get_signal_auto_axis_range(name.strip())
+            plot_widget.setYRange(airflow_y_min, airflow_y_max, padding=0)
             _event_x, detection_y = self.get_airflow_detection_data_for_window(
                 self.current_time_window,
                 self.current_time_offset,
@@ -3285,7 +3321,7 @@ class SleepMonitorChart(QWidget):
         # Get the chart name from the plot widget
         chart_name = getattr(plot_widget, 'chart_name', '')
         if chart_name.strip() == "Airflow":
-            y_min, y_max = self.get_signal_auto_axis_range("Airflow")
+            y_min, y_max = self.get_signal_auto_axis_range(chart_name)
         else:
             y_min, y_max = SIGNAL_Y_RANGES.get(chart_name.strip(), (0, 100))
         
@@ -4336,8 +4372,9 @@ class SleepMonitorChart(QWidget):
     def delete_overlay(self, overlay, chart_name):
         """Delete selected overlay with data sync"""
         # Check if overlay still exists before accessing it
-        if overlay is None or not hasattr(overlay, 'hide'):
+        if not self._is_valid_overlay(overlay):
             print("Warning: Overlay already deleted or invalid")
+            self._remove_overlay_reference(overlay)
             return
             
         # Get the overlay's unique identifier (stored in overlay's objectName or userData)
@@ -4353,8 +4390,10 @@ class SleepMonitorChart(QWidget):
         try:
             overlay.hide()
             overlay.deleteLater()
+            self._remove_overlay_reference(overlay)
         except RuntimeError as e:
             print(f"Warning: Overlay already deleted - {e}")
+            self._remove_overlay_reference(overlay)
             return
 
         # Remove from data using the unique identifier
@@ -4446,11 +4485,18 @@ class SleepMonitorChart(QWidget):
         
         # Use overlay geometry for precise click detection
         if hasattr(plot_widget, 'selection_overlays'):
+            plot_widget.selection_overlays = [
+                overlay for overlay in plot_widget.selection_overlays
+                if self._is_valid_overlay(overlay)
+            ]
             overlays = plot_widget.selection_overlays
             for i, overlay in enumerate(overlays):
                 # Check if overlay still exists (not deleted)
                 try:
-                    if overlay and not overlay.isHidden() and overlay.geometry().contains(widget_pos):
+                    if (self._is_valid_overlay(overlay) and
+                        not overlay.isHidden() and
+                        overlay.geometry().contains(widget_pos) and
+                        i < len(self.selection_labels[chart_name])):
                         selection_data = self.selection_labels[chart_name][i]
                         self.show_remove_menu(plot_widget, chart_name, i, selection_data, scene_pos)
                         return True
@@ -4611,33 +4657,61 @@ class SleepMonitorChart(QWidget):
     
     def update_overlay_position(self, plot_widget, overlay, start_pos, end_pos):
         """Update overlay position based on current view"""
-        vb = plot_widget.getViewBox()
-        from PyQt5.QtCore import QPointF
-        # Convert float time values to QPointF for mapping
-        start_point = QPointF(start_pos, 0)
-        end_point = QPointF(end_pos, 0)
-        p1 = vb.mapViewToScene(start_point)
-        p2 = vb.mapViewToScene(end_point)
-        w1 = plot_widget.mapFromScene(p1)
-        w2 = plot_widget.mapFromScene(p2)
+        if not self._is_valid_overlay(overlay):
+            return False
 
-        # Ensure x_min and x_max are within the visible bounds of the plot_widget
-        # This prevents the overlay from being drawn outside the chart area
-        plot_width = plot_widget.width()
-        x_min = max(0, min(w1.x(), w2.x()))
-        x_max = min(plot_width, max(w1.x(), w2.x()))
-        
-        # Use large overlay height for persistent selections
-        plot_height = plot_widget.height()
-        overlay_height = max(60, plot_height)
-        y_position = 0  
+        try:
+            vb = plot_widget.getViewBox()
+            from PyQt5.QtCore import QPointF
+            # Convert float time values to QPointF for mapping
+            start_point = QPointF(start_pos, 0)
+            end_point = QPointF(end_pos, 0)
+            p1 = vb.mapViewToScene(start_point)
+            p2 = vb.mapViewToScene(end_point)
+            w1 = plot_widget.mapFromScene(p1)
+            w2 = plot_widget.mapFromScene(p2)
 
-        # Only set geometry and make visible if the overlay has a valid width
-        if x_max > x_min:
-            overlay.setGeometry(int(x_min), int(y_position), int(x_max - x_min), int(overlay_height))
-            overlay.setVisible(True)
-        else:
-            overlay.setVisible(False)  # Hide if width is invalid
+            # Ensure x_min and x_max are within the visible bounds of the plot_widget
+            # This prevents the overlay from being drawn outside the chart area
+            plot_width = plot_widget.width()
+            x_min = max(0, min(w1.x(), w2.x()))
+            x_max = min(plot_width, max(w1.x(), w2.x()))
+            
+            # Use large overlay height for persistent selections
+            plot_height = plot_widget.height()
+            overlay_height = max(60, plot_height)
+            y_position = 0  
+
+            # Only set geometry and make visible if the overlay has a valid width
+            if x_max > x_min:
+                overlay.setGeometry(int(x_min), int(y_position), int(x_max - x_min), int(overlay_height))
+                overlay.setVisible(True)
+            else:
+                overlay.setVisible(False)  # Hide if width is invalid
+            return True
+        except RuntimeError as e:
+            print(f"Warning: Skipped deleted overlay during resize - {e}")
+            return False
+
+    def _is_valid_overlay(self, overlay):
+        """Return True when a Qt overlay wrapper still points to a live widget."""
+        try:
+            return overlay is not None and hasattr(overlay, 'setVisible') and not sip.isdeleted(overlay)
+        except RuntimeError:
+            return False
+
+    def _remove_overlay_reference(self, overlay):
+        """Remove deleted/stale overlay widgets from every plot overlay list."""
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            if not container or not hasattr(container, 'findChildren'):
+                continue
+            for plot_widget in container.findChildren(pg.PlotWidget):
+                if hasattr(plot_widget, 'selection_overlays'):
+                    plot_widget.selection_overlays = [
+                        existing_overlay for existing_overlay in plot_widget.selection_overlays
+                        if existing_overlay is not overlay and self._is_valid_overlay(existing_overlay)
+                    ]
     
     def render_dynamic_selections(self):
         """Render selection overlays based on current time window and offset"""
@@ -4793,13 +4867,18 @@ class SleepMonitorChart(QWidget):
                     
                     # Use dynamic_selections which stores absolute time coordinates
                     if chart_name in self.dynamic_selections:
+                        plot_widget.selection_overlays = [
+                            overlay for overlay in plot_widget.selection_overlays
+                            if self._is_valid_overlay(overlay)
+                        ]
                         for j, overlay in enumerate(plot_widget.selection_overlays):
                             if j < len(self.dynamic_selections[chart_name]):
                                 selection_data = self.dynamic_selections[chart_name][j]
                                 # Convert absolute time to relative time within current window
                                 start_time_rel = selection_data['start_time'] - self.current_time_offset
                                 end_time_rel = selection_data['end_time'] - self.current_time_offset
-                                self.update_overlay_position(plot_widget, overlay, start_time_rel, end_time_rel)
+                                if not self.update_overlay_position(plot_widget, overlay, start_time_rel, end_time_rel):
+                                    self._remove_overlay_reference(overlay)
     
         
     def add_spo2_statistics_overlay(self, plot_widget, container):

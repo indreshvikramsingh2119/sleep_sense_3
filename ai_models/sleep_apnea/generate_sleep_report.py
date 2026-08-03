@@ -7,7 +7,7 @@ from hybrid_pipeline_common import run_hybrid_pipeline
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate the full hybrid sleep apnea event report from raw CSV.")
+    parser = argparse.ArgumentParser(description="Legacy: generate the full hybrid sleep apnea event report from raw CSV.")
     parser.add_argument("csv_path")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--pre-event-seconds", type=float, default=30.0)

@@ -498,6 +498,8 @@ class EventWindow(QDialog):
         
         # Get data for selected graph type
         graph_data = self.get_graph_data(selected_graph, time_points, time_window, time_offset)
+        if len(graph_data) != len(time_points):
+            time_points = np.linspace(0, time_window, len(graph_data)) if len(graph_data) > 0 else np.array([])
         
         # Clear and update plot
         self.flow_plot.clear()
@@ -532,10 +534,12 @@ class EventWindow(QDialog):
             self.flow_plot.setYRange(y_min, y_max, padding=0.05)
         
         # Plot the signal
-        self.flow_plot.plot(time_points, graph_data, pen=pg.mkPen(graph_color, width=2), name=selected_graph)
+        if len(time_points) > 0 and len(graph_data) > 0:
+            self.flow_plot.plot(time_points, graph_data, pen=pg.mkPen(graph_color, width=2), name=selected_graph)
         
         # Add event markers based on current time window and graph type
-        self.add_graph_event_markers(time_points, graph_data, time_offset, selected_graph)
+        if len(time_points) > 0 and len(graph_data) > 0:
+            self.add_graph_event_markers(time_points, graph_data, time_offset, selected_graph)
         
         # Update axis labels based on graph type
         y_label, y_units = self.get_graph_axis_labels(selected_graph)
@@ -596,6 +600,20 @@ class EventWindow(QDialog):
         }
         
         params = graph_params.get(graph_type, graph_params["Airflow"])
+
+        if self.monitor_chart and hasattr(self.monitor_chart, "get_signal_data_for_window"):
+            try:
+                x_data, y_data = self.monitor_chart.get_signal_data_for_window(graph_type, time_window, time_offset)
+                if len(x_data) > 0 and len(y_data) > 0:
+                    x_data = np.asarray(x_data, dtype=float)
+                    y_data = np.asarray(y_data, dtype=float)
+                    if len(y_data) == len(time_points):
+                        return y_data
+                    if len(time_points) > 0 and len(x_data) > 1:
+                        return np.interp(time_points, x_data, y_data)
+                    return y_data
+            except Exception as error:
+                print(f"Could not load real {graph_type} data for event window: {error}")
         
         # Special handling for SpO2 - try to get real data
         if graph_type == "SpO2" and self.monitor_chart:
@@ -616,7 +634,10 @@ class EventWindow(QDialog):
             except:
                 pass  # Fall back to simulated data
         
-        # Generate simulated data with realistic characteristics within medical ranges
+        if self.monitor_chart and getattr(self.monitor_chart, "psg_full_data", None) is not None:
+            return np.array([])
+
+        # Generate simulated data only before a real PSG file is loaded.
         if graph_type == "Body Position":
             # Discrete positions (0=supine, 1=left, 2=right, 3=prone)
             np.random.seed(int(time_offset) % 1000)
@@ -810,7 +831,7 @@ class EventWindow(QDialog):
         ax.setTicks([labels])
         
     def update_event_list_real_time(self):
-        """Update event list with real-time events"""
+        """Update event list with rule-based detected events."""
         if not self.monitor_chart:
             return
             
@@ -818,7 +839,9 @@ class EventWindow(QDialog):
         time_window = getattr(self.monitor_chart, 'current_time_window', 60)
         time_offset = getattr(self.monitor_chart, 'current_time_offset', 0)
         
-        # Generate events based on current time window
+        self.ensure_rule_based_detection()
+
+        # Read real detections based on current time window
         events = self.detect_current_events(time_window, time_offset)
         
         # Update event list table
@@ -831,93 +854,70 @@ class EventWindow(QDialog):
             self.event_list_table.setItem(row, 4, QTableWidgetItem(param))
             
     def detect_current_events(self, time_window, time_offset):
-        """Detect events in current time window based on selected graph type"""
+        """Return rule-based detected events in the current time window."""
         events = []
-        
-        # Get selected graph type
-        selected_graph = self.event_type_combo.currentText()
-        
-        # Add start time event
-        start_time = self.format_time(time_offset)
-        events.append(("Start of evaluation", start_time, start_time, "0:00:00", ""))
-        
-        # Simulate detecting various events based on time window and graph type
-        current_time = time_offset
-        
-        # Add random events within the time window
-        np.random.seed(int(time_offset) % 1000)  # Seed for consistency
-        
-        # Graph-specific event types
-        graph_events = {
-            "Body Position": [
-                ("Position change", "Position"),
-                ("Supine position", "Position"),
-                ("Left position", "Position"),
-                ("Right position", "Position"),
-                ("Prone position", "Position")
-            ],
-            "Airflow": [
-                ("Flow limitation", "Flow"),
-                ("Apnea", "Flow"),
-                ("Hypopnea", "Flow"),
-                ("Normal breathing", "Flow"),
-                ("Obstruction", "Flow")
-            ],
-            "Snoring": [
-                ("Snoring event", "Flow"),
-                ("Heavy snoring", "Flow"),
-                ("Light snoring", "Flow"),
-                ("No snoring", "Flow")
-            ],
-            "Thorex": [
-                ("Thoracic effort", "Effort"),
-                ("Reduced effort", "Effort"),
-                ("Normal effort", "Effort"),
-                ("Increased effort", "Effort")
-            ],
-            "Abdomen": [
-                ("Abdominal effort", "Effort"),
-                ("Reduced effort", "Effort"),
-                ("Normal effort", "Effort"),
-                ("Paradoxical breathing", "Effort")
-            ],
-            "SpO2": [
-                ("Desaturation", "SpO2"),
-                ("Baseline Saturation", "SpO2"),
-                ("Oxygen drop", "SpO2"),
-                ("Recovery", "SpO2"),
-                ("Hypoxemia", "SpO2")
-            ],
-            "Pulse": [
-                ("Bradycardia", "Pulse"),
-                ("Tachycardia", "Pulse"),
-                ("Normal pulse", "Pulse"),
-                ("Arrhythmia", "Pulse"),
-                ("Signal too small", "Pulse"),
-                ("Invalid data pulse", "Pulse")
-            ],
-            "Body Movement": [
-                ("Body movement", "Movement"),
-                ("No movement", "Movement"),
-                ("Restlessness", "Movement"),
-                ("Periodic movement", "Movement")
-            ]
-        }
-        
-        event_types = graph_events.get(selected_graph, graph_events["Airflow"])
-        
-        # Generate 1-3 events
-        num_events = np.random.randint(1, min(4, len(event_types)))
-        for i in range(num_events):
-            event_time = current_time + np.random.uniform(0, time_window)
-            event_start = self.format_time(event_time)
-            event_end = self.format_time(event_time + np.random.uniform(0, 10))
-            duration = self.format_duration(np.random.uniform(0, 10))
-            
-            event_type, param = event_types[i % len(event_types)]
-            events.append((event_type, event_start, event_end, duration, param))
+
+        window_start = float(time_offset)
+        window_end = window_start + float(time_window)
+        for event in self.get_rule_based_events():
+            try:
+                start_sec = float(event.get("start_sec", 0.0))
+                end_sec = float(event.get("end_sec", start_sec))
+            except (TypeError, ValueError):
+                continue
+
+            if end_sec < window_start or start_sec > window_end:
+                continue
+
+            label = str(event.get("final_label") or event.get("rule_label") or event.get("label") or "REVIEW")
+            duration_sec = float(event.get("duration_sec", max(0.0, end_sec - start_sec)))
+            events.append((
+                label,
+                self.format_time(start_sec),
+                self.format_time(end_sec),
+                self.format_duration(duration_sec),
+                self.format_event_parameter(event),
+            ))
         
         return events
+
+    def ensure_rule_based_detection(self):
+        """Run rule-only detection once if a PSG file is loaded and no result exists."""
+        if not self.monitor_chart:
+            return
+        if getattr(self.monitor_chart, "auto_rule_ai_result", None) is not None:
+            return
+        if not getattr(self.monitor_chart, "loaded_csv_path", None):
+            return
+        if hasattr(self.monitor_chart, "run_rule_ai_apnea_detection"):
+            self.monitor_chart.run_rule_ai_apnea_detection()
+
+    def get_rule_based_events(self):
+        """Return only automatic rule detector events; never generated demo rows."""
+        if not self.monitor_chart:
+            return []
+        result = getattr(self.monitor_chart, "auto_rule_ai_result", None)
+        if not result:
+            return []
+        return sorted(
+            list(result.get("events", [])),
+            key=lambda event: float(event.get("start_sec", 0.0)),
+        )
+
+    def format_event_parameter(self, event):
+        """Format rule metrics for the event list parameter column."""
+        parts = ["Rule-based"]
+        try:
+            parts.append(f"Flow ↓ {float(event.get('airflow_drop_percent', 0.0)):.1f}%")
+        except (TypeError, ValueError):
+            pass
+        try:
+            spo2_drop = float(event.get("spo2_drop", 0.0))
+            if spo2_drop > 0:
+                parts.append(f"SpO2 ↓ {spo2_drop:.1f}")
+        except (TypeError, ValueError):
+            pass
+        return " | ".join(parts)
         
     def format_time(self, seconds):
         """Format time in seconds to HH:MM:SS"""
@@ -936,7 +936,7 @@ class EventWindow(QDialog):
             return f"0:{minutes:02d}:{secs:02d}"
         
     def load_sample_data(self):
-        """Load initial data and setup real-time updates"""
+        """Load real event structure and setup updates."""
         # Event tree data
         self.populate_event_tree()
         
@@ -948,6 +948,8 @@ class EventWindow(QDialog):
         
         # Connect dropdown to update graph
         self.event_type_combo.currentTextChanged.connect(self.on_event_type_changed)
+
+        self.update_scroll_limits()
         
     def populate_event_tree(self):
         """Populate the event tree with hierarchical structure"""
@@ -992,7 +994,7 @@ class EventWindow(QDialog):
             self.filter_events_by_type(selected_item)
             
     def filter_events_by_type(self, event_type):
-        """Filter events in the list based on selected tree item"""
+        """Filter rule-based events in the list based on selected tree item."""
         time_window = getattr(self.monitor_chart, 'current_time_window', 60)
         time_offset = getattr(self.monitor_chart, 'current_time_offset', 0)
         
@@ -1004,14 +1006,16 @@ class EventWindow(QDialog):
         if event_type == "All events":
             filtered_events = all_events
         elif event_type == "General":
-            filtered_events = [e for e in all_events if e[0] in ["Start of evaluation"]]
+            filtered_events = []
         elif event_type == "OSA":
-            filtered_events = [e for e in all_events if e[0] in ["Flow limitation", "Snoring"]]
+            filtered_events = [
+                e for e in all_events
+                if e[0] in ["OSA", "CSA", "MSA", "HSA", "HYPOPNEA", "APNEA"]
+            ]
         elif event_type == "Oximetry":
-            filtered_events = [e for e in all_events if e[4] in ["SpO2", "Pulse"]]
+            filtered_events = [e for e in all_events if "SpO2" in e[4]]
         else:
-            # For event groups, show a subset
-            filtered_events = all_events[:3]  # Show first 3 events
+            filtered_events = []
             
         # Update event list table
         self.event_list_table.setRowCount(len(filtered_events))
@@ -1022,26 +1026,8 @@ class EventWindow(QDialog):
             self.event_list_table.setItem(row, 3, QTableWidgetItem(duration))
             self.event_list_table.setItem(row, 4, QTableWidgetItem(param))
             
-    def load_sample_data(self):
-        """Load sample data for demonstration"""
-        # Sample events data
-        events = [
-            ["OSA", "00:01:23", "00:01:45", "22 sec", "SpO2 ↓ 88%"],
-            ["CSA", "00:03:12", "00:03:28", "16 sec", "No effort"],
-            ["MSA", "00:05:45", "00:06:02", "17 sec", "Mixed pattern"],
-            ["HSA", "00:08:34", "00:08:51", "17 sec", "Flow ↓ 50%"],
-            ["OSA", "00:12:18", "00:12:39", "21 sec", "SpO2 ↓ 85%"],
-        ]
-        
-        self.event_list_table.setRowCount(len(events))
-        for i, event in enumerate(events):
-            for j, value in enumerate(event):
-                self.event_list_table.setItem(i, j, QTableWidgetItem(value))
-        
-        # Connect event type change
-        self.event_type_combo.currentTextChanged.connect(self.on_graph_type_changed)
-        
-        # Initialize scroll position
+    def initialize_scroll_state(self):
+        """Initialize event-window scrolling without adding demo rows."""
         self.update_scroll_limits()
     
     def on_time_window_changed(self, window_text):

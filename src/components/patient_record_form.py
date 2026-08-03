@@ -690,8 +690,14 @@ class PatientRecordForm(QDialog):
         patient_id = self.db_manager.save_patient(patient_data)
         
         if patient_id:
+            patient_data['id'] = patient_id
             QMessageBox.information(self, "Success", f"Patient record saved successfully!\nDatabase ID: {patient_id}")
             print(f"Patient record saved with ID: {patient_id}")
+            if self.parent() and hasattr(self.parent(), 'load_patient_data'):
+                try:
+                    self.parent().load_patient_data(patient_data)
+                except Exception as error:
+                    print(f"Warning: Could not sync saved patient to dashboard: {error}")
             self.close()
         else:
             QMessageBox.critical(self, "Error", "Failed to save patient record to database!")

@@ -153,30 +153,24 @@ class PatientInfoWidget(QWidget):
                 QMessageBox.information(
                     self,
                     "Unsupported File",
-                    "Abhi graph plotting ke liye CSV/TXT upload supported hai.",
+                    "Only CSV/TXT uploads are currently supported for graph plotting.",
                 )
                 return
 
-            time_data, signals = self.monitor_chart.load_psg_data(selected_file)
+            time_data, signals, jumped = self.monitor_chart.load_psg_data_and_detect(selected_file)
             if len(time_data) == 0 or not signals:
                 QMessageBox.warning(
                     self,
                     "Load Failed",
-                    f"Selected file load nahi ho payi:\n{selected_file}",
+                    f"The selected file could not be loaded:\n{selected_file}",
                 )
                 return
-
-            jumped = self.monitor_chart.focus_on_first_detected_event()
-            if not jumped:
-                self.monitor_chart.current_time_offset = 0
-                self.monitor_chart.refresh_charts()
-            self.monitor_chart.time_position_updated.emit()
             QMessageBox.information(
                 self,
                 "Upload Complete",
                 (
-                    f"Data load ho gaya aur graph update ho gaya:\n{os.path.basename(selected_file)}"
-                    + ("\nFirst detected event par jump ho gaya." if jumped else "\nKoi detected event nahi mila.")
+                    f"Data loaded and graphs updated:\n{os.path.basename(selected_file)}"
+                    + ("\nJumped to the first detected event." if jumped else "\nNo detected events found.")
                 ),
             )
 
@@ -517,26 +511,22 @@ class PatientInfoWidget(QWidget):
                 QMessageBox.information(
                     self,
                     "Unsupported File",
-                    "Abhi graph plotting ke liye CSV/TXT upload supported hai.",
+                    "Only CSV/TXT uploads are currently supported for graph plotting.",
                 )
                 return
 
-            time_data, signals = self.monitor_chart.load_psg_data(selected_file)
+            time_data, signals, _jumped = self.monitor_chart.load_psg_data_and_detect(selected_file)
             if len(time_data) == 0 or not signals:
                 QMessageBox.warning(
                     self,
                     "Load Failed",
-                    f"Selected file load nahi ho payi:\n{selected_file}",
+                    f"The selected file could not be loaded:\n{selected_file}",
                 )
                 return
-
-            self.monitor_chart.current_time_offset = 0
-            self.monitor_chart.refresh_charts()
-            self.monitor_chart.time_position_updated.emit()
             QMessageBox.information(
                 self,
                 "Upload Complete",
-                f"Data load ho gaya aur graph update ho gaya:\n{os.path.basename(selected_file)}",
+                f"Data loaded and graphs updated:\n{os.path.basename(selected_file)}",
             )
     
     def save_current_data(self):

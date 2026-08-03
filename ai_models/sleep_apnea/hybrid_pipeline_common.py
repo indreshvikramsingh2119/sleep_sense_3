@@ -15,6 +15,10 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
+LEGACY_PIPELINE_NOTE = (
+    "Legacy candidate-generation helpers retained for offline scripts. "
+    "The dashboard uses detect_apnea_from_airflow.py as the active detector."
+)
 
 CURRENT_DIR = Path(__file__).resolve().parent
 MODELS_DIR = CURRENT_DIR / "models"
@@ -174,9 +178,8 @@ def preprocess_signals(
 
 
 def _classify_rule_hint(airflow_drop: float, spo2_drop: float, movement_mean: float, snoring_mean: float) -> str:
-    # Legacy candidate-generation flow should not maintain its own HSA/OSA/CSA
-    # subtype thresholds. The current detector in detect_apnea_from_airflow.py
-    # is the single source of truth for subtype labeling.
+    # Legacy candidate-generation flow intentionally avoids subtype thresholds.
+    # The active detector in detect_apnea_from_airflow.py owns HSA/OSA/CSA labeling.
     if airflow_drop >= 70.0 and movement_mean >= 25:
         return "MSA"
 
@@ -189,6 +192,7 @@ def detect_rule_candidates(
     airflow_drop_threshold_percent: float = 10.0,
     spo2_drop_threshold: float = 2.0,
 ) -> list[CandidateEvent]:
+    """Legacy rule-candidate extractor used by offline helper scripts."""
     time_values = signal_df["time_sec"].to_numpy(dtype=float)
     if len(time_values) == 0:
         return []

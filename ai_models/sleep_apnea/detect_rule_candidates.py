@@ -7,7 +7,7 @@ from hybrid_pipeline_common import load_sleep_csv, preprocess_signals, detect_ru
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Detect apnea event candidates from raw SleepSense CSV.")
+    parser = argparse.ArgumentParser(description="Legacy: detect apnea event candidates from raw SleepSense CSV.")
     parser.add_argument("csv_path")
     parser.add_argument("--min-event-seconds", type=float, default=10.0)
     parser.add_argument("--airflow-drop-threshold", type=float, default=10.0)

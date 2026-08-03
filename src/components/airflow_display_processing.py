@@ -1,17 +1,19 @@
 import numpy as np
-from scipy.signal import medfilt
+from scipy.signal import medfilt, savgol_filter
 
 
 def enhance_airflow_for_graph_and_detection(
     signal,
-    amplitude=1.15,
+    amplitude=1.10,
     max_limit=None,
-    spike_threshold=20.0,
-    kernel_size=5,
+    spike_threshold=15.0,
+    kernel_size=11,
     low_protect_margin=2.0,
-    keep_integer=True,
+    keep_integer=False,
+    savgol_window=11,
+    savgol_order=3,
 ):
-    """Use one enhanced airflow series for both graph rendering and detection."""
+    """Smooth, enhance, and share one airflow series for graphing and detection."""
     signal = np.asarray(signal, dtype=float).reshape(-1)
 
     if len(signal) == 0:
@@ -28,6 +30,9 @@ def enhance_airflow_for_graph_and_detection(
         diff = np.abs(cleaned - median_signal)
         spike_mask = diff >= spike_threshold
         cleaned[spike_mask] = median_signal[spike_mask]
+
+    if len(cleaned) >= savgol_window:
+        cleaned = savgol_filter(cleaned, savgol_window, savgol_order)
 
     lowest_value = float(np.nanmin(cleaned[valid_mask]))
     low_protect_limit = lowest_value + low_protect_margin

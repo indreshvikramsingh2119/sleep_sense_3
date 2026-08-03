@@ -4,14 +4,142 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
+from reportlab.lib.utils import ImageReader
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog, QMessageBox
 from PyQt5.QtCore import Qt, QUrl, QTimer
 from PyQt5.QtWebEngineWidgets import QWebEngineView
+import json
+from pathlib import Path
+from datetime import datetime
 import os
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ANALYSIS_JSON_DIR = REPO_ROOT / "data" / "analysis_json"
 
-def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
+
+def _build_dashboard_screenshot_section(image_paths, doc, styles):
+    """Create report elements for optional dashboard screenshots."""
+    if not image_paths:
+        return []
+
+    if isinstance(image_paths, (str, os.PathLike)):
+        image_paths = [image_paths]
+
+    existing_paths = [str(path) for path in image_paths if path and os.path.exists(path)]
+    if not existing_paths:
+        return []
+
+    elements = [PageBreak(), Paragraph("<b>DASHBOARD SCREENSHOTS</b>", styles['Heading2']), Spacer(1, 12)]
+
+    for index, image_path in enumerate(existing_paths, start=1):
+        elements.extend(_build_single_dashboard_screenshot(image_path, index, doc, styles))
+
+    return elements
+
+
+def _build_single_dashboard_screenshot(image_path, index, doc, styles):
+    """Create report elements for one dashboard screenshot."""
+    try:
+        image_reader = ImageReader(image_path)
+        image_width, image_height = image_reader.getSize()
+        if image_width <= 0 or image_height <= 0:
+            return []
+
+        max_width = doc.width
+        max_height = doc.height - 60
+        scale = min(max_width / image_width, max_height / image_height)
+        screenshot = Image(
+            image_path,
+            width=image_width * scale,
+            height=image_height * scale,
+        )
+
+        return [
+            Paragraph(f"<b>Screenshot {index}</b>", styles['Normal']),
+            Spacer(1, 6),
+            screenshot,
+            Spacer(1, 16),
+        ]
+    except Exception as error:
+        print(f"⚠️ Could not add dashboard screenshot to report: {error}")
+        return []
+
+
+def _default_report_output_path(filename):
+    """Return a local user-folder path for generated report files."""
+    report_dir = Path.home() / "SleepSenseReports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    return str(report_dir / filename)
+
+
+def _text_or_dash(value):
+    text = "" if value is None else str(value).strip()
+    return text if text else "-"
+
+
+def _patient_display_name(patient_data):
+    first_name = _text_or_dash(patient_data.get("first_name"))
+    last_name = _text_or_dash(patient_data.get("last_name"))
+    if first_name == "-" and last_name == "-":
+        return "-"
+    return f"{first_name} {last_name}".strip()
+
+
+def _get_section(analysis_results, section_name):
+    if not analysis_results:
+        return {}
+    return analysis_results.get(section_name, {}) or {}
+
+
+def _load_latest_analysis_results():
+    if not ANALYSIS_JSON_DIR.exists():
+        return {}
+
+    json_files = sorted(ANALYSIS_JSON_DIR.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not json_files:
+        return {}
+
+    latest_path = json_files[0]
+    try:
+        with open(latest_path, "r", encoding="utf-8") as file_handle:
+            payload = json.load(file_handle)
+        print(f"📝 Loaded latest analysis JSON: {latest_path}")
+        return payload if isinstance(payload, dict) else {}
+    except Exception as error:
+        print(f"⚠️ Could not load latest analysis JSON {latest_path}: {error}")
+        return {}
+
+
+def _build_patient_information_rows(patient_data, styles):
+    cell_style = styles["BodyText"].clone("PatientCellStyle")
+    cell_style.fontName = "Helvetica"
+    cell_style.fontSize = 7.5
+    cell_style.leading = 8.5
+
+    def cell(value):
+        return Paragraph(_text_or_dash(value), cell_style)
+
+    return [
+        [Paragraph("<b>PATIENT INFORMATION</b>", cell_style), "", "", ""],
+        [cell("Patient Name"), cell(_patient_display_name(patient_data)), cell("Patient ID"), cell(patient_data.get("patient_id"))],
+        [cell("DOB"), cell(patient_data.get("dob")), cell("Gender"), cell(patient_data.get("gender"))],
+        [cell("Phone"), cell(patient_data.get("phone")), cell("City / State"), cell(patient_data.get("city_state"))],
+        [cell("Clinic"), cell(patient_data.get("clinic")), cell("Physician"), cell(patient_data.get("physician"))],
+        [cell("Weight"), cell(patient_data.get("weight")), cell("Height"), cell(patient_data.get("height"))],
+        [cell("BMI"), cell(patient_data.get("bmi")), cell("Blood Pressure"), cell(patient_data.get("blood_pressure"))],
+        [cell("Status"), cell(patient_data.get("status")), cell("Report Date"), cell(datetime.now().strftime("%d-%m-%Y"))],
+        [cell("History"), cell(patient_data.get("history")), cell("Comments"), cell(patient_data.get("comments"))],
+    ]
+
+
+def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=None, dashboard_screenshot_path=None):
     """Generate basic sleep report format with improved visual presentation"""
+    if pdf_path is None:
+        pdf_path = _default_report_output_path("sleep_report_clean.pdf")
+
+    patient_data = patient_data or {}
+    latest_analysis_results = _load_latest_analysis_results()
+    analysis_results = latest_analysis_results or analysis_results or {}
     doc = SimpleDocTemplate(pdf_path, pagesize=A4,
                            leftMargin=30, rightMargin=30,
                            topMargin=30, bottomMargin=30)
@@ -32,18 +160,11 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
         ('TOPPADDING', (0,0), (-1,-1), 0),
     ]))
     page1_elements.append(header_container)
-    page1_elements.append(Spacer(1, 12))
+    page1_elements.append(Spacer(1, 8))
 
     # ---------------- PATIENT INFO CONTAINER ----------------
-    patient_data = [
-        ["PATIENT INFORMATION", "", "", ""],
-        ["Patient Name", "MD. JAWED ALAM", "Study Date", "7/28/2022"],
-        ["Sex", "M", "Device", "Alice NightOne"],
-        ["DOB", "2/3/1978", "Height", "ft.in"],
-        ["Age", "45 years", "BMI", "41.2"],
-    ]
-
-    patient_table = Table(patient_data, colWidths=[100, 150, 100, 150])
+    patient_table_data = _build_patient_information_rows(patient_data, styles)
+    patient_table = Table(patient_table_data, colWidths=[95, 155, 95, 155])
     patient_table.setStyle(TableStyle([
         ('BOX', (0,0), (-1,-1), 1, colors.black),
         ('GRID', (0,0), (-1,-1), 0.5, colors.black),
@@ -52,24 +173,24 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
         ('SPAN', (0,0), (-1,0)),
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#DCEFD8")),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), 9),
+        ('FONTSIZE', (0,0), (-1,0), 8),
         ('TEXTCOLOR', (0,0), (-1,0), colors.black),
-        ('TOPPADDING', (0,0), (-1,0), 4),
-        ('BOTTOMPADDING', (0,0), (-1,0), 4),
-        ('LEFTPADDING', (0,0), (-1,0), 8),
+        ('TOPPADDING', (0,0), (-1,0), 3),
+        ('BOTTOMPADDING', (0,0), (-1,0), 3),
+        ('LEFTPADDING', (0,0), (-1,0), 6),
         
         # Data rows (row 1 onwards)
         ('BACKGROUND', (0,1), (-1,-1), colors.white),
         ('FONTNAME', (0,1), (-1,-1), 'Helvetica'),
-        ('FONTSIZE', (0,1), (-1,-1), 9),
+        ('FONTSIZE', (0,1), (-1,-1), 7),
         ('ALIGN', (0,1), (-1,-1), 'LEFT'),
-        ('LEFTPADDING', (0,1), (-1,-1), 8),
-        ('RIGHTPADDING', (0,1), (-1,-1), 8),
-        ('TOPPADDING', (0,1), (-1,-1), 6),
-        ('BOTTOMPADDING', (0,1), (-1,-1), 6),
+        ('LEFTPADDING', (0,1), (-1,-1), 6),
+        ('RIGHTPADDING', (0,1), (-1,-1), 6),
+        ('TOPPADDING', (0,1), (-1,-1), 3),
+        ('BOTTOMPADDING', (0,1), (-1,-1), 3),
     ]))
     page1_elements.append(patient_table)
-    page1_elements.append(Spacer(1, 20))
+    page1_elements.append(Spacer(1, 12))
 
     # ---------------- TIME INFORMATION CONTAINER ----------------
     times_data = [
@@ -88,24 +209,24 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
         ('SPAN', (0,0), (-1,0)),
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#DCEFD8")),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), 9),
+        ('FONTSIZE', (0,0), (-1,0), 8),
         ('TEXTCOLOR', (0,0), (-1,0), colors.black),
-        ('TOPPADDING', (0,0), (-1,0), 4),
-        ('BOTTOMPADDING', (0,0), (-1,0), 4),
-        ('LEFTPADDING', (0,0), (-1,0), 8),
+        ('TOPPADDING', (0,0), (-1,0), 3),
+        ('BOTTOMPADDING', (0,0), (-1,0), 3),
+        ('LEFTPADDING', (0,0), (-1,0), 6),
         
         # Data rows (row 1 onwards)
         ('BACKGROUND', (0,1), (-1,-1), colors.white),
         ('FONTNAME', (0,1), (-1,-1), 'Helvetica'),
-        ('FONTSIZE', (0,1), (-1,-1), 9),
-        ('ALIGN', (0,1), (-1,-1), 'CENTER'),
-        ('LEFTPADDING', (0,1), (-1,-1), 8),
-        ('RIGHTPADDING', (0,1), (-1,-1), 8),
-        ('TOPPADDING', (0,1), (-1,-1), 6),
-        ('BOTTOMPADDING', (0,1), (-1,-1), 6),
+        ('FONTSIZE', (0,1), (-1,-1), 8),
+        ('ALIGN', (0,1), (-1,-1), 'CENTER'), 
+        ('LEFTPADDING', (0,1), (-1,-1), 6),
+        ('RIGHTPADDING', (0,1), (-1,-1), 6),
+        ('TOPPADDING', (0,1), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,1), (-1,-1), 4),
     ]))
     page1_elements.append(time_table)
-    page1_elements.append(Spacer(1, 20))
+    page1_elements.append(Spacer(1, 12))
 
     # ---------------- SUMMARY CONTAINER ----------------
     summary_data = [
@@ -122,29 +243,29 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
         ('SPAN', (0,0), (-1,0)),
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#DCEFD8")),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), 9),
+        ('FONTSIZE', (0,0), (-1,0), 8),
         ('TEXTCOLOR', (0,0), (-1,0), colors.black),
-        ('TOPPADDING', (0,0), (-1,0), 4),
-        ('BOTTOMPADDING', (0,0), (-1,0), 4),
-        ('LEFTPADDING', (0,0), (-1,0), 8),
+        ('TOPPADDING', (0,0), (-1,0), 3),
+        ('BOTTOMPADDING', (0,0), (-1,0), 3),
+        ('LEFTPADDING', (0,0), (-1,0), 6),
         
         # Data rows (row 1 onwards)
         ('BACKGROUND', (0,1), (-1,-1), colors.white),
         ('ALIGN', (0,1), (-1,-1), 'CENTER'),
         ('FONTNAME', (0,1), (-1,-1), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,1), (-1,-1), 9),
+        ('FONTSIZE', (0,1), (-1,-1), 8),
         ('TEXTCOLOR', (0,1), (-1,-1), colors.black),
         ('TEXTCOLOR', (1,1), (1,1), colors.HexColor(0x007BFF)),  # AHI value
         ('TEXTCOLOR', (3,1), (3,1), colors.HexColor(0x007BFF)),  # OAI
         ('TEXTCOLOR', (5,1), (5,1), colors.HexColor(0x007BFF)),  # CAI
         ('TEXTCOLOR', (7,1), (7,1), colors.HexColor(0x007BFF)),  # Hypopnea
-        ('LEFTPADDING', (0,1), (-1,-1), 10),
-        ('RIGHTPADDING', (0,1), (-1,-1), 10),
-        ('TOPPADDING', (0,1), (-1,-1), 6),
-        ('BOTTOMPADDING', (0,1), (-1,-1), 6),
+        ('LEFTPADDING', (0,1), (-1,-1), 6),
+        ('RIGHTPADDING', (0,1), (-1,-1), 6),
+        ('TOPPADDING', (0,1), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,1), (-1,-1), 4),
     ]))
     page1_elements.append(summary_table)
-    page1_elements.append(Spacer(1, 20))
+    page1_elements.append(Spacer(1, 12))
 
     # ---------------- Severity Meter ----------------
      # ---------------- SEVERITY INDICATOR ----------------
@@ -238,7 +359,7 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
         ('BOTTOMPADDING', (0,0), (-1,-1), 0),
     ]))
     page1_elements.append(severity_wrapper)
-    page1_elements.append(Spacer(1, 20))
+    page1_elements.append(Spacer(1, 12))
 
     # ---------------- RESPIRATORY EVENTS CONTAINER ----------------
     # ✅ Full structured data (exact image)
@@ -277,9 +398,9 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('FONTSIZE', (0,0), (-1,0), 9),
         ('TEXTCOLOR', (0,0), (-1,0), colors.black),
-        ('TOPPADDING', (0,0), (-1,0), 4),
-        ('BOTTOMPADDING', (0,0), (-1,0), 4),
-        ('LEFTPADDING', (0,0), (-1,0), 8),
+        ('TOPPADDING', (0,0), (-1,0), 2),
+        ('BOTTOMPADDING', (0,0), (-1,0), 2),
+        ('LEFTPADDING', (0,0), (-1,0), 6),
 
         # Data rows (row 1 onwards)
         ('BACKGROUND', (0,1), (-1,-1), colors.white),
@@ -312,14 +433,14 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
         ('TEXTCOLOR', (5,9), (9,10), colors.HexColor(0x007BFF)),  # position time/REI values
 
         # Padding
-        ('LEFTPADDING', (0,0), (-1,-1), 6),
-        ('RIGHTPADDING', (0,0), (-1,-1), 6),
-        ('TOPPADDING', (0,0), (-1,-1), 5),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+        ('LEFTPADDING', (0,0), (-1,-1), 4),
+        ('RIGHTPADDING', (0,0), (-1,-1), 4),
+        ('TOPPADDING', (0,0), (-1,-1), 3),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 3),
     ]))
 
     page1_elements.append(resp_table)
-    page1_elements.append(Spacer(1, 20))
+    page1_elements.append(Spacer(1, 10))
     
     # Add all page 1 elements without KeepTogether (content is too large)
     elements.extend(page1_elements)
@@ -335,27 +456,27 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
     RIGHT_SECTION_WIDTH = 250
 
     # ---------------- OXIMETRY CONTAINER ----------------
-    # ✅ Data with structure
+    oximetry = _get_section(analysis_results, "oximetry")
     oxi_data = [
         ["OXIMETRY SUMMARY", "", ""],
         ["Parameter", "% TIB", "Value"],
-        ["Mean SpO2 % during sleep", "99", "96.7"],
-        ["Min SpO2 % during sleep", "99", "76"],
-        ["Max SpO2 % during sleep", "99", "97"],
-        ["Total # of Desats", "", "360"],
-        ["Desat Index (#/hour)", "", "52.9"],
-        ["Desat Max (%)", "", "21"],
-        ["Desat Max dur (sec)", "", "91.0"],
-        ["Lowest SpO2 % during sleep", "", "76"],
-        ["Duration of Min SpO2 (sec)", "", "3"],
-        ["Highest SpO2 % during sleep", "", "97"],
-        ["Duration of Max SpO2 (sec)", "", "42"],
-        ["SpO2 < 90% duration", "", "25.3 min"],
-        ["SpO2 < 85% duration", "", "12.1 min"],
-        ["SpO2 < 80% duration", "", "5.8 min"],
-        ["Baseline SpO2", "", "98.2"],
-        ["SpO2 Variability", "", "Low"],
-        ["Oxygen Saturation Trend", "", "Stable"],
+        ["Mean SpO2 % during sleep", "99", oximetry.get("mean_spo2_display", "0")],
+        ["Min SpO2 % during sleep", "99", oximetry.get("min_spo2_display", "0")],
+        ["Max SpO2 % during sleep", "99", oximetry.get("max_spo2_display", "0")],
+        ["Total # of Desats", "", oximetry.get("total_desats_display", "0")],
+        ["Desat Index (#/hour)", "", oximetry.get("desaturation_index_display", "0")],
+        ["Desat Max (%)", "", oximetry.get("desat_max_pct_display", "0")],
+        ["Desat Max dur (sec)", "", oximetry.get("desat_max_sec_display", "0 sec")],
+        ["Lowest SpO2 % during sleep", "", oximetry.get("lowest_spo2_display", "0")],
+        ["Duration of Min SpO2 (sec)", "", oximetry.get("duration_of_min_spo2_display", "0 sec")],
+        ["Highest SpO2 % during sleep", "", oximetry.get("highest_spo2_display", "0")],
+        ["Duration of Max SpO2 (sec)", "", oximetry.get("duration_of_max_spo2_display", "0 sec")],
+        ["SpO2 < 90% duration", "", oximetry.get("duration_below_90_display", "0 sec")],
+        ["SpO2 < 85% duration", "", oximetry.get("duration_below_85_display", "0 sec")],
+        ["SpO2 < 80% duration", "", oximetry.get("duration_below_80_display", "0 sec")],
+        ["Baseline SpO2", "", oximetry.get("baseline_spo2_display", "0")],
+        ["SpO2 Variability", "", oximetry.get("spo2_variability", "0")],
+        ["Oxygen Saturation Trend", "", oximetry.get("oxygen_saturation_trend", "0")],
     ]
 
     oxi_table = Table(oxi_data, colWidths=[182, 30, 30])
@@ -400,14 +521,15 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
     ]))
 
     # ---------------- HEART RATE CONTAINER ----------------
+    heart_rate = _get_section(analysis_results, "heart_rate")
     hr_data = [
         ["HEART RATE STATS", ""],
         ["Parameter", "Value"],
-        ["Mean HR during sleep", "87.8 (BPM)"],
-        ["Highest HR during sleep", "106 (BPM)"],
-        ["Highest HR during TIB", "73 (BPM)"],
-        ["Lowest HR during sleep", "0 (BPM)"],
-        ["Lowest HR during TIB", "12 (BPM)"]
+        ["Mean HR during sleep", heart_rate.get("mean_hr_display", "0 BPM")],
+        ["Highest HR during sleep", heart_rate.get("highest_hr_display", "0 BPM")],
+        ["Highest HR during TIB", heart_rate.get("highest_hr_display", "0 BPM")],
+        ["Lowest HR during sleep", heart_rate.get("lowest_hr_display", "0 BPM")],
+        ["Lowest HR during TIB", heart_rate.get("lowest_hr_display", "0 BPM")]
     ]
 
     hr_table = Table(hr_data, colWidths=[121, 121])
@@ -437,13 +559,14 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
     ]))
 
     # ---------------- SNORING ANALYSIS ----------------
+    snoring = _get_section(analysis_results, "snoring")
     snore_data = [
         ["SNORING SUMMARY", ""],
         ["Parameter", "Value"],
-        [" Total Snoring Episodes", "564"],
-        [" Total Duration with Snoring ", "132.4 min"],
-        [" Mean Duration of Snoring ", "32 sec"],
-        [" Percentage of Snoring ", "32 %"],
+        [" Total Snoring Episodes", snoring.get("total_snoring_episodes_display", "0")],
+        [" Total Duration with Snoring ", snoring.get("total_snoring_duration_display", "0 sec")],
+        [" Mean Duration of Snoring ", snoring.get("mean_snoring_duration_display", "0 sec")],
+        [" Percentage of Snoring ", snoring.get("snoring_percentage_display", "0 %")],
         
     ]
 
@@ -518,14 +641,18 @@ def generate_sleep_report(pdf_path="sleep_report_clean.pdf"):
 
     # Add all page 2 elements with KeepTogether to keep them on page 2
     elements.append(KeepTogether(page2_elements))
+    elements.extend(_build_dashboard_screenshot_section(dashboard_screenshot_path, doc, styles))
 
     doc.build(elements)
-    print("✅ Basic Report Generated:", pdf_path)
+    print(" Basic Report Generated:", pdf_path)
     return os.path.abspath(pdf_path)
 
 
-def generate_sleep_report_pro(pdf_path="sleep_report_pro.pdf"):
+def generate_sleep_report_pro(pdf_path=None):
     """Generate professional sleep report format"""
+    if pdf_path is None:
+        pdf_path = _default_report_output_path("sleep_report_pro.pdf")
+
     doc = SimpleDocTemplate(pdf_path, pagesize=A4)
     styles = getSampleStyleSheet()
     elements = []
@@ -720,8 +847,11 @@ def generate_sleep_report_pro(pdf_path="sleep_report_pro.pdf"):
     return os.path.abspath(pdf_path)
 
 
-def generate_sleep_report_summary(pdf_path="sleep_report_summary.pdf"):
+def generate_sleep_report_summary(pdf_path=None):
     """Generate summary sleep report format"""
+    if pdf_path is None:
+        pdf_path = _default_report_output_path("sleep_report_summary.pdf")
+
     doc = SimpleDocTemplate(pdf_path, pagesize=A4)
     styles = getSampleStyleSheet()
     elements = []
@@ -773,9 +903,12 @@ def generate_sleep_report_summary(pdf_path="sleep_report_summary.pdf"):
 
 
 class PDFViewerWidget(QDialog):
-    def __init__(self, pdf_path=None, parent=None):
+    def __init__(self, pdf_path=None, parent=None, patient_data=None, analysis_results=None, dashboard_screenshot_path=None):
         super().__init__(parent)
         self.pdf_path = pdf_path
+        self.patient_data = patient_data or {}
+        self.analysis_results = analysis_results or {}
+        self.dashboard_screenshot_path = dashboard_screenshot_path
         self.setWindowTitle("Medical Report")
         self.setFixedSize(1200, 850)
         self.generating = False  # Flag to prevent multiple generations
@@ -855,18 +988,46 @@ class PDFViewerWidget(QDialog):
         self.setLayout(layout)
     
     def generate_new_report(self):
-        """Generate new report (single format)"""
+        """Generate a new report and save it to a local file."""
         if self.generating:
             return  # Prevent multiple generations
         
         self.generating = True
         
         try:
-            # Always use the basic report format
-            pdf_path = generate_sleep_report()
+            suggested_path = _default_report_output_path("sleep_report_clean.pdf")
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Medical Report",
+                suggested_path,
+                "PDF Files (*.pdf)"
+            )
+            if not file_path:
+                return
+
+            if not file_path.lower().endswith(".pdf"):
+                file_path += ".pdf"
+
+            # Always refresh from the newest JSON before generating the PDF.
+            latest_analysis_results = _load_latest_analysis_results()
+            if latest_analysis_results:
+                self.analysis_results = latest_analysis_results
+
+            # Always use the basic report format and save it to the chosen local path.
+            pdf_path = generate_sleep_report(
+                pdf_path=file_path,
+                patient_data=self.patient_data,
+                analysis_results=self.analysis_results,
+                dashboard_screenshot_path=self.dashboard_screenshot_path
+            )
             
             # Update the PDF path and reload
             self.pdf_path = pdf_path
+            QMessageBox.information(
+                self,
+                "Report Saved",
+                f"Report saved locally to:\n{pdf_path}"
+            )
             QTimer.singleShot(100, lambda: self.load_pdf(pdf_path))
             
         finally:

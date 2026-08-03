@@ -8,7 +8,7 @@
   },
   "afmlist": [
     {
-      "fname": "fonts/afm/putbi8a.afm",
+      "fname": "fonts/afm/putbi8a.afm", 
       "name": "Utopia",
       "style": "italic",
       "variant": "normal",
@@ -20,7 +20,7 @@
     {
       "fname": "fonts/afm/ptmbi8a.afm",
       "name": "Times",
-      "style": "italic",
+      "style": "italic",                                            
       "variant": "normal",
       "weight": "bold",
       "stretch": "normal",
@@ -30,7 +30,7 @@
     {
       "fname": "fonts/afm/cmtt10.afm",
       "name": "Computer Modern",
-      "style": "normal",
+      "style": "normal",   
       "variant": "normal",
       "weight": "medium",
       "stretch": "normal",

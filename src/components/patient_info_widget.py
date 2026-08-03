@@ -259,7 +259,7 @@ class PatientInfoWidget(QWidget):
                 QMessageBox.information(
                     self,
                     "Unsupported File",
-                    "Abhi graph plotting ke liye CSV/TXT upload supported hai.",
+                    "Only CSV/TXT uploads are currently supported for graph plotting.",
                 )
                 return
 
@@ -267,21 +267,15 @@ class PatientInfoWidget(QWidget):
                 self.monitor_chart.pause_playback()
             self.monitor_chart.skip_next_auto_playback = True
 
-            time_data, signals = self.monitor_chart.load_psg_data(selected_file)
+            time_data, signals, jumped = self.monitor_chart.load_psg_data_and_detect(selected_file)
             if len(time_data) == 0 or not signals:
                 QMessageBox.warning(
                     self,
                     "Load Failed",
-                    f"Selected file load nahi ho payi:\n{selected_file}",
+                    f"The selected file could not be loaded:\n{selected_file}",
                 )
                 return
-    
-            self.monitor_chart.run_rule_ai_apnea_detection()
-            jumped = self.monitor_chart.focus_on_first_detected_event()
-            if not jumped:
-                self.monitor_chart.current_time_offset = 0
-            self.monitor_chart.refresh_charts()
-            self.monitor_chart.time_position_updated.emit()
+
             detected_events = []
             if getattr(self.monitor_chart, "auto_rule_ai_result", None):
                 detected_events = list(self.monitor_chart.auto_rule_ai_result.get("events", []))
@@ -289,13 +283,13 @@ class PatientInfoWidget(QWidget):
                 self,
                 "Upload Complete",
                 (
-                    f"Data load ho gaya aur graph update ho gaya:\n{os.path.basename(selected_file)}"
+                    f"Data loaded and graphs updated:\n{os.path.basename(selected_file)}"
                     + (
-                        f"\nAuto-detect complete: {len(detected_events)} events."
+                        f"\nAuto-detection complete: {len(detected_events)} events found."
                         if detected_events
-                        else "\nAuto-detect me koi event nahi mila."
+                        else "\nNo auto-detected events found."
                     )
-                    + ("\nFirst detected event par jump ho gaya." if jumped else "")
+                    + ("\nJumped to the first detected event." if jumped else "")
                 ),
             )
 

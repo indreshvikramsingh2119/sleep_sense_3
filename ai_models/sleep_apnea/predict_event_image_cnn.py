@@ -9,9 +9,9 @@ from hybrid_pipeline_common import DEFAULT_OUTPUT_DIR, run_hybrid_pipeline
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Hybrid apnea pipeline: raw CSV -> rule candidates -> event images -> CNN -> final report."
+        description="Legacy hybrid apnea pipeline: raw CSV -> rule candidates -> event images -> CNN -> final report."
     )
-    parser.add_argument("csv_path", nargs="?", default="sleep_sense_3/extracted_data/human.data.csv")
+    parser.add_argument("csv_path")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--pre-event-seconds", type=float, default=30.0)
     parser.add_argument("--post-event-seconds", type=float, default=30.0)

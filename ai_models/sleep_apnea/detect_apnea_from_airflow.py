@@ -17,6 +17,9 @@ from scipy.signal import find_peaks
 CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
+PROJECT_ROOT = CURRENT_DIR.parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
     from .hybrid_pipeline_common import (
@@ -48,15 +51,15 @@ except ImportError:
 SKIP_MINUTES = 20.0
 BASELINE_MINUTES = 45.0
 BASELINE_HOURLY_WINDOW_SEC = 3600.0
-MIN_CANDIDATE_SEC = 4.0
 HSA_MIN_SEC = 10.0
 OSA_MIN_SEC = 10.0
-CSA_MIN_SEC = 10.0
+CSA_MIN_SEC = 9.0
 MAX_EVENT_SEC = 120.0
 MIN_STABLE_OCCURRENCE = 30
 BASELINE_TARGET_OCCURRENCE = 500
 BASELINE_OCCURRENCE_TOLERANCE = 50
 CANDIDATE_WINDOW_SEC = 1.0
+CSA_DURATION_EDGE_TOLERANCE_SEC = 1.0
 CANDIDATE_MIN_FRACTION = 0.60
 BAND_MAX_GAP_SAMPLES = 3
 MIN_HSA_AIRFLOW_AMPLITUDE = 3.0
@@ -65,7 +68,7 @@ MIN_HSA_AIRFLOW_AMPLITUDE_RATIO = 0.08
 APNEA_DROP = 0.70
 HYPOPNEA_DROP = 0.30
 CSA_DROP = 0.80
-HSA_DROP_PERCENT_RANGE = (30.0, 70.0)
+HSA_DROP_PERCENT_RANGE = (25.0, 70.0)
 OSA_DROP_PERCENT_RANGE = (70.0, 80.0)
 CSA_DROP_PERCENT_RANGE = (80.0, 90.0)
 MERGE_GAP_SEC = 0.0
@@ -121,7 +124,7 @@ def stable_max(values: pd.Series | np.ndarray, min_occurrence: int = MIN_STABLE_
         return candidates[0]
     fallback_value = float(counts.idxmax())
     fallback_count = int(counts.max())
-    return fallback_value, fallback_count
+    return fallback_value, fallback_count3
 
 
 def stable_peak_max(
@@ -283,6 +286,7 @@ def baseline_from_occurrence_band(
 def _segment_mask(mask: np.ndarray, time_sec: np.ndarray, min_event_sec: float) -> list[tuple[int, int, float]]:
     segments: list[tuple[int, int, float]] = []
     start_index: int | None = None
+    sample_dt = float(np.nanmedian(np.diff(time_sec))) if len(time_sec) > 1 else 0.0
 
     for index, is_active in enumerate(mask):
         if is_active and start_index is None:
@@ -291,14 +295,14 @@ def _segment_mask(mask: np.ndarray, time_sec: np.ndarray, min_event_sec: float) 
 
         if not is_active and start_index is not None:
             end_index = index - 1
-            duration_sec = float(time_sec[end_index] - time_sec[start_index])
+            duration_sec = float(time_sec[end_index] - time_sec[start_index] + sample_dt)
             if duration_sec >= min_event_sec:
                 segments.append((start_index, end_index, duration_sec))
             start_index = None
 
     if start_index is not None:
         end_index = len(mask) - 1
-        duration_sec = float(time_sec[end_index] - time_sec[start_index])
+        duration_sec = float(time_sec[end_index] - time_sec[start_index] + sample_dt)
         if duration_sec >= min_event_sec:
             segments.append((start_index, end_index, duration_sec))
 
@@ -328,11 +332,18 @@ def _label_min_duration_sec(label: str) -> float:
         return OSA_MIN_SEC
     if label == "CSA":
         return CSA_MIN_SEC
-    return MIN_CANDIDATE_SEC
+    return min(HSA_MIN_SEC, OSA_MIN_SEC, CSA_MIN_SEC)
+
+
+def _effective_label_min_duration_sec(label: str) -> float:
+    min_duration_sec = _label_min_duration_sec(label)
+    if label == "CSA":
+        return max(0.0, min_duration_sec - CSA_DURATION_EDGE_TOLERANCE_SEC)
+    return min_duration_sec
 
 
 def _build_debug_summary(
-    baseline_airflow: float,
+    baseline_airflow_reference: float,
     stable_min_airflow: float,
     airflow_reduction_range: float,
     apnea_threshold: float,
@@ -344,7 +355,8 @@ def _build_debug_summary(
 ) -> list[str]:
     return [
         f"baseline_source={baseline_source}",
-        f"summary_average_hourly_baseline={baseline_airflow:.2f}",
+        "baseline_mode=hourly_window_only",
+        f"baseline_reference_first_window={baseline_airflow_reference:.2f}",
         f"stable_min_airflow={stable_min_airflow:.2f}",
         f"reduction_scale=percent_drop_from_baseline",
         f"airflow_reduction_range={airflow_reduction_range:.2f}",
@@ -362,7 +374,7 @@ def _build_event_debug_line(event: dict[str, Any], event_id: int) -> str:
         f"{float(event['start_sec']):.1f}s - {float(event['end_sec']):.1f}s | "
         f"duration={float(event['duration_sec']):.1f}s | "
         f"baseline={float(event['baseline_airflow']):.2f} | "
-        f"peak_airflow={float(event['event_peak_airflow']):.2f} | "
+        f"peak_airflow={float(event['event_peak_airflow']):.2f} | " 
         f"min_airflow={float(event['event_min_airflow']):.2f} | "
         f"amp_ratio={float(event.get('airflow_amplitude_ratio', 0.0)):.2f} | "
         f"drop={float(event['airflow_drop_percent']):.1f}% | "
@@ -418,7 +430,7 @@ def _write_text_report(result: dict[str, Any], csv_path: str | Path, output_dir:
     lines: list[str] = [
         f"report_type=rule_based_apnea_detection | source_csv={csv_path} | generated_date={generated_dt.strftime('%Y-%m-%d')} | generated_time={generated_dt.strftime('%H:%M:%S')}",
         "formula=drop_percent=((window_baseline-analysis_peak_envelope)/window_baseline)*100",
-        f"label_rules=HSA:30-<70 | OSA:70-80 | CSA:>80-90 | min_candidate_sec={MIN_CANDIDATE_SEC:.1f} | hsa_min_sec={HSA_MIN_SEC:.1f} | osa_min_sec={OSA_MIN_SEC:.1f} | csa_min_sec={CSA_MIN_SEC:.1f}",
+        f"label_rules=HSA:{HSA_DROP_PERCENT_RANGE[0]:.0f}-<{HSA_DROP_PERCENT_RANGE[1]:.0f} | OSA:70-80 | CSA:>80-90 | hsa_min_sec={HSA_MIN_SEC:.1f} | osa_min_sec={OSA_MIN_SEC:.1f} | csa_min_sec={CSA_MIN_SEC:.1f}",
         "baseline_note=detection_uses_hourly_or_remainder_window_peak_baselines_not_one_combined_average",
         f"baseline_source={result.get('baseline_source', '--')}",
         "hourly_peak_baselines:",
@@ -473,19 +485,19 @@ def classify_rule_event(
     if duration_sec is not None and duration_sec > MAX_EVENT_SEC:
         return "NO_EVENT"
 
-    if duration_sec is None or duration_sec < MIN_CANDIDATE_SEC:
+    if duration_sec is None:
         return "NO_EVENT"
 
     drop_percent = drop_ratio * 100.0
 
     if HSA_DROP_PERCENT_RANGE[0] <= drop_percent < HSA_DROP_PERCENT_RANGE[1]:
-        return "HSA"
+        return "HSA" if duration_sec >= _effective_label_min_duration_sec("HSA") else "NO_EVENT"
 
     if OSA_DROP_PERCENT_RANGE[0] <= drop_percent <= OSA_DROP_PERCENT_RANGE[1]:
-        return "OSA"
+        return "OSA" if duration_sec >= _effective_label_min_duration_sec("OSA") else "NO_EVENT"
 
     if CSA_DROP_PERCENT_RANGE[0] < drop_percent <= CSA_DROP_PERCENT_RANGE[1]:
-        return "CSA"
+        return "CSA" if duration_sec >= _effective_label_min_duration_sec("CSA") else "NO_EVENT"
 
     return "NO_EVENT"
 
@@ -555,7 +567,7 @@ def detect_apnea_events_from_dataframe(
         raise ValueError("Hourly baseline windows are empty. Recording is too short after skip period.")
 
     hourly_peak_values = [float(item["peak_value"]) for item in hourly_peak_baselines]
-    airflow_baseline = float(np.mean(hourly_peak_values))
+    baseline_airflow_reference = float(hourly_peak_values[0])
     baseline_occurrence = int(sum(int(item["peak_occurrence"]) for item in hourly_peak_baselines))
     baseline_occurrence_duration_sec = (
         float(baseline_occurrence / estimated_fs) if estimated_fs and baseline_occurrence > 0 else 0.0
@@ -577,15 +589,15 @@ def detect_apnea_events_from_dataframe(
         target_occurrence=BASELINE_TARGET_OCCURRENCE,
         tolerance=BASELINE_OCCURRENCE_TOLERANCE,
     )
-    airflow_reduction_range = float(airflow_baseline - stable_min_airflow)
+    airflow_reduction_range = float(baseline_airflow_reference - stable_min_airflow)
     if airflow_reduction_range <= 0:
-        airflow_reduction_range = float(airflow_baseline) if airflow_baseline else 1.0
+        airflow_reduction_range = float(baseline_airflow_reference) if baseline_airflow_reference else 1.0
     baseline_airflow_amplitude = _robust_signal_amplitude(baseline_airflow_window)
     if baseline_airflow_amplitude <= 0:
         baseline_airflow_amplitude = airflow_reduction_range
 
-    apnea_threshold = airflow_baseline * (1.0 - APNEA_DROP)
-    hypopnea_threshold = airflow_baseline * (1.0 - HYPOPNEA_DROP)
+    apnea_threshold = baseline_airflow_reference * (1.0 - APNEA_DROP)
+    hypopnea_threshold = baseline_airflow_reference * (1.0 - HYPOPNEA_DROP)
 
     analysis_mask = time_sec >= skip_sec
     analysis_time = time_sec[analysis_mask]
@@ -611,17 +623,17 @@ def detect_apnea_events_from_dataframe(
         (
             "HSA",
             lambda x: (x >= HSA_DROP_PERCENT_RANGE[0]) & (x < HSA_DROP_PERCENT_RANGE[1]),
-            MIN_CANDIDATE_SEC,
+            HSA_MIN_SEC,
         ),
         (
             "OSA",
             lambda x: (x >= OSA_DROP_PERCENT_RANGE[0]) & (x <= OSA_DROP_PERCENT_RANGE[1]),
-            MIN_CANDIDATE_SEC,
+            OSA_MIN_SEC,
         ),
         (
             "CSA",
             lambda x: (x > CSA_DROP_PERCENT_RANGE[0]) & (x <= CSA_DROP_PERCENT_RANGE[1]),
-            MIN_CANDIDATE_SEC,
+            _effective_label_min_duration_sec("CSA"),
         ),
     ]
 
@@ -659,7 +671,7 @@ def detect_apnea_events_from_dataframe(
             event_baseline_airflow = (
                 float(np.nanmean(event_window_baseline))
                 if len(event_window_baseline) > 0
-                else float(airflow_baseline)
+                else float(baseline_airflow_reference)
             )
 
             event_min_airflow = float(np.nanmin(event_airflow))
@@ -841,7 +853,7 @@ def detect_apnea_events_from_dataframe(
         )
 
     debug_summary = _build_debug_summary(
-        baseline_airflow=float(airflow_baseline),
+        baseline_airflow_reference=float(baseline_airflow_reference),
         stable_min_airflow=float(stable_min_airflow),
         airflow_reduction_range=float(airflow_reduction_range),
         apnea_threshold=float(apnea_threshold),
@@ -849,12 +861,12 @@ def detect_apnea_events_from_dataframe(
         raw_segments=int(raw_segment_count),
         filtered_segments=int(len(preliminary_events)),
         merged_segments=int(len(merged_events)),
-        baseline_source="hourly_average_of_most_frequent_peak_values",
+        baseline_source="hourly_window_most_frequent_peak_values",
     )
     debug_events = [_build_event_debug_line(event.to_dict(), event.event_id) for event in events]
 
     return {
-        "baseline_source": "hourly_average_of_most_frequent_peak_values",
+        "baseline_source": "hourly_window_most_frequent_peak_values",
         "pipeline_mode": "rule_first_ai_second",
         "rule_scan_used": True,
         "ai_enabled_requested": bool(enable_ai),
@@ -863,9 +875,11 @@ def detect_apnea_events_from_dataframe(
         "rule_candidates_after_filter": int(len(preliminary_events)),
         "rule_candidates_after_merge": int(len(merged_events)),
         "ai_candidates_processed": int(ai_candidates_processed),
-        "baseline_airflow": float(airflow_baseline),
+        "baseline_airflow": float(baseline_airflow_reference),
+        "baseline_airflow_note": "Legacy scalar reference only; detection uses hourly_peak_baselines per window.",
         "baseline_occurrence": int(baseline_occurrence),
-        "stable_peak_baseline": float(airflow_baseline),
+        "stable_peak_baseline": float(baseline_airflow_reference),
+        "stable_peak_baseline_note": "Legacy scalar reference only; detection uses hourly_peak_baselines per window.",
         "stable_peak_occurrence": int(baseline_occurrence),
         "stable_peak_occurrence_duration_sec": float(baseline_occurrence_duration_sec),
         "stable_peak_first_time_sec": float(baseline_peak_first_time) if baseline_peak_first_time is not None else None,
@@ -875,8 +889,32 @@ def detect_apnea_events_from_dataframe(
         "stable_min_occurrence": int(stable_min_occurrence),
         "airflow_reduction_scale": "percent_drop_from_baseline",
         "airflow_reduction_range": float(airflow_reduction_range),
+        "hourly_airflow_reduction_ranges": [
+            {
+                "window_index": int(item["window_index"]),
+                "window_label": str(item["window_label"]),
+                "airflow_reduction_range": float(float(item["peak_value"]) - stable_min_airflow),
+            }
+            for item in hourly_peak_baselines
+        ],
         "apnea_threshold": float(apnea_threshold),
         "hypopnea_threshold": float(hypopnea_threshold),
+        "hourly_apnea_thresholds": [
+            {
+                "window_index": int(item["window_index"]),
+                "window_label": str(item["window_label"]),
+                "apnea_threshold": float(float(item["peak_value"]) * (1.0 - APNEA_DROP)),
+            }
+            for item in hourly_peak_baselines
+        ],
+        "hourly_hypopnea_thresholds": [
+            {
+                "window_index": int(item["window_index"]),
+                "window_label": str(item["window_label"]),
+                "hypopnea_threshold": float(float(item["peak_value"]) * (1.0 - HYPOPNEA_DROP)),
+            }
+            for item in hourly_peak_baselines
+        ],
         "estimated_sample_rate_hz": float(estimated_fs),
         "preprocess_meta": preprocess_meta,
         "airflow_enhancement_applied": bool(airflow_enhancement_applied),

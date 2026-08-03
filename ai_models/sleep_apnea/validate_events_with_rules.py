@@ -16,7 +16,7 @@ from hybrid_pipeline_common import (
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run CNN prediction plus rule validation for detected candidates.")
+    parser = argparse.ArgumentParser(description="Legacy: run CNN prediction plus rule validation for detected candidates.")
     parser.add_argument("csv_path")
     parser.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "hybrid_pipeline_output" / "event_images"))
     parser.add_argument("--confidence-threshold", type=float, default=0.70)
