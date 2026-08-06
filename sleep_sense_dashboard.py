@@ -981,8 +981,8 @@ class SleepSenseDashboard(QMainWindow):
         # Left Panel - Patient Info
         patient_panel = QFrame()
         patient_panel.setObjectName("patientPanel")
-        patient_panel.setMinimumWidth(280)  # Increased minimum width for better visibility
-        patient_panel.setMaximumWidth(350) # Set a reasonable maximum width
+        patient_panel.setMinimumWidth(340)  # Increased width so detected events fit without horizontal scrolling
+        patient_panel.setMaximumWidth(420) # Keep the side panel readable without clipping
         patient_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         patient_layout = QVBoxLayout(patient_panel)
         patient_layout.setContentsMargins(0, 0, 0, 0)
