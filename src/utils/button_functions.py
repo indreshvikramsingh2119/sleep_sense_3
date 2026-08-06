@@ -176,7 +176,6 @@ class ButtonFunctions:
                 font-weight: 500;
                 color: #374151;
                 min-width: 180px;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
             }
             QMenu::item {
                 background-color: transparent;

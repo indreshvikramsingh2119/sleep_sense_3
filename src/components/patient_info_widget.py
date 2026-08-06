@@ -7,8 +7,8 @@ import json
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QFileDialog, QListWidget, QListWidgetItem,
-    QMessageBox, QSizePolicy
+    QFrame, QFileDialog, QListWidget, QListWidgetItem, QScrollArea,
+    QMessageBox, QSizePolicy, QComboBox
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
@@ -20,6 +20,7 @@ class PatientInfoWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.saved_raw_files = []  # list[dict]: {timestamp, path, filename}
+        self.all_detected_events = []
         self.monitor_chart = None  # Reference to main chart for save functionality
         self.init_ui()
         
@@ -30,33 +31,20 @@ class PatientInfoWidget(QWidget):
 
         # Single panel (Raw Data tab removed as requested)
         info_tab = self.create_info_tab()
-        main_layout.addWidget(info_tab)
+        main_layout.addWidget(info_tab, 1)
         
     def create_info_tab(self):
         """Create patient information tab with professional container"""
         widget = QWidget()
         widget.setObjectName("infoTab")
+        widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0) # Remove outer margins
-        layout.setSpacing(0) # Control spacing within scroll area
-        
-        # Scroll Area
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff) # Disable horizontal scroll
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        
-        scroll_content = QWidget()
-        scroll_content.setObjectName("scrollContent")
-        scroll_content.setContentsMargins(8, 16, 8, 16) # Reduced left margin for more left shift
-        scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setSpacing(16) # Adjusted spacing between sections
+        layout.setContentsMargins(8, 4, 8, 12)
+        layout.setSpacing(16)
         
         # Main Professional Container
         main_container = QFrame()
         main_container.setObjectName("patientMainContainer")
-        main_container.setMinimumHeight(1170)  
         main_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         main_container.setStyleSheet("""
             QFrame#patientMainContainer {
@@ -69,12 +57,11 @@ class PatientInfoWidget(QWidget):
                 );
                 border: 2px solid #cbd5e1;
                 border-radius: 12px;
-                padding: 4px;
-                margin: 2px;
+                padding: 2px;
+                margin: 0px;
             }
             QFrame#patientMainContainer:hover {
                 border: 2px solid #3b82f6;
-                box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
             }
         """)
         
@@ -109,6 +96,7 @@ class PatientInfoWidget(QWidget):
         
         # Age/Gender Card
         age_card = self.create_info_card("", "Age / Gender", "-- / ---", "light blue")
+        self.age_gender_value_label = age_card.findChild(QLabel, "ageGenderValue")
         details_layout.addWidget(age_card)
         
         # Action Buttons (Save and Upload)
@@ -164,13 +152,17 @@ class PatientInfoWidget(QWidget):
         events_layout.setSpacing(8)
         events_layout.addWidget(self.create_detected_events_section())
         container_layout.addWidget(events_container)
-        
         container_layout.addStretch()
-        scroll_layout.addWidget(main_container)
-        scroll_layout.addStretch()
         
-        scroll.setWidget(scroll_content)
-        layout.addWidget(scroll)
+        scroll = QScrollArea()
+        scroll.setObjectName("patientInfoScrollArea")
+        scroll.setWidgetResizable(True)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setWidget(main_container)
+        layout.addWidget(scroll, 1)
         
         return widget
 
@@ -297,8 +289,8 @@ class PatientInfoWidget(QWidget):
         """Inline raw-data file list shown under patient details."""
         frame = QFrame()
         frame.setObjectName("rawDataSection")
-        frame.setMinimumHeight(250)  # Further increased container height
-        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # Changed to Expanding for more space
+        frame.setMinimumHeight(170)  # Keep the card compact so the dashboard does not grow
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(12, 12, 12, 12)  # Increased margins for more space
         frame_layout.setSpacing(16)  # Further increased spacing
@@ -310,6 +302,7 @@ class PatientInfoWidget(QWidget):
         header.addStretch()
 
         self.raw_count_label = QLabel("0")
+        self.raw_count_label.setVisible(False)
         self.raw_count_label.setStyleSheet("font-weight: 700; color: #2563eb;")
         header.addWidget(self.raw_count_label)
         frame_layout.addLayout(header)
@@ -321,8 +314,9 @@ class PatientInfoWidget(QWidget):
 
         self.raw_file_list = QListWidget()
         self.raw_file_list.setObjectName("Saved file List")
-        self.raw_file_list.setMinimumHeight(220)  # Increased list height for more items
-        self.raw_file_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # Allow expansion
+        self.raw_file_list.setMinimumHeight(0)
+        self.raw_file_list.setMaximumHeight(140)
+        self.raw_file_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.raw_file_list.setVisible(False)
         # Reduce item spacing and padding to minimize empty space
         self.raw_file_list.setStyleSheet("""
@@ -371,6 +365,7 @@ class PatientInfoWidget(QWidget):
         header.addStretch()
 
         self.detected_count_label = QLabel("0")
+        self.detected_count_label.setVisible(False)
         self.detected_count_label.setStyleSheet("font-weight: 700; color: #dc2626;")
         header.addWidget(self.detected_count_label)
         frame_layout.addLayout(header)
@@ -380,9 +375,40 @@ class PatientInfoWidget(QWidget):
         self.detected_hint_label.setWordWrap(True)
         frame_layout.addWidget(self.detected_hint_label)
 
+        self.detected_filter_dropdown = QComboBox()
+        self.detected_filter_dropdown.addItems(["All", "HSA", "CSA", "OSA", "MSA"])
+        self.detected_filter_dropdown.setVisible(False)
+        self.detected_filter_dropdown.currentTextChanged.connect(self.apply_detected_events_filter)
+        self.detected_filter_dropdown.setStyleSheet("""
+            QComboBox {
+                background-color: white;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #111827;
+            }
+            QComboBox:hover {
+                border: 1px solid #93c5fd;
+            }
+            QComboBox:focus {
+                border: 1px solid #3b82f6;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 24px;
+            }
+        """)
+        frame_layout.addWidget(self.detected_filter_dropdown)
+
         self.detected_events_list = QListWidget()
-        self.detected_events_list.setMinimumHeight(240)
+        self.detected_events_list.setMinimumHeight(0)
+        self.detected_events_list.setMaximumHeight(180)
+        self.detected_events_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.detected_events_list.setVisible(False)
+        self.detected_events_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.detected_events_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.detected_events_list.setWordWrap(True)
+        self.detected_events_list.setTextElideMode(Qt.ElideNone)
         self.detected_events_list.itemClicked.connect(self.jump_to_detected_event)
         self.detected_events_list.setStyleSheet("""
             QListWidget {
@@ -418,9 +444,11 @@ class PatientInfoWidget(QWidget):
         filename = os.path.basename(file_path)
         self.saved_raw_files.insert(0, {"timestamp": timestamp_iso, "path": file_path, "filename": filename})
 
-        self.raw_count_label.setText(str(len(self.saved_raw_files)))
-        self.raw_hint_label.setVisible(len(self.saved_raw_files) == 0)
-        self.raw_file_list.setVisible(len(self.saved_raw_files) > 0)
+        raw_count = len(self.saved_raw_files)
+        self.raw_count_label.setText(str(raw_count))
+        self.raw_count_label.setVisible(raw_count > 0)
+        self.raw_hint_label.setVisible(raw_count == 0)
+        self.raw_file_list.setVisible(raw_count > 0)
 
         # Render newest on top
         item_text = f"{filename}\n{timestamp_iso}"
@@ -430,30 +458,82 @@ class PatientInfoWidget(QWidget):
 
     def update_detected_events_list(self, events):
         """Render automatic detected events and make them clickable."""
-        events = [
+        self.all_detected_events = [
             event
             for event in list(events or [])
             if str(event.get("final_label") or event.get("rule_label") or "REVIEW")
             not in {"REVIEW", "APNEA_REVIEW", "NO_EVENT"}
         ]
-        self.detected_count_label.setText(str(len(events)))
-        self.detected_hint_label.setVisible(len(events) == 0)
-        self.detected_events_list.setVisible(len(events) > 0)
-        self.detected_events_list.clear()
 
-        if not events:
+        if not self.all_detected_events:
+            self.detected_count_label.setText("0")
+            self.detected_count_label.setVisible(False)
+            self.detected_hint_label.setVisible(True)
+            self.detected_filter_dropdown.setVisible(False)
+            self.detected_events_list.setVisible(False)
+            self.detected_events_list.clear()
+            self.detected_events_list.setFixedHeight(0)
             self.detected_hint_label.setText("Upload data to populate automatic apnea events.")
             return
 
         self.detected_hint_label.setText("Click an event to jump the graph to that time.")
-        for event in sorted(events, key=lambda row: float(row.get("start_sec", 0.0))):
+        self.detected_hint_label.setVisible(False)
+        self.detected_filter_dropdown.setVisible(True)
+        self.apply_detected_events_filter()
+
+    def apply_detected_events_filter(self):
+        """Filter detected apnea events by selected label."""
+        selected_label = self.detected_filter_dropdown.currentText().upper()
+        if selected_label == "ALL":
+            filtered_events = list(self.all_detected_events)
+        else:
+            filtered_events = [
+                event
+                for event in self.all_detected_events
+                if str(event.get("final_label") or event.get("rule_label") or "").upper() == selected_label
+            ]
+
+        self.detected_count_label.setText(str(len(filtered_events)))
+        self.detected_count_label.setVisible(len(filtered_events) > 0)
+        self.detected_events_list.setVisible(len(filtered_events) > 0)
+        self.detected_events_list.clear()
+
+        if not filtered_events:
+            self.detected_events_list.setFixedHeight(0)
+            self.detected_hint_label.setText(f"No {selected_label} events found.")
+            self.detected_hint_label.setVisible(True)
+            return
+
+        self.detected_hint_label.setText("Click an event to jump the graph to that time.")
+        self.detected_hint_label.setVisible(False)
+        for event in sorted(filtered_events, key=lambda row: float(row.get("start_sec", 0.0))):
             start_text = self._format_timestamp(float(event["start_sec"]))
             end_text = self._format_timestamp(float(event["end_sec"]))
             label = str(event.get("final_label") or event.get("rule_label") or "REVIEW")
             duration = float(event.get("duration_sec", 0.0))
-            item = QListWidgetItem(f"{start_text} - {end_text} | {label} | {duration:.1f}s")
+            item = QListWidgetItem(f"{start_text} - {end_text}\n{label} | {duration:.1f}s")
             item.setData(Qt.UserRole, event)
             self.detected_events_list.addItem(item)
+
+        self._resize_detected_events_list()
+
+    def _resize_detected_events_list(self):
+        """Expand the list until a practical cap, then let the list scroll internally."""
+        item_count = self.detected_events_list.count()
+        if item_count == 0:
+            self.detected_events_list.setFixedHeight(0)
+            self.detected_events_list.setMaximumHeight(180)
+            return
+
+        row_height = self.detected_events_list.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = 44
+        frame_height = (self.detected_events_list.frameWidth() * 2) + 8
+        total_height = (row_height * item_count) + frame_height
+        max_height = 180
+        capped_height = min(total_height, max_height)
+        self.detected_events_list.setMaximumHeight(max_height)
+        self.detected_events_list.setFixedHeight(capped_height)
 
     def jump_to_detected_event(self, item):
         """Jump monitor chart to the selected detected event."""
@@ -519,18 +599,18 @@ class PatientInfoWidget(QWidget):
         layout.addWidget(avatar_container, alignment=Qt.AlignCenter)
         
         # Patient Name
-        name_label = QLabel("Patient Name")
-        name_label.setObjectName("patientName")
-        name_label.setAlignment(Qt.AlignCenter)
-        name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #111827;")
-        layout.addWidget(name_label)
+        self.patient_name_label = QLabel("No Patient Loaded")
+        self.patient_name_label.setObjectName("patientName")
+        self.patient_name_label.setAlignment(Qt.AlignCenter)
+        self.patient_name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #9ca3af; font-style: italic;")
+        layout.addWidget(self.patient_name_label)
         
         # Patient ID
-        id_label = QLabel("ID: --------")
-        id_label.setObjectName("patientId")
-        id_label.setAlignment(Qt.AlignCenter)
-        id_label.setStyleSheet("font-size: 12px; color: #6b7280; background: transparent; border: none;")
-        layout.addWidget(id_label)
+        self.patient_id_label = QLabel("ID: --")
+        self.patient_id_label.setObjectName("patientId")
+        self.patient_id_label.setAlignment(Qt.AlignCenter)
+        self.patient_id_label.setStyleSheet("font-size: 12px; color: #9ca3af; background: transparent; border: none; font-style: italic;")
+        layout.addWidget(self.patient_id_label)
         
         # Separator
         separator = QFrame()
@@ -575,7 +655,7 @@ class PatientInfoWidget(QWidget):
         text_layout.addWidget(label)
         
         value = QLabel(value_text)
-        value.setObjectName("infoValue")
+        value.setObjectName("ageGenderValue" if label_text.strip().lower() == "age / gender" else "infoValue")
         value.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
         text_layout.addWidget(value)
         
@@ -586,15 +666,47 @@ class PatientInfoWidget(QWidget):
     
     def set_patient_data(self, patient_data):
         """Update patient information display with selected patient data"""
+        if not patient_data:
+            self.apply_empty_patient_state()
+            return
+
         # Update patient name
         name_label = self.findChild(QLabel, "patientName")
         if name_label:
             full_name = f"{patient_data.get('first_name', '')} {patient_data.get('last_name', '')}"
-            name_label.setText(full_name.strip())
+            full_name = full_name.strip() or "No Patient Loaded"
+            name_label.setText(full_name)
+            name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #111827;")
         
         # Update patient ID
         id_label = self.findChild(QLabel, "patientId")
         if id_label:
-            id_label.setText(f"ID: {patient_data.get('patient_id', '--------')}")
+            id_text = patient_data.get('patient_id', '--')
+            id_label.setText(f"ID: {id_text}")
+            id_label.setStyleSheet("font-size: 12px; color: #6b7280; background: transparent; border: none;")
+
+        age_value = self.findChild(QLabel, "ageGenderValue")
+        if age_value:
+            age = patient_data.get('age', '--')
+            gender = patient_data.get('gender', '---')
+            age_value.setText(f"{age} / {gender}")
+            age_value.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
         
         print(f"Updated patient info: {patient_data}")
+
+    def apply_empty_patient_state(self):
+        """Show a clean placeholder state when no patient is loaded."""
+        name_label = self.findChild(QLabel, "patientName")
+        if name_label:
+            name_label.setText("No Patient Loaded")
+            name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #9ca3af; font-style: italic;")
+
+        id_label = self.findChild(QLabel, "patientId")
+        if id_label:
+            id_label.setText("ID: --")
+            id_label.setStyleSheet("font-size: 12px; color: #9ca3af; background: transparent; border: none; font-style: italic;")
+
+        age_value = self.findChild(QLabel, "ageGenderValue")
+        if age_value:
+            age_value.setText("-- / ---")
+            age_value.setStyleSheet("font-size: 14px; font-weight: bold; color: #9ca3af; font-style: italic;")
