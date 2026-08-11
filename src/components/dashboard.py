@@ -4,12 +4,12 @@ Sleep Sense Dashboard - Main Dashboard Component
 
 import os
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea,
-    QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox, QCheckBox, QDialog
+    QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox, QCheckBox, QStyle
 )
-from PyQt5.QtCore import Qt, QSize, QRect, QPoint, pyqtSignal
-from PyQt5.QtGui import QFont, QPixmap, QPainter, QPen, QColor
+from PyQt5.QtCore import Qt, QSize, QPoint, QRect, pyqtSignal
+from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor, QPen
 
 from .patient_info_widget import PatientInfoWidget
 from .sleep_monitor_chart import SleepMonitorChart
@@ -86,6 +86,8 @@ class ScreenshotOverlayWidget(QWidget):
         self.selection_start = QPoint()
         self.selection_end = QPoint()
         self.dragging = False
+        self._cached_scaled_background = QPixmap()
+        self._cached_background_size = QSize()
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.SubWindow)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -99,6 +101,25 @@ class ScreenshotOverlayWidget(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.setFocus()
+        self._update_background_cache()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_background_cache()
+
+    def _update_background_cache(self):
+        if self.size().isEmpty() or self.source_pixmap.isNull():
+            self._cached_scaled_background = QPixmap()
+            self._cached_background_size = QSize()
+            return
+        if self._cached_background_size == self.size() and not self._cached_scaled_background.isNull():
+            return
+        self._cached_scaled_background = self.source_pixmap.scaled(
+            self.size(),
+            Qt.IgnoreAspectRatio,
+            Qt.FastTransformation,
+        )
+        self._cached_background_size = QSize(self.size())
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -143,12 +164,10 @@ class ScreenshotOverlayWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        scaled_background = self.source_pixmap.scaled(
-            self.size(),
-            Qt.IgnoreAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        painter.drawPixmap(0, 0, scaled_background)
+        if self._cached_scaled_background.isNull() or self._cached_background_size != self.size():
+            self._update_background_cache()
+        if not self._cached_scaled_background.isNull():
+            painter.drawPixmap(0, 0, self._cached_scaled_background)
 
         painter.fillRect(self.rect(), QColor(15, 23, 42, 70))
 
@@ -386,11 +405,11 @@ class SleepSenseDashboard(QMainWindow):
         # Main Content Area with Scroll
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
         content_widget = QWidget()
-        content_widget.setMinimumWidth(2000)  
+        content_widget.setMinimumWidth(0)
         content_layout = QHBoxLayout(content_widget)
         content_layout.setContentsMargins(16, 16, 16, 16)
         content_layout.setSpacing(16)
@@ -428,6 +447,8 @@ class SleepSenseDashboard(QMainWindow):
 
         # Connect dashboard slider to chart navigation updates
         self.monitor_chart.time_position_updated.connect(self.update_slider_position)
+        self.monitor_chart.time_window_mode_changed.connect(self.update_time_navigation_controls)
+        self.monitor_chart.set_dashboard_controls(self.time_window_dropdown, None)
 
         # Keep the time-window control aligned with any one-hour external array data.
         for index in range(self.time_window_dropdown.count()):
@@ -444,8 +465,11 @@ class SleepSenseDashboard(QMainWindow):
         # Update button text to show initial count
         self.graph_dropdown_button.setText("Graphs (8/8) ▼")
         
-        # Connect dashboard controls to chart functionality
-        self.time_window_dropdown.currentIndexChanged.connect(self.on_time_window_changed)
+        # Use the user-activation signal so programmatic syncs do not retrigger refresh loops.
+        self.time_window_dropdown.activated[int].connect(self.monitor_chart.on_time_window_changed)
+
+        # Keep the slider controls in sync with the current mode on startup.
+        self.update_time_navigation_controls(self.monitor_chart.is_all_psg_mode())
                 
         chart_layout.addWidget(self.monitor_chart)
         
@@ -466,6 +490,55 @@ class SleepSenseDashboard(QMainWindow):
         
         main_layout.setContentsMargins(0, 0, 0, 0)
         
+    def _create_event_nav_button(self, text, tooltip, callback, icon):
+        button = QPushButton(text)
+        button.setObjectName("eventNavButton")
+        button.setFixedHeight(22)
+        button.setFixedWidth(28)
+        button.setIcon(icon)
+        button.setIconSize(QSize(14, 14))
+        button.setToolTip(tooltip)
+        button.clicked.connect(callback)
+        button.setStyleSheet("""
+            QPushButton#eventNavButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #f0f9ff,
+                    stop: 1 #e0f2fe
+                );
+                border: 1px solid #3b82f6;
+                border-radius: 4px;
+                color: #1e40af;
+            }
+            QPushButton#eventNavButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #dbeafe,
+                    stop: 0.5 #bfdbfe,
+                    stop: 1 #93c5fd
+                );
+                border: 1px solid #2563eb;
+                color: #1e3a8a;
+            }
+            QPushButton#eventNavButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #93c5fd,
+                    stop: 0.5 #60a5fa,
+                    stop: 1 #3b82f6
+                );
+                border: 1px solid #1d4ed8;
+                color: #ffffff;
+            }
+            QPushButton#eventNavButton:disabled {
+                background: #f3f4f6;
+                border: 1px solid #d1d5db;
+                color: #9ca3af;
+            }
+        """)
+        return button
+
     def create_controls_container(self):
         """Create controls container with Time Window and Hidden Graphs"""
         controls_container = QFrame()
@@ -484,8 +557,8 @@ class SleepSenseDashboard(QMainWindow):
         controls_layout.setSpacing(8)
         
         # Time Window Dropdown
-        time_window_label = QLabel("Time Window:")
-        time_window_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        time_window_label = QLabel("TIME WINDOW")
+        time_window_label.setStyleSheet("font-size: 10px; color: #374151; font-weight: 800; letter-spacing: 1px;")
         controls_layout.addWidget(time_window_label)
         
         self.time_window_dropdown = QComboBox()
@@ -501,6 +574,8 @@ class SleepSenseDashboard(QMainWindow):
             ("2m", 120),
             ("5m", 300),
             ("10m", 600),
+            ("1h", 3600),
+            ("All PSG", -1),
         ]
         for label, value in time_windows:
             self.time_window_dropdown.addItem(label, value)
@@ -525,12 +600,12 @@ class SleepSenseDashboard(QMainWindow):
         controls_layout.addWidget(divider)
         
         # Graph Selection Dropdown
-        graphs_label = QLabel("Graphs:")
-        graphs_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        graphs_label = QLabel("GRAPHS")
+        graphs_label.setStyleSheet("font-size: 10px; color: #374151; font-weight: 800; letter-spacing: 1px;")
         controls_layout.addWidget(graphs_label)
         
         # Create dropdown button for graph selection
-        self.graph_dropdown_button = QPushButton("Select Graphs ▼")
+        self.graph_dropdown_button = QPushButton("Select Graphs v")
         self.graph_dropdown_button.setObjectName("graphDropdownButton")
         self.graph_dropdown_button.setFixedHeight(22)
         self.graph_dropdown_button.setMinimumWidth(100)
@@ -643,77 +718,46 @@ class SleepSenseDashboard(QMainWindow):
         controls_layout.addWidget(divider4)
 
         # Event Navigation Buttons
-        event_label = QLabel("Event Nav:")
-        event_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
+        event_label = QLabel("EVENT NAV")
+        event_label.setStyleSheet("font-size: 10px; color: #374151; font-weight: 800; letter-spacing: 1px;")
         controls_layout.addWidget(event_label)
 
-        EVENT_NAV_BUTTON_STYLE = """
-            QPushButton {
-                background-color: #f0f9ff;
-                border: 1px solid #3b82f6;
-                border-radius: 4px;
-                color: #1e40af;
-                font-size: 11px;
-                font-weight: 600;
-                padding: 4px 8px;
-            }
-            QPushButton:hover {
-                background-color: #dbeafe;
-                border: 1px solid #2563eb;
-                color: #1e3a8a;
-            }
-            QPushButton:pressed {
-                background-color: #3b82f6;
-                border: 1px solid #1d4ed8;
-                color: #ffffff;
-            }
-            QPushButton:disabled {
-                background-color: #f3f4f6;
-                border: 1px solid #d1d5db;
-                color: #9ca3af;
-            }
-        """
-
-        self.btn_first_event = QPushButton("⏮ First")
-        self.btn_first_event.setObjectName("eventNavButton")
-        self.btn_first_event.setFixedSize(75, 22)
-        self.btn_first_event.setFont(QFont("Helvetica", 10))
-        self.btn_first_event.setToolTip("Go to First Event")
-        self.btn_first_event.clicked.connect(self.navigate_to_first_event)
-        self.btn_first_event.setStyleSheet(EVENT_NAV_BUTTON_STYLE)
+        self.btn_first_event = self._create_event_nav_button(
+            text="",
+            tooltip="Go to First Event",
+            callback=self.navigate_to_first_event,
+            icon=self.style().standardIcon(QStyle.SP_MediaSkipBackward),
+        )
         controls_layout.addWidget(self.btn_first_event)
 
-        self.btn_prev_event = QPushButton("◀ Prev")
-        self.btn_prev_event.setObjectName("eventNavButton")
-        self.btn_prev_event.setFixedSize(70, 22)
-        self.btn_prev_event.setFont(QFont("Helvetica", 10))
-        self.btn_prev_event.setToolTip("Go to Previous Event")
-        self.btn_prev_event.clicked.connect(self.navigate_to_previous_event)
-        self.btn_prev_event.setStyleSheet(EVENT_NAV_BUTTON_STYLE)
+        self.btn_prev_event = self._create_event_nav_button(
+            text="",
+            tooltip="Go to Previous Event",
+            callback=self.navigate_to_previous_event,
+            icon=self.style().standardIcon(QStyle.SP_MediaSeekBackward),
+        )
         controls_layout.addWidget(self.btn_prev_event)
 
-        self.btn_next_event = QPushButton("Next ▶")
-        self.btn_next_event.setObjectName("eventNavButton")
-        self.btn_next_event.setFixedSize(70, 22)
-        self.btn_next_event.setFont(QFont("Helvetica", 10))
-        self.btn_next_event.setToolTip("Go to Next Event")
-        self.btn_next_event.clicked.connect(self.navigate_to_next_event)
-        self.btn_next_event.setStyleSheet(EVENT_NAV_BUTTON_STYLE)
+        self.btn_next_event = self._create_event_nav_button(
+            text="",
+            tooltip="Go to Next Event",
+            callback=self.navigate_to_next_event,
+            icon=self.style().standardIcon(QStyle.SP_MediaSeekForward),
+        )
         controls_layout.addWidget(self.btn_next_event)
 
-        self.btn_last_event = QPushButton("Last ⏭")
-        self.btn_last_event.setObjectName("eventNavButton")
-        self.btn_last_event.setFixedSize(75, 22)
-        self.btn_last_event.setFont(QFont("Helvetica", 10))
-        self.btn_last_event.setToolTip("Go to Last Event")
-        self.btn_last_event.clicked.connect(self.navigate_to_last_event)
-        self.btn_last_event.setStyleSheet(EVENT_NAV_BUTTON_STYLE)
+        self.btn_last_event = self._create_event_nav_button(
+            text="",
+            tooltip="Go to Last Event",
+            callback=self.navigate_to_last_event,
+            icon=self.style().standardIcon(QStyle.SP_MediaSkipForward),
+        )
         controls_layout.addWidget(self.btn_last_event)
 
         # Screenshot Button
         self.btn_screenshot = QPushButton("📷")
         self.btn_screenshot.setObjectName("screenshotButton")
-        self.btn_screenshot.setFixedSize(30, 22)
+        self.btn_screenshot.setFixedSize(35, 22)
         self.btn_screenshot.setToolTip("Take Screenshot")
         self.btn_screenshot.setStatusTip("Capture entire application window")
         self.btn_screenshot.clicked.connect(self.take_screenshot)
@@ -758,6 +802,29 @@ class SleepSenseDashboard(QMainWindow):
         controls_layout.addStretch()
         
         return controls_container
+
+    def _get_effective_window_seconds(self):
+        """Return the currently active visible window in seconds."""
+        if hasattr(self, "monitor_chart") and self.monitor_chart:
+            if hasattr(self.monitor_chart, "get_effective_time_window_seconds"):
+                return self.monitor_chart.get_effective_time_window_seconds()
+            value = getattr(self.monitor_chart, "current_time_window", 60)
+            try:
+                return max(1.0, float(value))
+            except Exception:
+                return 60.0
+        return 60.0
+
+    def update_time_navigation_controls(self, all_psg_mode):
+        """Enable or disable time navigation controls based on PSG mode."""
+        controls_enabled = not bool(all_psg_mode)
+
+        for widget_name in ("time_slider", "slider_left_btn", "slider_right_btn"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(controls_enabled)
+        if controls_enabled and hasattr(self, "time_slider"):
+            self.update_slider_position()
     
         
     def on_time_window_changed(self, index):
@@ -770,11 +837,6 @@ class SleepSenseDashboard(QMainWindow):
             # Update the chart's time window
             self.monitor_chart.set_time_window(seconds)
             print(f"Debug: Dashboard called set_time_window({seconds})")
-            
-            # Force immediate refresh of charts
-            if hasattr(self.monitor_chart, 'refresh_charts'):
-                self.monitor_chart.refresh_charts()
-                print(f"Debug: Dashboard forced refresh_charts() call")
     
         
     def show_graph_selection_menu(self):
@@ -823,7 +885,7 @@ class SleepSenseDashboard(QMainWindow):
                     font-weight: 500;
                 }
                 QCheckBox::indicator {
-                    width: 16px;
+                    width: 17px;
                     height: 16px;
                     border: 2px solid #d1d5db;
                     border-radius: 3px;
@@ -1037,7 +1099,7 @@ class SleepSenseDashboard(QMainWindow):
             }
         """)
         
-        self.time_slider.valueChanged.connect(self.on_slider_value_changed)
+        self.time_slider.valueChanged.connect(self.on_slider_changed)
         self.time_slider.sliderPressed.connect(self.on_slider_pressed)
         self.time_slider.sliderReleased.connect(self.on_slider_released)
         container_layout.addWidget(self.time_slider, stretch=1)  # Add stretch factor
@@ -1116,11 +1178,15 @@ class SleepSenseDashboard(QMainWindow):
         
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
+
+        if self.monitor_chart.is_all_psg_mode():
+            self.update_slider_position()
+            return
         
         max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
         if max_duration > 0:
             # Step size equals the current time window size
-            step_size = self.monitor_chart.current_time_window  
+            step_size = self._get_effective_window_seconds()
             
             # Move backward by step size
             self.monitor_chart.current_time_offset = max(0, self.monitor_chart.current_time_offset - step_size)
@@ -1134,61 +1200,67 @@ class SleepSenseDashboard(QMainWindow):
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
+
+        if self.monitor_chart.is_all_psg_mode():
+            self.update_slider_position()
+            return
         
         max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
         if max_duration > 0:
             # Step size equals the current time window size
-            step_size = self.monitor_chart.current_time_window  
-            max_offset = self.monitor_chart._get_playback_max_offset() if hasattr(self.monitor_chart, '_get_playback_max_offset') else max(0.0, max_duration - self.monitor_chart.current_time_window)
+            step_size = self._get_effective_window_seconds()
+            max_offset = self.monitor_chart._get_playback_max_offset() if hasattr(self.monitor_chart, '_get_playback_max_offset') else max(0.0, max_duration - self._get_effective_window_seconds())
             
             # Move forward by step size
             self.monitor_chart.current_time_offset = min(max_offset, self.monitor_chart.current_time_offset + step_size)
+            
+            #  FORCE VIEWBOX UPDATE AND PLOT REDRAW
+            for i in range(self.monitor_chart.charts_layout.count()):
+                container = self.monitor_chart.charts_layout.itemAt(i).widget()
+                if hasattr(container, 'plot_widget'):
+                    pw = container.plot_widget
+                    
+                    # Force X-axis range update
+                    start = 0
+                    end = self._get_effective_window_seconds()
+                    pw.setXRange(start, end, padding=0)
+                    print(f"Updated ViewBox range to {start} → {end} for {pw.chart_name}")
+            
+            #  DELAYED OVERLAY RENDER (IMPORTANT)
+            if not self.monitor_chart.is_all_psg_mode():
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(0, self.monitor_chart.render_dynamic_selections)
+            
             self.monitor_chart.refresh_charts()
             self.update_slider_position()
+            
             print(f"Dashboard slider forward to: {self.monitor_chart.current_time_offset:.1f}s (step: {step_size:.1f}s)")
     
-    def on_slider_value_changed(self, value):
-        """Update slider label during thumb movement without redrawing charts."""
-        self.slider_is_being_dragged = True
-        max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
-        if max_duration <= self.monitor_chart.current_time_window:
-            return
-
-        slider_progress = value / 100.0
-        max_offset = max_duration - self.monitor_chart.current_time_window
-        temp_offset = slider_progress * max_offset
-
-        def format_time(seconds):
-            hours = int(seconds // 3600)
-            minutes = int((seconds % 3600) // 60)
-            seconds = int(seconds % 60)
-            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-        visible_end = min(temp_offset + self.monitor_chart.current_time_window, max_duration)
-        displayed_time = max_duration if visible_end >= max_duration else temp_offset
-        self.slider_time_label.setText(format_time(displayed_time))
-
-    def on_slider_pressed(self):
-        """Mark slider drag start so auto updates do not override manual seeking."""
-        self.slider_is_being_dragged = True
-
-    def on_slider_released(self):
-        """Refresh charts after slider thumb is released."""
-        self.slider_is_being_dragged = False
-        value = self.time_slider.value()
+    def on_slider_changed(self, value):
+        """Handle slider value change"""
+        print(f"DEBUG: on_slider_changed called with value={value}, current_event_index={self.current_event_index}")
+        
         max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
         if max_duration > 0:
+            if self.monitor_chart.is_all_psg_mode():
+                self.update_slider_position()
+                if not self.all_events:
+                    self.all_events = self.get_all_events_sorted()
+                self.update_event_navigation_buttons()
+                return
+
             slider_progress = value / 100.0
             # Normal case: there is room to slide full windows across the recording
-            if max_duration > self.monitor_chart.current_time_window:
-                max_offset = max_duration - self.monitor_chart.current_time_window
+            window_seconds = self._get_effective_window_seconds()
+            if max_duration > window_seconds:
+                max_offset = max_duration - window_seconds
                 self.monitor_chart.current_time_offset = slider_progress * max_offset
             else:
                 # Edge case: recording shorter than (or equal to) visible window.
                 # Instead of forcing offset to 0, center the visible window around
                 # the selected relative position so the user sees the area they chose.
                 center_time = slider_progress * max_duration
-                half_window = float(self.monitor_chart.current_time_window) / 2.0
+                half_window = float(window_seconds) / 2.0
                 desired_offset = max(0.0, center_time - half_window)
                 # Ensure offset does not exceed the logical maximum (may be 0)
                 self.monitor_chart.current_time_offset = min(max(0.0, desired_offset), max(0.0, max_duration - 0.0001))
@@ -1215,7 +1287,18 @@ class SleepSenseDashboard(QMainWindow):
             self.all_events = self.get_all_events_sorted()
             self.update_event_navigation_buttons()
             print(f"Dashboard slider released at: {value}% (time: {self.monitor_chart.current_time_offset:.1f}s)")
-    
+
+    def on_slider_pressed(self):
+        """Handle slider press event."""
+        self.slider_is_being_dragged = True
+        print("DEBUG: on_slider_pressed called")
+
+    def on_slider_released(self):
+        """Handle slider release event."""
+        self.slider_is_being_dragged = False
+        print("DEBUG: on_slider_released called")
+        self.update_slider_position()
+
     def update_slider_position(self):
         """Update slider position based on current time offset"""
         if getattr(self, 'slider_is_being_dragged', False):
@@ -1224,8 +1307,9 @@ class SleepSenseDashboard(QMainWindow):
         if self.time_slider and max_duration > 0:
             
             # Calculate slider value (0-100) based on current position
-            if max_duration > self.monitor_chart.current_time_window:
-                max_offset = max_duration - self.monitor_chart.current_time_window
+            window_seconds = self._get_effective_window_seconds()
+            if max_duration > window_seconds:
+                max_offset = max_duration - window_seconds
                 slider_progress = self.monitor_chart.current_time_offset / max_offset
                 slider_value = int(slider_progress * 100)
                 slider_value = max(0, min(100, slider_value))  
@@ -1246,7 +1330,7 @@ class SleepSenseDashboard(QMainWindow):
 
             visible_end = min(
                 self.monitor_chart.current_time_offset
-                + self.monitor_chart.current_time_window,
+                + self._get_effective_window_seconds(),
                 max_duration,
             )
             displayed_time = (
@@ -1377,8 +1461,11 @@ class SleepSenseDashboard(QMainWindow):
         """Go to previous time window"""
         print("Previous button clicked")
         self.hide_extended_buttons()
+        if self.monitor_chart.is_all_psg_mode():
+            self.update_slider_position()
+            return
         if hasattr(self.monitor_chart, '_get_playback_max_duration') and self.monitor_chart._get_playback_max_duration() > 0:
-            step_size = self.monitor_chart.current_time_window
+            step_size = self._get_effective_window_seconds()
             self.monitor_chart.current_time_offset = max(0, self.monitor_chart.current_time_offset - step_size)
             self.monitor_chart.refresh_charts()
             self.update_slider_position()
@@ -1388,10 +1475,13 @@ class SleepSenseDashboard(QMainWindow):
         """Go to next time window"""
         print("Next button clicked")
         self.hide_extended_buttons()
+        if self.monitor_chart.is_all_psg_mode():
+            self.update_slider_position()
+            return
         max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
         if max_duration > 0:
-            step_size = self.monitor_chart.current_time_window
-            max_offset = self.monitor_chart._get_playback_max_offset() if hasattr(self.monitor_chart, '_get_playback_max_offset') else max(0.0, max_duration - self.monitor_chart.current_time_window)
+            step_size = self._get_effective_window_seconds()
+            max_offset = self.monitor_chart._get_playback_max_offset() if hasattr(self.monitor_chart, '_get_playback_max_offset') else max(0.0, max_duration - self._get_effective_window_seconds())
             self.monitor_chart.current_time_offset = min(max_offset, self.monitor_chart.current_time_offset + step_size)
             self.monitor_chart.refresh_charts()
             self.update_slider_position()
@@ -1472,21 +1562,14 @@ class SleepSenseDashboard(QMainWindow):
         
         # Generate the report and show in internal viewer
         try:
+            screenshot_paths = list(getattr(self, 'dashboard_screenshot_paths', []))
             pdf_path = generate_sleep_report(
-                patient_data=self.current_patient_data,
-                analysis_results=getattr(self.monitor_chart, "analysis_results", None),
-                dashboard_screenshot_path=self.dashboard_screenshot_paths
+                dashboard_screenshot_path=screenshot_paths if screenshot_paths else None
             )
             print("✅ Medical report generated successfully!")
             
             # Show PDF in internal viewer
-            self.pdf_viewer = PDFViewerWidget(
-                pdf_path,
-                self,
-                patient_data=self.current_patient_data,
-                analysis_results=getattr(self.monitor_chart, "analysis_results", None),
-                dashboard_screenshot_path=self.dashboard_screenshot_paths
-            )
+            self.pdf_viewer = PDFViewerWidget(pdf_path, self)
             self.pdf_viewer.exec_()
             
         except Exception as e:
@@ -1535,8 +1618,11 @@ class SleepSenseDashboard(QMainWindow):
         self.event_window.exec_()  # Modal dialog
     
     def take_screenshot(self):
-        """Capture a selected dashboard area and offer report actions."""
+        """Take a screenshot of the entire application"""
         try:
+            # Get the main window
+            from PyQt5.QtWidgets import QApplication
+            from PyQt5.QtGui import QPixmap, QScreen
             from datetime import datetime
             import tempfile
             
@@ -1769,6 +1855,12 @@ class SleepSenseDashboard(QMainWindow):
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
+
+        if self.monitor_chart.is_all_psg_mode():
+            if not self.all_events:
+                self.all_events = self.get_all_events_sorted()
+            self.update_event_navigation_buttons()
+            return
         
         # Refresh the event list to get current events
         self.all_events = self.get_all_events_sorted()
@@ -1779,7 +1871,7 @@ class SleepSenseDashboard(QMainWindow):
         
         # Get current viewport range
         viewport_start = self.monitor_chart.current_time_offset
-        viewport_end = viewport_start + self.monitor_chart.current_time_window
+        viewport_end = viewport_start + self._get_effective_window_seconds()
         
         # Find the first event that is OUTSIDE the current viewport (after viewport_end)
         next_event_index = -1
@@ -1801,6 +1893,13 @@ class SleepSenseDashboard(QMainWindow):
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
+
+        if self.monitor_chart.is_all_psg_mode():
+            if not self.all_events:
+                self.all_events = self.get_all_events_sorted()
+            self.current_event_index = 0
+            self.update_event_navigation_buttons()
+            return
         
         # Refresh the event list to get current events
         self.all_events = self.get_all_events_sorted()
@@ -1819,6 +1918,12 @@ class SleepSenseDashboard(QMainWindow):
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
+
+        if self.monitor_chart.is_all_psg_mode():
+            if not self.all_events:
+                self.all_events = self.get_all_events_sorted()
+            self.update_event_navigation_buttons()
+            return
         
         # Refresh the event list to get current events
         self.all_events = self.get_all_events_sorted()
@@ -1829,7 +1934,7 @@ class SleepSenseDashboard(QMainWindow):
         
         # Get current viewport range
         viewport_start = self.monitor_chart.current_time_offset
-        viewport_end = viewport_start + self.monitor_chart.current_time_window
+        viewport_end = viewport_start + self._get_effective_window_seconds()
         
         # Find the first event that is OUTSIDE the current viewport (before viewport_start)
         # Search in reverse order
@@ -1854,6 +1959,13 @@ class SleepSenseDashboard(QMainWindow):
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
 
+        if self.monitor_chart.is_all_psg_mode():
+            if not self.all_events:
+                self.all_events = self.get_all_events_sorted()
+            self.current_event_index = max(0, len(self.all_events) - 1)
+            self.update_event_navigation_buttons()
+            return
+
         self.all_events = self.get_all_events_sorted()
         if not self.all_events:
             print("No events found for navigation")
@@ -1874,7 +1986,7 @@ class SleepSenseDashboard(QMainWindow):
         event_time = event['start_time']
         
         # Calculate viewport window size (center the event)
-        window_size = self.monitor_chart.current_time_window
+        window_size = self._get_effective_window_seconds()
         # Position event at center of viewport (offset = event_time - window_size/2)
         requested_offset = max(0, event_time - window_size / 2)
         max_offset = self.monitor_chart._get_playback_max_offset() if hasattr(self.monitor_chart, '_get_playback_max_offset') else requested_offset
@@ -1882,9 +1994,9 @@ class SleepSenseDashboard(QMainWindow):
         
         # Update monitor chart time offset
         self.monitor_chart.current_time_offset = new_offset
-        
-        # Refresh all charts with new time position
-        self.monitor_chart.refresh_charts()
+        # Full PSG already shows the whole recording, so avoid expensive redraws.
+        if not self.monitor_chart.is_all_psg_mode():
+            self.monitor_chart.refresh_charts()
         
         # Sync time navigation slider
         self.update_slider_position()

@@ -21,7 +21,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QTextDocument
 from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
-from PyQt5.QtWebEngineWidgets import QWebEngineView
 
 
 class ButtonFunctions:
@@ -176,7 +175,6 @@ class ButtonFunctions:
                 font-weight: 500;
                 color: #374151;
                 min-width: 180px;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
             }
             QMenu::item {
                 background-color: transparent;
@@ -836,6 +834,8 @@ class ButtonFunctions:
     def _generate_pdf_from_html(self, html_content, output_path):
         """Generate PDF from HTML content using QWebEngineView"""
         try:
+            from PyQt5.QtWebEngineWidgets import QWebEngineView
+
             # Create a temporary web view to render HTML
             web_view = QWebEngineView()
             web_view.setHtml(html_content)
@@ -844,7 +844,7 @@ class ButtonFunctions:
             # In production, you'd use QWebEnginePage.loadFinished signal
             import time
             time.sleep(2)  # Give time for rendering
-            
+
             # Create printer
             printer = QPrinter(QPrinter.HighResolution)
             printer.setOutputFormat(QPrinter.PdfFormat)

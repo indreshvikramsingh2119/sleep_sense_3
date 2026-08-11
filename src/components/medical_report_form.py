@@ -7,7 +7,6 @@ from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog, QMessageBox
 from PyQt5.QtCore import Qt, QUrl, QTimer
-from PyQt5.QtWebEngineWidgets import QWebEngineView
 import json
 from pathlib import Path
 from datetime import datetime
@@ -110,6 +109,11 @@ def _load_latest_analysis_results():
         return {}
 
 
+def _get_report_logo_path():
+    logo_path = REPO_ROOT / "assets" / "images" / "dmk_logo.png"
+    return str(logo_path) if logo_path.exists() else None
+
+
 def _build_patient_information_rows(patient_data, styles):
     cell_style = styles["BodyText"].clone("PatientCellStyle")
     cell_style.fontName = "Helvetica"
@@ -148,16 +152,30 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
     page1_elements = []  # Elements to keep together on page 1
 
     # ---------------- HEADER CONTAINER ----------------
-    header_container = Table([[
+    logo_path = _get_report_logo_path()
+    logo_image = None
+    if logo_path:
+        try:
+            logo_image = Image(logo_path, width=90, height=60)
+        except Exception as error:
+            print(f"⚠️ Could not load report logo: {error}")
+
+    header_data = [[
+        logo_image if logo_image else "",
         Paragraph("<b>SLEEP TEST REPORT</b>", styles['Title'])
-    ]], colWidths=[500])
+    ]]
+
+    header_container = Table(header_data, colWidths=[100, 400])
     header_container.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,-1), colors.white),
         ('BORDER', (0,0), (-1,-1), 1, colors.black),
-        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('LEFTPADDING', (0,0), (-1,-1), 6),
+        ('RIGHTPADDING', (0,0), (-1,-1), 6),
         ('BOTTOMPADDING', (0,0), (-1,-1), 10),
         ('TOPPADDING', (0,0), (-1,-1), 0),
+        ('ALIGN', (0,0), (0,0), 'LEFT'),
+        ('ALIGN', (1,0), (1,0), 'CENTER'),
     ]))
     page1_elements.append(header_container)
     page1_elements.append(Spacer(1, 8))
@@ -283,7 +301,7 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
         red_w    = (25 / total) * width
 
         x = 0
-
+ 
         # Green (0-5)
         d.add(Rect(
             x, 20, green_w, height,
@@ -976,7 +994,8 @@ class PDFViewerWidget(QDialog):
         header_widget.setStyleSheet("background-color: #f8f8f8; border-bottom: 1px solid #ddd;")
         header_widget.setFixedHeight(45)
         
-        # Web view for PDF
+        # Web view for PDF, lazily imported to avoid QtWebEngine initialization at module import time
+        from PyQt5.QtWebEngineWidgets import QWebEngineView
         self.web_view = QWebEngineView()
         self.web_view.settings().setAttribute(self.web_view.settings().PluginsEnabled, True)
         self.web_view.settings().setAttribute(self.web_view.settings().PdfViewerEnabled, True)

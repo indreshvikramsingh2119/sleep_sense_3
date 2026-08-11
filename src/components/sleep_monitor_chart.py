@@ -48,6 +48,7 @@ SIGNAL_Y_RANGES = {
     for name, _color, _freq, _amp, _offset, y_min, y_max in ACTIVE_SIGNAL_CONFIGS
 }
 PLOTTED_SIGNAL_NAMES = set(ACTIVE_SIGNAL_NAMES)
+CHANNEL_COLORS = {name: color for name, color, *_rest in ACTIVE_SIGNAL_CONFIGS}
 AIRFLOW_DROP_MIN_DURATION_SEC = 2.0
 AIRFLOW_EVENT_MAX_DURATION_SEC = None
 AIRFLOW_BASELINE_MIN_OCCURRENCE = 30
@@ -84,6 +85,7 @@ class SleepMonitorChart(QWidget):
     """Sleep Monitoring Chart Widget"""
     raw_data_saved = pyqtSignal(str, str)  # file_path, timestamp_iso
     time_position_updated = pyqtSignal()  # Signal when time position changes
+    time_window_mode_changed = pyqtSignal(bool)  # True when All PSG mode is active
     apnea_events_updated = pyqtSignal(object)  # list[dict]
     
     def __init__(self, parent=None):
@@ -118,6 +120,7 @@ class SleepMonitorChart(QWidget):
         self.spo2_full_data = None  # Store full SpO2 data (time, spo2)
         self.psg_full_data = None  # Store full PSG data for all signals
         self.current_time_offset = 0  # Current starting time for window
+        self.all_psg_mode = False  # When True, render the entire recording in one view
         self.analysis_results = None
         self.analysis_json_path = None
         
@@ -202,13 +205,13 @@ class SleepMonitorChart(QWidget):
         chart_container.setObjectName("chartBackground")
         chart_layout = QVBoxLayout(chart_container)
         chart_layout.setContentsMargins(0, 0, 0, 0)
-        chart_layout.setSpacing(8)
+        chart_layout.setSpacing(4)
         
         # Time labels overlay
         time_overlay = QWidget()
-        time_overlay.setMinimumHeight(40)
+        time_overlay.setFixedHeight(8)
         time_layout = QHBoxLayout(time_overlay)
-        time_layout.setContentsMargins(16, 8, 16, 8)
+        time_layout.setContentsMargins(0, 0, 0, 0)
         
         # self.start_time_label = QLabel("Start: ----")
         # self.start_time_label.setObjectName("timeLabelStart")
@@ -222,8 +225,10 @@ class SleepMonitorChart(QWidget):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setObjectName("chartsScrollArea")
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         
         # Enable functional scrollbar with proper styling
         self.scroll_area.verticalScrollBar().setStyleSheet("""
@@ -235,7 +240,7 @@ class SleepMonitorChart(QWidget):
             }
             QScrollBar::handle:vertical {
                 background: #9ca3af;
-                min-height: 20px;
+                min-height: 24px;
                 border-radius: 6px;
                 border: 1px solid #6b7280;
             }
@@ -289,10 +294,10 @@ class SleepMonitorChart(QWidget):
         
         self.charts_widget = QWidget()
         self.charts_widget.setObjectName("chartsContainer")
-        self.charts_widget.setMinimumWidth(1500)  # Force minimum width to trigger horizontal scrollbar
+        self.charts_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.charts_layout = QVBoxLayout(self.charts_widget)
         self.charts_layout.setContentsMargins(0, 0, 0, 0)
-        self.charts_layout.setSpacing(8)
+        self.charts_layout.setSpacing(6)
         
         # Add resize event handler to update overlays when window is resized
         original_charts_resize = self.charts_widget.resizeEvent
@@ -306,8 +311,8 @@ class SleepMonitorChart(QWidget):
         # Add stretch items to help with centering
         self.top_spacer = QWidget()
         self.bottom_spacer = QWidget()
-        self.top_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.bottom_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.top_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.bottom_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         
         self.scroll_area.setWidget(self.charts_widget)
         chart_layout.addWidget(self.scroll_area, stretch=1)
@@ -418,22 +423,7 @@ class SleepMonitorChart(QWidget):
             # Get the value from dropdown item data
             seconds = dropdown.itemData(index)
             print(f"Debug: on_time_window_changed called with index {index}, seconds {seconds}")
-            old_time_window = self.current_time_window
-            self.current_time_window = seconds
-            
-            # Only reset time offset if this is the first time window change or if charts don't exist yet
-            if self.charts_layout.count() == 0:
-                self.current_time_offset = 0
-                print(f"Debug: First time window setup, calling update_charts_for_time_window")
-                self.update_charts_for_time_window(seconds)
-            else:
-                # Charts already exist, just refresh them with new time window
-                print(f"Debug: Charts exist, calling refresh_charts with new time window")
-                self.refresh_charts()
-            
-            self.restore_all_selections()
-            self.update_time_position_label()
-            print(f"Time window changed from {old_time_window}s to {seconds}s (playing: {self.is_playing})")
+            self.set_time_window(seconds)
 
     def _get_playback_sample_count(self):
         """Return sample count from the loaded timeline, regardless of signal source."""
@@ -465,6 +455,21 @@ class SleepMonitorChart(QWidget):
         if max_duration <= 0:
             return 0.0
         return max(0.0, max_duration - float(self.current_time_window))
+
+    def is_all_psg_mode(self):
+        """Return True when the chart is showing the full PSG recording."""
+        return bool(getattr(self, "all_psg_mode", False))
+
+    def get_effective_time_window_seconds(self):
+        """Return a positive visible window size for plotting and navigation."""
+        if self.is_all_psg_mode() or float(self.current_time_window) <= 0:
+            max_duration = self._get_playback_max_duration()
+            if max_duration > 0:
+                return max(1.0, float(max_duration))
+        try:
+            return max(1.0, float(self.current_time_window))
+        except Exception:
+            return 60.0
     
     def navigate_backward(self):
         """Navigate backward in time"""
@@ -571,16 +576,30 @@ class SleepMonitorChart(QWidget):
         else:
             self.start_playback()
     
-    def change_playback_speed(self, speed_text):
-        """Change playback speed from dropdown"""
+    def change_playback_speed(self, speed_value):
+        """Change playback speed from the slider or a legacy text value."""
         speed_map = {
             "0.5x": 0.5,
             "1.0x": 1.0,
             "2.0x": 2.0,
-            "4.0x": 4.0
+            "4.0x": 4.0,
         }
-        self.playback_speed = speed_map.get(speed_text, 1.0)
-        print(f"🎬 Playback speed changed to {speed_text} ({self.playback_speed}x)")
+
+        if isinstance(speed_value, (int, float)):
+            self.playback_speed = float(speed_value) / 2.0
+        else:
+            self.playback_speed = speed_map.get(str(speed_value), 1.0)
+            if hasattr(self, "slider_speed"):
+                target_value = int(round(self.playback_speed * 2.0))
+                if self.slider_speed.value() != target_value:
+                    self.slider_speed.blockSignals(True)
+                    self.slider_speed.setValue(target_value)
+                    self.slider_speed.blockSignals(False)
+
+        if hasattr(self, "lbl_speed_val"):
+            self.lbl_speed_val.setText(f"{self.playback_speed:.1f}x")
+
+        print(f"?? Playback speed changed to {self.playback_speed}x")
     
     def update_time_position_label(self):
         """Show the visible time range and the complete recording duration."""
@@ -607,95 +626,98 @@ class SleepMonitorChart(QWidget):
     
     def refresh_charts_minimal(self):
         """Refresh charts during playback without overlay rendering to prevent crashes"""
-        print(f"Debug: refresh_charts_minimal called with time_window={self.current_time_window}s, offset={self.current_time_offset}s")
+        window_seconds = self.get_effective_time_window_seconds()
+        print(f"Debug: refresh_charts_minimal called with time_window={window_seconds}s, offset={self.current_time_offset}s")
         
         for i in range(self.charts_layout.count()):
             container = self.charts_layout.itemAt(i).widget()
             if container and hasattr(container, 'plot_widget'):
                 plot_widget = container.plot_widget
                 chart_name = plot_widget.chart_name
+                container.setVisible(True)
                 
                 # Update time window limits on CustomViewBox to fixed range
                 vb = plot_widget.getViewBox()
                 if hasattr(vb, 'set_time_window_limits'):
-                    vb.set_time_window_limits(0, self.current_time_window)
-                    print(f"Debug: ViewBox limits set to 0 → {self.current_time_window}, offset={self.current_time_offset}")
+                    vb.set_time_window_limits(0, window_seconds)
+                    print(f"Debug: ViewBox limits set to 0 → {window_seconds}, offset={self.current_time_offset}")
                 
                 # Force X-axis range to be fixed (prevent any sliding)
-                plot_widget.setXRange(0, self.current_time_window, padding=0)
+                plot_widget.setXRange(0, window_seconds, padding=0)
                 
                 # Update bottom axis to show correct time ticks for new window
                 bottom_axis = plot_widget.getAxis('bottom')
-                bottom_axis.setRange(0, self.current_time_window)
+                bottom_axis.setRange(0, window_seconds)
                 
                 # Double-enforce X-axis range to prevent any sliding
                 vb = plot_widget.getViewBox()
                 if hasattr(vb, 'setLimits'):
-                    vb.setLimits(xMin=0, xMax=self.current_time_window, 
+                    vb.setLimits(xMin=0, xMax=window_seconds, 
                                 yMin=None, yMax=None)
     
     def refresh_charts(self):
-        """Refresh all charts with current time window and offset"""
-        print(f"Debug: refresh_charts called with time_window={self.current_time_window}s, offset={self.current_time_offset}s")
-        
-        for i in range(self.charts_layout.count()):
-            container = self.charts_layout.itemAt(i).widget()
-            if container and hasattr(container, 'plot_widget'):
+        """Refresh all charts with current time window and offset."""
+        window_seconds = self.get_effective_time_window_seconds()
+        print(f"Debug: refresh_charts called with time_window={window_seconds}s, offset={self.current_time_offset}s")
+
+        self.setUpdatesEnabled(False)
+        try:
+            for i in range(self.charts_layout.count()):
+                container = self.charts_layout.itemAt(i).widget()
+                if not (container and hasattr(container, 'plot_widget')):
+                    continue
+
                 plot_widget = container.plot_widget
                 chart_name = plot_widget.chart_name
-                
-                # Update time window limits on CustomViewBox to fixed range
+
                 vb = plot_widget.getViewBox()
                 if hasattr(vb, 'set_time_window_limits'):
-                    vb.set_time_window_limits(0, self.current_time_window)
-                    print(f"Debug: ViewBox limits set to 0 → {self.current_time_window}, offset={self.current_time_offset}")
-                
-                # Force X-axis range to be fixed (prevent any sliding)
-                plot_widget.setXRange(0, self.current_time_window, padding=0)
-                
-                # Update bottom axis to show correct time ticks for new window
-                bottom_axis = plot_widget.getAxis('bottom')
-                bottom_axis.setRange(0, self.current_time_window)
-                
-                # Double-enforce the X-axis range to prevent any sliding
-                vb = plot_widget.getViewBox()
-                if hasattr(vb, 'setRange'):
-                    try:
-                        # Force the exact range with no padding
-                        vb.setRange(x=[0, self.current_time_window], padding=0)
-                    except:
-                        # Fallback method
-                        plot_widget.setXRange(0, self.current_time_window, padding=0)
-                
-                # Store reference for enforcement timer
-                plot_widget.fixed_range = [0, self.current_time_window]
-                
+                    vb.set_time_window_limits(0, window_seconds)
+                    print(f"Debug: ViewBox limits set to 0 -> {window_seconds}, offset={self.current_time_offset}")
+
                 # Store current Y-axis range to preserve zoom settings
                 if not hasattr(plot_widget, 'zoom_y_range'):
                     plot_widget.zoom_y_range = None
 
                 self.remove_stale_plot_curves(plot_widget)
-                
-                # Update data for each chart
-                if chart_name.strip() == "SpO2":
-                    x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
-                    if len(x) > 0 and len(y) > 0:
-                        # Clear the previous line before updating to avoid stale artifacts.
-                        try:
-                            plot_widget.plot_curve.setData([], [])
-                        except Exception:
-                            pass
 
+                if not self.is_all_psg_mode():
+                    plot_widget.setXRange(0, window_seconds, padding=0)
+                    bottom_axis = plot_widget.getAxis('bottom')
+                    bottom_axis.setRange(0, window_seconds)
+
+                    if hasattr(vb, 'setRange'):
+                        try:
+                            # Force the exact range with no padding
+                            vb.setRange(x=[0, window_seconds], padding=0)
+                        except Exception:
+                            plot_widget.setXRange(0, window_seconds, padding=0)
+
+                    plot_widget.fixed_range = [0, window_seconds]
+
+                if chart_name.strip() == "SpO2":
+                    x, y = self.get_spo2_data_for_window(window_seconds, self.current_time_offset)
+                    if len(x) > 0 and len(y) > 0:
                         # Update normal line plot
                         plot_widget.plot_curve.setData(x, y, connect='finite')
                         # Ensure no fill for SpO2 graph
                         plot_widget.plot_curve.opts['fill'] = None
-                        
-                        # Force redraw on the plot widget
-                        plot_widget.repaint()
-                        plot_widget.getViewBox().update()
-                        
-                        # Check if custom axis properties are set, if yes, use them instead of dynamic adjustment
+
+                        if self.is_all_psg_mode():
+                            finite_x = x[np.isfinite(x)] if len(x) else np.array([])
+                            plot_end = float(finite_x[-1]) if len(finite_x) > 0 else float(window_seconds)
+                            plot_widget.setXRange(0, plot_end, padding=0)
+                            bottom_axis = plot_widget.getAxis('bottom')
+                            bottom_axis.setRange(0, plot_end)
+                            if hasattr(vb, 'set_time_window_limits'):
+                                vb.set_time_window_limits(0, plot_end)
+                            if hasattr(vb, 'setRange'):
+                                try:
+                                    vb.setRange(x=[0, plot_end], padding=0)
+                                except Exception:
+                                    plot_widget.setXRange(0, plot_end, padding=0)
+                            plot_widget.fixed_range = [0, plot_end]
+
                         if hasattr(plot_widget, 'axis_properties'):
                             properties = plot_widget.axis_properties
                             low_value = properties.get('low_value', 35.0)
@@ -715,17 +737,16 @@ class SleepMonitorChart(QWidget):
                             else:
                                 # Use fixed medical range so the trace does not jump between windows.
                                 new_y_min, new_y_max = 60, 100
-                            
+
                             try:
                                 plot_widget.setYRange(new_y_min, new_y_max)
                             except TypeError:
                                 # Try alternative method for older pyqtgraph versions
                                 plot_widget.setRange(yRange=[new_y_min, new_y_max])
-                        
-                        # Handle value labels for SpO2 (only in 10s-30s time window)
-                        if 10 <= self.current_time_window <= 30:
+
+                        if 10 <= window_seconds <= 30:
                             # Always update value labels dynamically for real-time navigation
-                            print(f"Creating/Updating SpO2 value labels for {self.current_time_window}s time window")
+                            print(f"Creating/Updating SpO2 value labels for {window_seconds}s time window")
                             self.create_spo2_markers_and_labels(plot_widget, x, y)
                             print(f"Updated SpO2 value labels with {len(x)} points for time offset {self.current_time_offset}s")
                         else:
@@ -734,31 +755,32 @@ class SleepMonitorChart(QWidget):
                                 for label in plot_widget.value_labels:
                                     plot_widget.removeItem(label)
                                 plot_widget.value_labels = []
-                            print(f"Removed SpO2 value labels for {self.current_time_window}s time window")
+                            print(f"Removed SpO2 value labels for {window_seconds}s time window")
                     else:
                         plot_widget.plot_curve.setData([], [])
                 else:
-                    # Try to use real PSG data first
-                    x, y = self.get_signal_data_for_window(chart_name, self.current_time_window, self.current_time_offset)
+                    x, y = self.get_signal_data_for_window(chart_name, window_seconds, self.current_time_offset)
                     
                     if len(x) > 0 and len(y) > 0:
-                        # Clear the previous trace before updating to avoid stale artifacts.
-                        try:
-                            plot_widget.plot_curve.setData([], [])
-                        except Exception:
-                            pass
-
+                        if self.is_all_psg_mode():
+                            finite_x = x[np.isfinite(x)] if len(x) else np.array([])
+                            plot_end = float(finite_x[-1]) if len(finite_x) > 0 else float(window_seconds)
+                            plot_widget.setXRange(0, plot_end, padding=0)
+                            bottom_axis = plot_widget.getAxis('bottom')
+                            bottom_axis.setRange(0, plot_end)
+                            if hasattr(vb, 'set_time_window_limits'):
+                                vb.set_time_window_limits(0, plot_end)
+                            if hasattr(vb, 'setRange'):
+                                try:
+                                    vb.setRange(x=[0, plot_end], padding=0)
+                                except Exception:
+                                    plot_widget.setXRange(0, plot_end, padding=0)
+                            plot_widget.fixed_range = [0, plot_end]
                         # Use real data from CSV
                         plot_widget.plot_curve.setData(x, y, connect='finite')
-                        plot_widget.repaint()
-                        plot_widget.getViewBox().update()
                         print(f"Updated {chart_name} with real data: {len(x)} points")
                     else:
-                        try:
-                            plot_widget.plot_curve.setData([], [])
-                        except Exception:
-                            pass
-                        plot_widget.repaint()
+                        plot_widget.plot_curve.setData([], [])
                         print(f"Left {chart_name} blank because no active signal data is mapped")
                     
                     # Apply custom axis properties if they exist
@@ -785,13 +807,12 @@ class SleepMonitorChart(QWidget):
                             y,
                             detection_y_data=detection_y,
                         )
-        
-                
-        # Render dynamic selections for current time window
-        self.render_dynamic_selections()
-        
-        # Update apnea events display for current time window
-        self.update_apnea_events_display()
+
+            self.render_dynamic_selections()
+            self.update_apnea_events_display()
+        finally:
+            self.setUpdatesEnabled(True)
+            self.update()
 
     def remove_stale_plot_curves(self, plot_widget):
         """Keep only the primary signal curve so refreshes cannot leave duplicate traces."""
@@ -807,8 +828,14 @@ class SleepMonitorChart(QWidget):
     def set_time_window(self, seconds):
         """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
         print(f"🔍 DEBUG: set_time_window({seconds}) called in sleep_monitor_chart.py")
-        # Update current_time_window variable
-        self.current_time_window = seconds
+        # Normalize "All PSG" into a real duration so the plot never receives a negative range.
+        self.all_psg_mode = float(seconds) <= 0 if seconds is not None else False
+        if self.all_psg_mode:
+            effective_window = self._get_playback_max_duration()
+            self.current_time_window = max(1.0, float(effective_window) if effective_window > 0 else 60.0)
+            self.current_time_offset = 0
+        else:
+            self.current_time_window = seconds
         
         # Use dashboard controls if available, otherwise use local controls
         dropdown = getattr(self, 'dashboard_time_window_dropdown', None) or getattr(self, 'time_window_dropdown', None)
@@ -834,6 +861,8 @@ class SleepMonitorChart(QWidget):
             else:
                 print(f"Debug: No charts exist, calling update_charts_for_time_window instead")
                 self.update_charts_for_time_window(seconds)
+
+            self.time_window_mode_changed.emit(self.is_all_psg_mode())
             
             print(f"Time window set to: {seconds} seconds")
 
@@ -873,149 +902,109 @@ class SleepMonitorChart(QWidget):
         
             
     def create_status_bar(self):
-        """Create bottom status bar with professional playback controls"""
+        """Create bottom playback bar with sectioned controls."""
         frame = QFrame()
         frame.setObjectName("statusBar")
-        frame.setMinimumHeight(44)
-        
+        frame.setMinimumHeight(56)
+
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(20, 0, 20, 0)
-        layout.setSpacing(15)
-        
-        # Playback Controls Container - Professional styling like dashboard
+        layout.setContentsMargins(0, 4, 16, 4)
+        layout.setSpacing(0)
+
         controls_container = QFrame()
         controls_container.setObjectName("playbackControlsContainer")
+        controls_container.setMinimumHeight(44)
+        controls_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         controls_container.setStyleSheet("""
             QFrame#playbackControlsContainer {
                 background-color: #ffffff;
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                padding: 4px;
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                padding: 2px;
             }
         """)
-        
+
         controls_layout = QHBoxLayout(controls_container)
-        controls_layout.setContentsMargins(8, 4, 8, 4)
-        controls_layout.setSpacing(8)
-        
-        
-        # Play/Pause Button - Dashboard style
-        self.play_pause_btn = QPushButton("▶ Play")
-        self.play_pause_btn.setObjectName("playbackPlayButton")
-        self.play_pause_btn.clicked.connect(self.toggle_playback)
-        self.play_pause_btn.setFixedHeight(24)
-        self.play_pause_btn.setMinimumWidth(70)
-        self.play_pause_btn.setStyleSheet("""
-            QPushButton#playbackPlayButton {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #3b82f6, stop: 1 #2563eb
-                );
-                color: white;
-                border: 1px solid #1d4ed8;
-                border-radius: 4px;
-                font-size: 11px;
-                font-weight: 600;
-                padding: 4px 8px;
-            }
-            QPushButton#playbackPlayButton:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #2563eb, stop: 1 #1d4ed8
-                );
-                border: 1px solid #1e40af;
-            }
-            QPushButton#playbackPlayButton:pressed {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #1d4ed8, stop: 1 #1e40af
-                );
-            }
-        """)
-        
-        # Time Label - Dashboard style
-        time_label = QLabel("Position:")
-        time_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
-        controls_layout.addWidget(time_label)
-        
-        # Time Position Display - Clear professional display
+        controls_layout.setContentsMargins(8, 3, 8, 3)
+        controls_layout.setSpacing(0)
+        controls_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        section_title_style = "font-size: 10px; color: #374151; font-weight: 700; letter-spacing: 1px;"
+
+        self.lbl_pos_title = QLabel("POSITION")
+        self.lbl_pos_title.setStyleSheet(section_title_style)
+        controls_layout.addWidget(self.lbl_pos_title)
+        controls_layout.addSpacing(10)
+
         self.time_position_label = QLabel("00:00:00")
         self.time_position_label.setObjectName("timePositionLabel")
-        self.time_position_label.setFixedHeight(22)
+        self.time_position_label.setFixedHeight(21)
         self.time_position_label.setFixedWidth(84)
         self.time_position_label.setStyleSheet("""
             QLabel#timePositionLabel {
-                background-color: #f0f9ff;
-                color: #1e40af;
-                border: 1px solid #93c5fd;
-                border-radius: 4px;
-                padding: 2px 8px;
-                font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
-                font-weight: 600;
-                font-size: 11px;
+                background-color: #f8fafc;
+                color: #374151;
+                border: 1px solid #e2e8f0;
+                border-radius: 6px;
+                padding: 1px 5px;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-weight: 700;
+                font-size: 10px;
             }
         """)
-        
-        # Speed Label - Dashboard style
-        self.speed_label = QLabel("Speed:")
-        self.speed_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #374151;")
-        
-        # Speed Dropdown - Dashboard style
-        self.speed_combo = QComboBox()
-        self.speed_combo.setObjectName("speedCombo")
-        self.speed_combo.addItems(["0.5x", "1.0x", "2.0x", "4.0x"])
-        self.speed_combo.setCurrentIndex(1)  
-        self.speed_combo.currentTextChanged.connect(self.change_playback_speed)
-        self.speed_combo.setFixedHeight(22)
-        self.speed_combo.setMinimumWidth(80)  
-        self.speed_combo.setStyleSheet("""
-            QComboBox {
-                background: #ffffff;
-                color: #374151;
-                border: 1px solid #d1d5db;
-                border-radius: 4px;
+        controls_layout.addWidget(self.time_position_label)
+        controls_layout.addSpacing(10)
+
+        self.play_pause_btn = QPushButton(" Play")
+        self.play_pause_btn.setObjectName("playbackPlayButton")
+        self.play_pause_btn.clicked.connect(self.toggle_playback)
+        self.play_pause_btn.setFixedHeight(23)
+        self.play_pause_btn.setCursor(Qt.PointingHandCursor)
+        self.play_pause_btn.setStyleSheet("""
+            QPushButton#playbackPlayButton {
+                background-color: #2563eb;
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
                 padding: 2px 8px;
-                font-size: 11px;
+                font-size: 10px;
                 font-weight: 500;
                 min-width: 80px;
             }
-            QComboBox:hover {
-                border: 1px solid #9ca3af;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 3px solid transparent;
-                border-right: 3px solid transparent;
-                border-top: 3px solid #6b7280;
-                margin-right: 4px;
-            }
-            QComboBox QAbstractItemView {
-                background: #ffffff;
-                border: 1px solid #d1d5db;
-                selection-background-color: #eff6ff;
-                selection-color: #1e40af;
-                min-width: 80px;
-                padding: 4px 8px;
-                font-size: 11px;
-            }
-            QComboBox QAbstractItemView::item {
-                padding: 4px 12px;
-                min-height: 20px;
-                border: none;
-            }
-            QComboBox QAbstractItemView::item:selected {
-                background-color: #eff6ff;
-                color: #1e40af;
-            }
+            QPushButton#playbackPlayButton:hover { background-color: #1d4ed8; }
+            QPushButton#playbackPlayButton:pressed { background-color: #1e40af; }
         """)
         
         # Add all controls to container
         controls_layout.addWidget(self.play_pause_btn)
-        controls_layout.addWidget(self.time_position_label)
+        
+        # Speed selection label and dropdown
+        self.speed_label = QLabel("Speed")
+        self.speed_label.setFixedHeight(21)
+        self.speed_label.setStyleSheet("font-size: 10px; font-weight: 700; color: #374151;")
+        controls_layout.addWidget(self.speed_label)
+        
+        self.speed_combo = QComboBox()
+        self.speed_combo.setObjectName("speedCombo")
+        self.speed_combo.setFixedHeight(24)
+        self.speed_combo.addItems(["0.5x", "1.0x", "2.0x", "4.0x"])
+        self.speed_combo.setCurrentText("1.0x")
+        self.speed_combo.setCursor(Qt.PointingHandCursor)
+        self.speed_combo.setStyleSheet("""
+            QComboBox#speedCombo {
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+                padding: 2px 8px;
+                background-color: #f8fafc;
+                color: #111827;
+                font-size: 10px;
+            }
+            QComboBox#speedCombo::drop-down {
+                border: none;
+            }
+        """)
+        self.speed_combo.currentTextChanged.connect(self.change_playback_speed)
+        controls_layout.addWidget(self.speed_combo)
         
         # Add divider
         divider = QFrame()
@@ -1034,40 +1023,92 @@ class SleepMonitorChart(QWidget):
         controls_layout.addWidget(self.speed_label)
         controls_layout.addWidget(self.speed_combo)
 
-        divider_two = QFrame()
-        divider_two.setFrameShape(QFrame.VLine)
-        divider_two.setFrameShadow(QFrame.Sunken)
-        divider_two.setStyleSheet("""
-            QFrame {
-                background-color: #d1d5db;
-                color: #d1d5db;
-                max-width: 1px;
-                min-width: 1px;
+        controls_layout.addWidget(self._divider())
+
+        self.lbl_speed_title = QLabel("SPEED")
+        self.lbl_speed_title.setStyleSheet(section_title_style)
+        controls_layout.addWidget(self.lbl_speed_title)
+        controls_layout.addSpacing(10)
+
+        self.slider_speed = QSlider(Qt.Horizontal)
+        self.slider_speed.setObjectName("speedSlider")
+        self.slider_speed.setMinimum(1)
+        self.slider_speed.setMaximum(8)
+        self.slider_speed.setValue(2)
+        self.slider_speed.setFixedWidth(84)
+        self.slider_speed.setCursor(Qt.PointingHandCursor)
+        self.slider_speed.valueChanged.connect(self.change_playback_speed)
+        self.slider_speed.setStyleSheet("""
+            QSlider#speedSlider::groove:horizontal {
+                height: 4px;
+                background: #e2e8f0;
+                border-radius: 2px;
+            }
+            QSlider#speedSlider::sub-page:horizontal {
+                background: #2563eb;
+                border-radius: 2px;
+            }
+            QSlider#speedSlider::handle:horizontal {
+                width: 9px;
+                height: 9px;
+                margin: -3px 0;
+                background: #2563eb;
+                border-radius: 7px;
             }
         """)
-        controls_layout.addWidget(divider_two)
+        controls_layout.addWidget(self.slider_speed)
+        controls_layout.addSpacing(6)
+
+        self.lbl_speed_val = QLabel("1.0x")
+        self.lbl_speed_val.setFixedWidth(28)
+        self.lbl_speed_val.setStyleSheet("font-size: 13px; font-weight: 500; color: #374151;")
+        controls_layout.addWidget(self.lbl_speed_val)
+
+        controls_layout.addWidget(self._divider())
+
+        self.lbl_events_title = QLabel("EVENTS")
+        self.lbl_events_title.setStyleSheet(section_title_style)
+        controls_layout.addWidget(self.lbl_events_title)
+        controls_layout.addSpacing(10)
 
         self.detection_summary_label = QLabel("Events: --")
         self.detection_summary_label.setObjectName("detectionSummaryLabel")
         self.detection_summary_label.setStyleSheet("""
             QLabel#detectionSummaryLabel {
-                background-color: #f8fafc;
-                color: #1f2937;
-                border: 1px solid #d1d5db;
-                border-radius: 4px;
+                background-color: #fffbeb;
+                color: #92400e;
+                border: 1px solid #fcd34d;
+                border-radius: 6px;
                 padding: 2px 8px;
-                font-size: 11px;
-                font-weight: 600;
+                font-size: 10px;
+                font-weight: 500;
             }
         """)
         controls_layout.addWidget(self.detection_summary_label)
+        controls_layout.addStretch()
 
-        # Add controls container to main layout
-        layout.addWidget(controls_container)
-        layout.addStretch()
-
+        layout.addWidget(controls_container, 1)
         return frame
-    
+
+    def _divider(self):
+        """Create a thin vertical divider for the playback bar."""
+        line = QFrame()
+        line.setFrameShape(QFrame.VLine)
+        line.setFixedHeight(24)
+        line.setStyleSheet("""
+            QFrame {
+                background-color: #e2e8f0;
+                color: #e2e8f0;
+                max-width: 1px;
+                min-width: 1px;
+            }
+        """)
+        wrapper = QWidget()
+        wrapper_layout = QHBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(8, 0, 8, 0)
+        wrapper_layout.addWidget(line)
+        return wrapper
+
     def init_charts(self):
         """Initialize only the active respiratory charts."""
         pg.setConfigOption('background', 'w')
@@ -1281,6 +1322,76 @@ class SleepMonitorChart(QWidget):
         window_time = np.arange(expected_samples) / samples_per_second
         return window_time, window_signal
 
+    def _smart_downsample(self, time_data, signal_data, max_points=2500):
+        """
+        Aggressively downsample large time-series data using bin averages.
+
+        This keeps the overall shape of the signal while reducing the number of
+        points sent to pyqtgraph, which is the main bottleneck for large PSG
+        recordings shown in a single view.
+        """
+        time_data = np.asarray(time_data, dtype=float).reshape(-1)
+        signal_data = np.asarray(signal_data, dtype=float).reshape(-1)
+
+        sample_count = min(len(time_data), len(signal_data))
+        if sample_count <= max_points:
+            return time_data[:sample_count], signal_data[:sample_count]
+
+        time_data = time_data[:sample_count]
+        signal_data = signal_data[:sample_count]
+
+        bin_size = int(np.ceil(sample_count / float(max_points)))
+        if bin_size <= 1:
+            return time_data, signal_data
+
+        usable_count = (sample_count // bin_size) * bin_size
+        if usable_count < bin_size:
+            return time_data, signal_data
+
+        trimmed_time = time_data[:usable_count]
+        trimmed_signal = signal_data[:usable_count]
+
+        with np.errstate(invalid="ignore"):
+            binned_signal = np.nanmean(trimmed_signal.reshape(-1, bin_size), axis=1)
+            binned_time = np.nanmean(trimmed_time.reshape(-1, bin_size), axis=1)
+
+        if usable_count < sample_count:
+            remainder_time = time_data[usable_count:]
+            remainder_signal = signal_data[usable_count:]
+            with np.errstate(invalid="ignore"):
+                binned_time = np.concatenate([binned_time, [np.nanmean(remainder_time)]])
+                binned_signal = np.concatenate([binned_signal, [np.nanmean(remainder_signal)]])
+
+        print(
+            f"🔽 Downsampled plot data {sample_count} → {len(binned_signal)} "
+            f"(bin_size={bin_size}, max_points={max_points})"
+        )
+        return binned_time, binned_signal
+
+    def _prepare_plot_data_for_window(self, time_data, signal_data, time_window_seconds):
+        """Normalize, trim, and downsample window data before plotting."""
+        time_data = np.asarray(time_data, dtype=float).reshape(-1)
+        signal_data = np.asarray(signal_data, dtype=float).reshape(-1)
+
+        sample_count = min(len(time_data), len(signal_data))
+        if sample_count == 0:
+            return np.array([]), np.array([])
+
+        if len(time_data) != len(signal_data):
+            time_data = time_data[:sample_count]
+            signal_data = signal_data[:sample_count]
+
+        # Full-recording views are the expensive case; keep them compact enough
+        # to render smoothly even for multi-hour CSV files.
+        if self.is_all_psg_mode():
+            return self._smart_downsample(time_data, signal_data, max_points=2500)
+
+        # Normal windows stay untouched unless they become unusually large.
+        if sample_count > 5000 or float(time_window_seconds) >= 300:
+            return self._smart_downsample(time_data, signal_data, max_points=5000)
+
+        return time_data, signal_data
+
     def get_airflow_detection_data_for_window(self, time_window_seconds, time_offset=0):
         """Return the airflow window reserved for event detection."""
         return self._slice_signal_for_window(
@@ -1383,6 +1494,7 @@ class SleepMonitorChart(QWidget):
                 np.asarray(signals.get("spo2", []), dtype=float),
             )
             self.loaded_csv_path = str(csv_path)
+            self.all_psg_mode = False
             self.current_time_window = min(60, int(time_data[-1]) if len(time_data) else 60)
             self.auto_rule_ai_result = None
             self.last_detection_error = None
@@ -1448,14 +1560,22 @@ class SleepMonitorChart(QWidget):
             self.analysis_json_path = None
             return np.array([]), {}
 
-    def load_psg_data_and_detect(self, csv_path, padding_seconds: float = 30.0):
-        """Load uploaded PSG data, run rule-based detection, and jump to the first event."""
+    def load_psg_data_and_detect(
+        self,
+        csv_path,
+        padding_seconds: float = 30.0,
+        focus_first_event: bool = False,
+    ):
+        """Load uploaded PSG data, run rule-based detection, and optionally jump to the first event."""
         time_data, signals = self.load_psg_data(csv_path)
         if len(time_data) == 0 or not signals:
             return time_data, signals, False
 
         self.run_rule_ai_apnea_detection()
-        jumped = self.focus_on_first_detected_event(padding_seconds=padding_seconds)
+        jumped = False
+        if focus_first_event:
+            jumped = self.focus_on_first_detected_event(padding_seconds=padding_seconds)
+
         if not jumped:
             self.current_time_offset = 0
             self.refresh_charts()
@@ -1845,11 +1965,28 @@ class SleepMonitorChart(QWidget):
         else:
             full_signal = signals[signal_col]
 
-        window_time, window_signal = self._slice_signal_for_window(
-            full_signal,
-            time_window_seconds,
-            time_offset,
-        )
+        if self.is_all_psg_mode():
+            full_time = np.asarray(self.psg_full_data.get("time", []), dtype=float)
+            sample_count = min(len(full_time), len(full_signal))
+            if sample_count == 0:
+                return np.array([]), np.array([])
+            window_time, window_signal = self._smart_downsample(
+                full_time[:sample_count],
+                full_signal[:sample_count],
+                max_points=2500,
+            )
+        else:
+            window_time, window_signal = self._slice_signal_for_window(
+                full_signal,
+                time_window_seconds,
+                time_offset,
+            )
+
+            window_time, window_signal = self._prepare_plot_data_for_window(
+                window_time,
+                window_signal,
+                time_window_seconds,
+            )
 
         if len(window_signal) == 0:
             return np.array([]), np.array([])
@@ -1879,30 +2016,53 @@ class SleepMonitorChart(QWidget):
             return np.array([]), np.array([])
         
         full_time, full_spo2 = self.spo2_full_data
-        
-        # Keep every window endpoint-exclusive: 60s at 10Hz must be exactly 600 samples.
-        samples_per_second = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
-        expected_samples = int(round(time_window_seconds * samples_per_second))
-        start_sample = int(round(time_offset * samples_per_second))
-        end_sample = start_sample + expected_samples
-        
-        # Ensure we don't exceed data bounds
-        start_sample = max(0, start_sample)
-        end_sample = min(len(full_spo2), end_sample)
-        
-        # Extract the data for this window
-        window_spo2 = full_spo2[start_sample:end_sample]
-        
+
+        if self.is_all_psg_mode():
+            sample_count = min(len(full_time), len(full_spo2))
+            if sample_count == 0:
+                return np.array([]), np.array([])
+            expected_samples = sample_count
+            window_time, window_spo2 = self._smart_downsample(
+                np.asarray(full_time[:sample_count], dtype=float),
+                np.asarray(full_spo2[:sample_count], dtype=float),
+                max_points=2500,
+            )
+        else:
+            # Keep every window endpoint-exclusive: 60s at 10Hz must be exactly 600 samples.
+            samples_per_second = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
+            expected_samples = int(round(time_window_seconds * samples_per_second))
+            start_sample = int(round(time_offset * samples_per_second))
+            end_sample = start_sample + expected_samples
+
+            # Ensure we don't exceed data bounds
+            start_sample = max(0, start_sample)
+            end_sample = min(len(full_spo2), end_sample)
+
+            # Extract the data for this window
+            window_spo2 = full_spo2[start_sample:end_sample]
+
+            num_samples = len(window_spo2)
+            if num_samples == 0:
+                return np.array([]), np.array([])
+
+            # Calculate SpO2 statistics for this window
+            self.calculate_spo2_statistics(window_spo2)
+
+            # Generate time points: 0, 0.1, 0.2, ... up to time_window_seconds
+            samples_per_second = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
+            expected_samples = int(round(time_window_seconds * samples_per_second))
+            window_time = np.arange(num_samples) / samples_per_second
+
+            window_time, window_spo2 = self._prepare_plot_data_for_window(
+                window_time,
+                window_spo2,
+                time_window_seconds,
+            )
+
         num_samples = len(window_spo2)
         if num_samples == 0:
             return np.array([]), np.array([])
-        
-        # Generate time points: 0, 0.1, 0.2, ... up to time_window_seconds
-        window_time = np.arange(num_samples) / samples_per_second
-        
-        # Calculate SpO2 statistics for this window
-        self.calculate_spo2_statistics(window_spo2)
-        
+
         print(f"SpO2 window: {time_window_seconds}s, Samples: {num_samples}, Expected: {expected_samples}")
         
         return window_time, window_spo2
@@ -2136,6 +2296,10 @@ class SleepMonitorChart(QWidget):
         y_data = y_data[:point_count]
         detection_y_data = detection_y_data[:point_count]
         min_samples = max(1, int(round(min_duration_sec * fs)))
+        x_diffs = np.diff(x_data[np.isfinite(x_data)])
+        plot_step = float(np.nanmedian(x_diffs)) if len(x_diffs) > 0 else (1.0 / float(fs))
+        if not np.isfinite(plot_step) or plot_step <= 0:
+            plot_step = 1.0 / float(fs)
         baseline_airflow, _ = self.get_airflow_event_baseline(detection_y_data)
         threshold = baseline_airflow
 
@@ -2178,11 +2342,18 @@ class SleepMonitorChart(QWidget):
             if event_label == "NO_EVENT":
                 continue
 
-            start_time_abs = self.current_time_offset + (event_start / float(fs))
-            end_time_abs = min(
-                self.current_time_offset + (point_count / float(fs)),
-                self.current_time_offset + ((event_end + 1) / float(fs)),
-            )
+            if self.is_all_psg_mode():
+                start_time_abs = float(x_data[event_start])
+                end_time_abs = min(
+                    float(x_data[point_count - 1]),
+                    float(x_data[event_end]) + plot_step,
+                )
+            else:
+                start_time_abs = self.current_time_offset + (event_start / float(fs))
+                end_time_abs = min(
+                    self.current_time_offset + (point_count / float(fs)),
+                    self.current_time_offset + ((event_end + 1) / float(fs)),
+                )
             self.current_window_airflow_events.append({
                 "start_sec": start_time_abs,
                 "end_sec": end_time_abs,
@@ -2195,10 +2366,10 @@ class SleepMonitorChart(QWidget):
             })
 
             x1 = float(x_data[event_start])
-            x2 = float(x_data[event_end]) + (1.0 / float(fs))
+            x2 = float(x_data[event_end]) + plot_step
             x2 = min(x2, float(self.current_time_window))
             if x2 <= x1:
-                x2 = x1 + (1.0 / float(fs))
+                x2 = x1 + plot_step
 
             event_brush_map = {
                 "HSA": (22, 163, 74, 105),
@@ -2253,13 +2424,50 @@ class SleepMonitorChart(QWidget):
             'total_points': len(spo2_data)
         }
     
+    def _channel_label_stylesheet(self, name, color, hidden=False):
+        """Return a compact label stylesheet with a colored left border."""
+        border_color = "#9ca3af" if hidden else (color or CHANNEL_COLORS.get(name, "#888888"))
+        text_color = "#6b7280" if hidden else "#1e293b"
+        bg_start = "#f9fafb" if hidden else "#ffffff"
+        bg_mid = "#f8fafc" if hidden else "#f8fafc"
+        bg_end = "#eef2ff" if hidden else "#f1f5f9"
+        return f"""
+            QLabel#chartSideLabel {{
+                font-size: 10px;
+                font-weight: 700;
+                color: {text_color};
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 {bg_start},
+                    stop: 0.5 {bg_mid},
+                    stop: 1 {bg_end}
+                );
+                border: 1px solid #cbd5e1;
+                border-left: 4px solid {border_color};
+                border-radius: 6px;
+                padding: 5px 6px 5px 8px;
+                text-align: center;
+            }}
+            QLabel#chartSideLabel:hover {{
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff,
+                    stop: 0.5 #dbeafe,
+                    stop: 1 #bfdbfe
+                );
+                border: 1px solid #3b82f6;
+                border-left: 4px solid {border_color};
+                color: #1e40af;
+            }}
+        """
+
     def create_signal_chart(self, name, color, frequency, amplitude, offset, y_min=None, y_max=None):
         """Create a single signal trace chart with side label"""
         
         container = QWidget()
         container.setObjectName("signalChartContainer")
-        container.setMinimumHeight(120)  
-        container.setMaximumHeight(120)  
+        container.setMinimumHeight(118)
+        container.setMaximumHeight(118)
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
         # Apply professional double-shaded medical styling to container
@@ -2291,16 +2499,16 @@ class SleepMonitorChart(QWidget):
             }
         """)
         container_layout = QHBoxLayout(container)
-        container_layout.setContentsMargins(2, 2, 2, 2)  # Reduced padding to increase graph area
-        container_layout.setSpacing(4) # Reduced spacing between label and plot
+        container_layout.setContentsMargins(0, 0, 0, 0)  # Remove extra outer padding so plots start right under the card
+        container_layout.setSpacing(4)  # Keep rows tight for better axis readability
         
         # Side Label
         label_frame = QFrame()
-        label_frame.setFixedWidth(120) # Increased width to accommodate longer text
+        label_frame.setFixedWidth(130) # Increased width to accommodate longer text
         label_frame.setObjectName("labelFrame")
         # Apply professional styling to label frame
-        label_frame.setStyleSheet("""
-            QFrame#labelFrame {
+        label_frame.setStyleSheet(f"""
+            QFrame#labelFrame {{
                 background: qlineargradient(
                     x1: 0, y1: 0, x2: 1, y2: 0,
                     stop: 0 #f8fafc,
@@ -2310,10 +2518,11 @@ class SleepMonitorChart(QWidget):
                 border: 1px solid #e2e8f0;
                 border-radius: 6px;
                 margin: 2px;
-            }
+                border-left: 4px solid {CHANNEL_COLORS.get(name, color)};
+            }}
         """)
         label_layout = QVBoxLayout(label_frame)
-        label_layout.setContentsMargins(4, 2, 4, 2)
+        label_layout.setContentsMargins(6, 2, 6, 2)
         label_layout.setAlignment(Qt.AlignCenter)
         
         label = QLabel(name)
@@ -2322,33 +2531,7 @@ class SleepMonitorChart(QWidget):
         label.setAlignment(Qt.AlignCenter)
         # Make label clickable
         label.setCursor(Qt.PointingHandCursor)
-        label.setStyleSheet("""
-            QLabel#chartSideLabel {
-                font-size: 11px;
-                font-weight: 700;
-                color: #1e293b;
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #f8fafc,
-                    stop: 1 #f1f5f9
-                );
-                border: 1px solid #cbd5e1;
-                border-radius: 6px;
-                padding: 6px 4px;
-                text-align: center;
-            }
-            QLabel#chartSideLabel:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #dbeafe,
-                    stop: 1 #bfdbfe
-                );
-                border: 1px solid #3b82f6;
-                color: #1e40af;
-            }
-        """)
+        label.setStyleSheet(self._channel_label_stylesheet(name, color))
         # COMPLETELY REMOVE click event handler - labels should never hide graphs
         
         label_layout.addWidget(label)
@@ -2370,12 +2553,12 @@ class SleepMonitorChart(QWidget):
                 );
                 border: 1px solid #e2e8f0;
                 border-radius: 6px;
-                margin: 1px;
+                margin: 0px;
             }
         """)
         plot_container_layout = QVBoxLayout(plot_container)
         plot_container_layout.setContentsMargins(0, 0, 0, 0)
-        plot_container_layout.setSpacing(1)
+        plot_container_layout.setSpacing(0)
         
         # Zoom Controls
         zoom_frame = QFrame()
@@ -2395,8 +2578,8 @@ class SleepMonitorChart(QWidget):
             }
         """)
         zoom_layout = QHBoxLayout(zoom_frame)
-        zoom_layout.setContentsMargins(2, 1, 2, 1)
-        zoom_layout.setSpacing(3)
+        zoom_layout.setContentsMargins(3, 1, 3, 1)
+        zoom_layout.setSpacing(4)
         
         # Store original Y range for zoom calculations
         self.original_y_min = 0
@@ -2407,7 +2590,7 @@ class SleepMonitorChart(QWidget):
         # Zoom In button
         zoom_in_btn = QPushButton("+")
         zoom_in_btn.setObjectName("zoomButton")
-        zoom_in_btn.setFixedSize(28, 20)
+        zoom_in_btn.setFixedSize(30, 22)
         # Apply professional styling to zoom buttons
         zoom_in_btn.setStyleSheet("""
             QPushButton#zoomButton {
@@ -2420,7 +2603,7 @@ class SleepMonitorChart(QWidget):
                 border: 1px solid #cbd5e1;
                 border-radius: 3px;
                 color: #475569;
-                font-size: 12px;
+                font-size: 10px;
                 font-weight: 700;
                 text-align: center;
             }
@@ -2458,7 +2641,7 @@ class SleepMonitorChart(QWidget):
         # Zoom Out button
         zoom_out_btn = QPushButton("-")
         zoom_out_btn.setObjectName("zoomButton")
-        zoom_out_btn.setFixedSize(28, 20)
+        zoom_out_btn.setFixedSize(30, 22)
         # Apply professional styling to zoom buttons
         zoom_out_btn.setStyleSheet("""
             QPushButton#zoomButton {
@@ -2471,7 +2654,7 @@ class SleepMonitorChart(QWidget):
                 border: 1px solid #cbd5e1;
                 border-radius: 3px;
                 color: #475569;
-                font-size: 12px;
+                font-size: 10px;
                 font-weight: 700;
                 text-align: center;
             }
@@ -2509,7 +2692,7 @@ class SleepMonitorChart(QWidget):
         # Reset button
         reset_btn = QPushButton("R")
         reset_btn.setObjectName("zoomButton")
-        reset_btn.setFixedSize(28, 20)
+        reset_btn.setFixedSize(30, 22)
         # Apply professional styling to zoom buttons
         reset_btn.setStyleSheet("""
             QPushButton#zoomButton {
@@ -2522,7 +2705,7 @@ class SleepMonitorChart(QWidget):
                 border: 1px solid #cbd5e1;
                 border-radius: 3px;
                 color: #475569;
-                font-size: 12px;
+                font-size: 10px;
                 font-weight: 700;
                 text-align: center;
             }
@@ -2636,8 +2819,8 @@ class SleepMonitorChart(QWidget):
                 new_height = container.resize_start_height + delta_y
                 
                 # Set constraints
-                min_height = 120  # Original height, prevent shrinking below this
-                max_height = 400
+                min_height = 82  # Compact single-page height
+                max_height = 220
                 new_height = max(min_height, min(max_height, new_height))
                 
                 # Apply new height
@@ -2804,8 +2987,7 @@ class SleepMonitorChart(QWidget):
         # Set X-axis to show time values based on current time window
         bottom_axis = plot_widget.getAxis('bottom')
         bottom_axis.setStyle(showValues=True)  # Show time values
-        bottom_axis.setLabel('Time (s)', units='s')  # Add axis label
-        bottom_axis.setHeight(30)  # Ensure enough space for labels
+        bottom_axis.setHeight(20)  # Keep the axis compact so it hugs the bottom edge
         
         left_axis = plot_widget.getAxis('left')
         left_axis.setStyle(showValues=True)   # Show Y-axis values
@@ -2813,7 +2995,7 @@ class SleepMonitorChart(QWidget):
         # Reduce font size of axis tick labels
         from PyQt5.QtGui import QFont
         small_font = QFont()
-        small_font.setPointSize(8)  # Smaller font size for axis numbers
+        small_font.setPointSize(7)  # Compact tick labels with slightly better readability
         bottom_axis.setTickFont(small_font)  # X-axis numbers
         left_axis.setTickFont(small_font)    # Y-axis numbers
         
@@ -2822,6 +3004,18 @@ class SleepMonitorChart(QWidget):
         left_axis.setPen('k')    # Black color for visibility
         bottom_axis.setTextPen('k')  # Black text for visibility
         left_axis.setTextPen('k')    # Black text for visibility
+
+        # Remove any extra internal plot padding so the x-axis sits flush at the bottom
+        try:
+            plot_item = plot_widget.getPlotItem()
+            if hasattr(plot_item, 'layout') and plot_item.layout is not None:
+                plot_item.layout.setContentsMargins(0, 0, 0, 0)
+                if hasattr(plot_item.layout, 'setHorizontalSpacing'):
+                    plot_item.layout.setHorizontalSpacing(0)
+                if hasattr(plot_item.layout, 'setVerticalSpacing'):
+                    plot_item.layout.setVerticalSpacing(0)
+        except Exception:
+            pass
         
         # Set X-axis range to show time window from 0 to current_time_window
         plot_widget.setXRange(0, self.current_time_window)
@@ -2841,8 +3035,8 @@ class SleepMonitorChart(QWidget):
         plot_container.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
         zoom_frame.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
         
-        # Center the plot widget in its container
-        plot_container_layout.setAlignment(plot_widget, Qt.AlignCenter)
+        # Keep the plot anchored to the top so the signal begins immediately under the card
+        plot_container_layout.setAlignment(plot_widget, Qt.AlignTop)
         
         # Generate signal data
         if name.strip() == "SpO2":
@@ -2864,6 +3058,14 @@ class SleepMonitorChart(QWidget):
         # Plot all graphs as normal line plots (no step ladder, no fill)
         # Use connect='finite' so NaN gaps do not draw as vertical connector lines.
         plot_curve = plot_widget.plot(x, y, pen=pen, fill=None, connect='finite')
+        try:
+            plot_curve.setClipToView(True)
+        except Exception:
+            pass
+        try:
+            plot_curve.setDownsampling(auto=True, method="peak")
+        except Exception:
+            pass
 
         if name.strip() == "Airflow":
             airflow_y_min, airflow_y_max = self.get_signal_auto_axis_range(name.strip())
@@ -2969,17 +3171,17 @@ class SleepMonitorChart(QWidget):
                 border: 2px solid #3b82f6;
                 border-radius: 4px;
                 color: white;
-                font-size: 12px;
+                font-size: 10px;
                 font-weight: bold;
                 padding: 4px 8px;
                 text-align: center;
-                text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
             }
         """)
         selection_overlay.setVisible(False)
         
         # Store temporary overlay reference for preview only
         plot_widget.selection_overlay = selection_overlay
+        selection_overlay.mousePressEvent = lambda event, pw=plot_widget: self.reopen_pending_selection_menu(event, pw)
         
         plot_container_layout.addWidget(plot_widget)
         container_layout.addWidget(plot_container)
@@ -3019,7 +3221,7 @@ class SleepMonitorChart(QWidget):
         label.setText(f"{graph_name} (Hidden)")
         label.setStyleSheet("""
             QLabel#chartSideLabel {
-                font-size: 11px;
+                font-size: 10px;
                 font-weight: 700;
                 color: #6b7280;
                 background: qlineargradient(
@@ -3055,33 +3257,7 @@ class SleepMonitorChart(QWidget):
         label = container.findChild(QLabel, "chartSideLabel")
         if label:
             label.setText(graph_name)
-            label.setStyleSheet("""
-                QLabel#chartSideLabel {
-                    font-size: 11px;
-                    font-weight: 700;
-                    color: #1e293b;
-                    background: qlineargradient(
-                        x1: 0, y1: 0, x2: 0, y2: 1,
-                        stop: 0 #ffffff,
-                        stop: 0.5 #f8fafc,
-                        stop: 1 #f1f5f9
-                    );
-                    border: 1px solid #cbd5e1;
-                    border-radius: 6px;
-                    padding: 6px 4px;
-                    text-align: center;
-                }
-                QLabel#chartSideLabel:hover {
-                    background: qlineargradient(
-                        x1: 0, y1: 0, x2: 0, y2: 1,
-                        stop: 0 #ffffff,
-                        stop: 0.5 #dbeafe,
-                        stop: 1 #bfdbfe
-                    );
-                    border: 1px solid #3b82f6;
-                    color: #1e40af;
-                }
-            """)
+            label.setStyleSheet(self._channel_label_stylesheet(graph_name, graph_data.get("color", "#9ca3af"), hidden=True))
         
         # Remove from hidden graphs
         del self.hidden_graphs[graph_name]
@@ -3193,13 +3369,13 @@ class SleepMonitorChart(QWidget):
             plot_curve._is_hidden = False
             label.setStyleSheet("""
                 QLabel#chartSideLabel {
-                    font-size: 12px;
+                    font-size: 10px;
                     font-weight: bold;
                     color: #4b5563;
                     background-color: #f9fafb;
                     border: 1px solid #e5e7eb;
                     border-radius: 4px;
-                    padding: 6px;
+                    padding: 2px;
                 }
             """)
             print(f"Graph line '{chart_name}' shown")
@@ -3209,13 +3385,13 @@ class SleepMonitorChart(QWidget):
             plot_curve._is_hidden = True
             label.setStyleSheet("""
                 QLabel#chartSideLabel {
-                    font-size: 12px;
+                    font-size: 10px;
                     font-weight: bold;
                     color: #9ca3af;
                     background-color: #f8fafc;
                     border: 1px solid #d1d5db;
                     border-radius: 4px;
-                    padding: 6px;
+                    padding: 2px;
                 }
             """)
             print(f"Graph line '{chart_name}' hidden")
@@ -4045,7 +4221,7 @@ class SleepMonitorChart(QWidget):
                 border: 2px solid #3b82f6;
                 border-radius: 4px;
                 color: white;
-                font-size: 12px;
+                font-size: 10px;
                 font-weight: bold;
                 padding: 4px 6px;
                 text-align: center;
@@ -4128,7 +4304,6 @@ class SleepMonitorChart(QWidget):
                     font-weight: bold;
                     padding: 6px 10px;
                     text-align: center;
-                    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.7);
                 }
             """)
             
@@ -4149,8 +4324,9 @@ class SleepMonitorChart(QWidget):
             if current_label:
                 label_action = QAction(f"Applied: {current_label}", self)
                 label_action.setEnabled(False)  # Make it non-clickable info text
-                # Style it differently to show it's the current label
-                label_action.setStyleSheet("color: #2563eb; font-weight: bold;")
+                label_font = label_action.font()
+                label_font.setBold(True)
+                label_action.setFont(label_font)
                 menu.addAction(label_action)
                 menu.addSeparator()
             
@@ -4208,8 +4384,8 @@ class SleepMonitorChart(QWidget):
         
         # Clear selection if no label was applied (menu cancelled)
         if self.selection_active:
-            print("Menu cancelled - clearing selection")
-            self.clear_selection()
+            print("Menu dismissed - preserving pending selection")
+            self.preserve_pending_selection()
     
     def apply_selection_label(self, label_type):
         """Apply the selected label to the area"""
@@ -4445,11 +4621,17 @@ class SleepMonitorChart(QWidget):
     
     def enforce_fixed_ranges(self):
         """Continuously enforce fixed X-axis ranges on all charts"""
+        if self.is_all_psg_mode():
+            fixed_end = self._get_playback_max_duration()
+        else:
+            fixed_end = self.get_effective_time_window_seconds()
         for i in range(self.charts_layout.count()):
             container = self.charts_layout.itemAt(i).widget()
             if container and hasattr(container, 'plot_widget'):
                 plot_widget = container.plot_widget
                 if hasattr(plot_widget, 'fixed_range'):
+                    if self.is_all_psg_mode():
+                        plot_widget.fixed_range = [0, fixed_end]
                     # Force the X-axis range to be exactly what we want
                     try:
                         current_range = plot_widget.getViewBox().viewRange()
@@ -4620,7 +4802,7 @@ class SleepMonitorChart(QWidget):
                     border: 2px solid #3b82f6;
                     border-radius: 4px;
                     color: white;
-                    font-size: 12px;
+                    font-size: 10px;
                     font-weight: bold;
                     padding: 4px 6px;
                     text-align: center;
@@ -4634,6 +4816,41 @@ class SleepMonitorChart(QWidget):
         self.is_selecting = False
         print("Selection cleared")
     
+
+    def preserve_pending_selection(self):
+        """Keep the released selection visible so it does not disappear on menu dismiss."""
+        self.selection_active = False
+        self.is_selecting = False
+
+        if not self.current_selection_chart or not hasattr(self.current_selection_chart, "selection_overlay"):
+            return
+
+        overlay = self.current_selection_chart.selection_overlay
+        if self.selection_start and self.selection_end:
+            self.update_selection_overlay(self.selection_start, self.selection_end)
+        overlay.setText("Selection pending\nClick to label")
+        overlay.setStyleSheet("""
+            QLabel#selectionOverlay {
+                background-color: rgba(251, 146, 60, 0.35);
+                border: 2px solid #f97316;
+                border-radius: 6px;
+                color: white;
+                font-size: 10px;
+                font-weight: bold;
+                padding: 6px 8px;
+                text-align: center;
+            }
+        """)
+        overlay.setVisible(True)
+        print("Pending selection preserved")
+
+    def reopen_pending_selection_menu(self, _event=None, plot_widget=None):
+        """Reopen the label menu for a preserved selection overlay."""
+        if plot_widget is not None:
+            self.current_selection_chart = plot_widget
+        if not self.current_selection_chart or not self.selection_start or not self.selection_end:
+            return
+        self.show_selection_menu()
     def restore_all_selections(self):
         """Restore all selection overlays when charts are recreated"""
         # Simply call render_dynamic_selections which handles everything
@@ -4746,16 +4963,22 @@ class SleepMonitorChart(QWidget):
                                 # Calculate relative position within current time window
                                 start_time_abs = selection_data['start_time']
                                 end_time_abs = selection_data['end_time']
-                                
-                                # Convert absolute time to relative time within current window
-                                start_time_rel = start_time_abs - self.current_time_offset
-                                end_time_rel = end_time_abs - self.current_time_offset
-                                
+                                if self.is_all_psg_mode():
+                                    start_time_rel = start_time_abs
+                                    end_time_rel = end_time_abs
+                                    visible_start = 0.0
+                                    visible_end = self._get_playback_max_duration()
+                                else:
+                                    start_time_rel = start_time_abs - self.current_time_offset
+                                    end_time_rel = end_time_abs - self.current_time_offset
+                                    visible_start = 0.0
+                                    visible_end = self.current_time_window
+
                                 # Only render if selection is within current time window
-                                if (end_time_rel >= 0 and start_time_rel <= self.current_time_window):
+                                if (end_time_rel >= visible_start and start_time_rel <= visible_end):
                                     # Clamp to window bounds
-                                    start_time_clamped = max(0, start_time_rel)
-                                    end_time_clamped = min(self.current_time_window, end_time_rel)
+                                    start_time_clamped = max(visible_start, start_time_rel)
+                                    end_time_clamped = min(visible_end, end_time_rel)
                                     
                                     # Try to reuse existing overlay or create new one
                                     overlay = None
@@ -4805,9 +5028,9 @@ class SleepMonitorChart(QWidget):
                                         border: 2px solid {selection_data['color'].replace('0.2', '0.8')};
                                         border-radius: 6px;
                                         color: white;
-                                        font-size: 11px;
+                                        font-size: 10px;
                                         font-weight: bold;
-                                        padding: 4px;
+                                        padding: 2px;
                                     """)
                                     
                                     # Make overlay clickable
@@ -4874,9 +5097,13 @@ class SleepMonitorChart(QWidget):
                         for j, overlay in enumerate(plot_widget.selection_overlays):
                             if j < len(self.dynamic_selections[chart_name]):
                                 selection_data = self.dynamic_selections[chart_name][j]
-                                # Convert absolute time to relative time within current window
-                                start_time_rel = selection_data['start_time'] - self.current_time_offset
-                                end_time_rel = selection_data['end_time'] - self.current_time_offset
+                                if self.is_all_psg_mode():
+                                    start_time_rel = selection_data['start_time']
+                                    end_time_rel = selection_data['end_time']
+                                else:
+                                    # Convert absolute time to relative time within current window
+                                    start_time_rel = selection_data['start_time'] - self.current_time_offset
+                                    end_time_rel = selection_data['end_time'] - self.current_time_offset
                                 if not self.update_overlay_position(plot_widget, overlay, start_time_rel, end_time_rel):
                                     self._remove_overlay_reference(overlay)
     
@@ -4903,7 +5130,7 @@ Desaturations: {self.spo2_statistics['desaturation_events']}
                 color: white;
                 font-size: 9px;
                 font-weight: 700;
-                padding: 4px;
+                padding: 2px;
                 border-radius: 3px;
             }}
         """)

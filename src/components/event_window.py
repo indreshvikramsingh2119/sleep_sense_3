@@ -15,6 +15,15 @@ from PyQt5.QtGui import QFont
 import pyqtgraph as pg
 import numpy as np
 
+BODY_POSITIONS = {
+    0: 'S',  # Supine
+    1: 'P',  # Prone
+    2: 'L',  # Left
+    3: 'R',  # Right
+    4: 'U',  # Unknown/Upright
+}
+BODY_POSITION_TICKS = [(value, label) for value, label in BODY_POSITIONS.items()]
+
 
 class EventWindow(QDialog):
     """Event Window matching the reference image design exactly"""
@@ -509,7 +518,7 @@ class EventWindow(QDialog):
         
         # Set Y-axis range based on medical standards
         y_axis_ranges = {
-            "Body Position": (0, 4),     # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
+            "Body Position": (0, 5),  # 0=Supine, 1=Right, 2=Left, 3=Prone, 4=Upright
             "Airflow": (-2, 2),         # Respiratory airflow in normalized units
             "Snoring": (0, 100),        # Snoring intensity percentage
             "Thorax": (-100, 100),      # Chest respiratory effort movement
@@ -532,7 +541,13 @@ class EventWindow(QDialog):
         elif selected_graph in y_axis_ranges:
             y_min, y_max = y_axis_ranges[selected_graph]
             self.flow_plot.setYRange(y_min, y_max, padding=0.05)
-        
+
+        if selected_graph == "Body Position":
+            try:
+                self.flow_plot.getAxis('left').setTicks([BODY_POSITION_TICKS])
+            except Exception:
+                pass
+
         # Plot the signal
         if len(time_points) > 0 and len(graph_data) > 0:
             self.flow_plot.plot(time_points, graph_data, pen=pg.mkPen(graph_color, width=2), name=selected_graph)
