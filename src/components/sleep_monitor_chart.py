@@ -700,7 +700,6 @@ class SleepMonitorChart(QWidget):
                     if len(x) > 0 and len(y) > 0:
                         # Update normal line plot
                         plot_widget.plot_curve.setData(x, y, connect='finite')
-                        # Ensure no fill for SpO2 graph
                         plot_widget.plot_curve.opts['fill'] = None
 
                         if self.is_all_psg_mode():
@@ -722,26 +721,20 @@ class SleepMonitorChart(QWidget):
                             properties = plot_widget.axis_properties
                             low_value = properties.get('low_value', 35.0)
                             high_value = properties.get('high_value', 100.0)
-
-                            # Keep the original signal values intact and only update the viewport range.
                             try:
                                 plot_widget.setYRange(low_value, high_value, padding=0)
                             except TypeError:
                                 plot_widget.setRange(yRange=[low_value, high_value], padding=0)
                         else:
-                          
                             if plot_widget.zoom_y_range is not None:
-                                # Use zoomed range during playback
                                 new_y_min, new_y_max = plot_widget.zoom_y_range
                                 print(f"Preserving zoom range during playback: {new_y_min} - {new_y_max}")
                             else:
-                                # Use fixed medical range so the trace does not jump between windows.
                                 new_y_min, new_y_max = 60, 100
 
                             try:
                                 plot_widget.setYRange(new_y_min, new_y_max)
                             except TypeError:
-                                # Try alternative method for older pyqtgraph versions
                                 plot_widget.setRange(yRange=[new_y_min, new_y_max])
 
                         if 10 <= window_seconds <= 30:
@@ -750,7 +743,6 @@ class SleepMonitorChart(QWidget):
                             self.create_spo2_markers_and_labels(plot_widget, x, y)
                             print(f"Updated SpO2 value labels with {len(x)} points for time offset {self.current_time_offset}s")
                         else:
-                            # Time window is outside 10s-30s range, remove value labels if they exist
                             if hasattr(plot_widget, 'value_labels'):
                                 for label in plot_widget.value_labels:
                                     plot_widget.removeItem(label)
@@ -782,14 +774,11 @@ class SleepMonitorChart(QWidget):
                     else:
                         plot_widget.plot_curve.setData([], [])
                         print(f"Left {chart_name} blank because no active signal data is mapped")
-                    
-                    # Apply custom axis properties if they exist
+
                     if hasattr(plot_widget, 'axis_properties'):
                         properties = plot_widget.axis_properties
                         low_value = properties.get('low_value', 35.0)
                         high_value = properties.get('high_value', 100.0)
-
-                        # Manual axis range should not rewrite the underlying signal values.
                         try:
                             plot_widget.setYRange(low_value, high_value, padding=0)
                         except TypeError:
@@ -896,6 +885,11 @@ class SleepMonitorChart(QWidget):
         for position, (name, color, base_freq, amp, offset, y_min, y_max) in enumerate(ACTIVE_SIGNAL_CONFIGS):
             adjusted_freq = base_freq * frequency_factor
             chart = self.create_signal_chart(name, color, adjusted_freq, amp, offset, y_min, y_max)
+            if name == "Body Movement":
+                spacer = QWidget()
+                spacer.setFixedHeight(20)
+                spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                self.charts_layout.addWidget(spacer)
             self.charts_layout.addWidget(chart, stretch=1)
           
             self.graph_order.append(name)
@@ -1118,6 +1112,11 @@ class SleepMonitorChart(QWidget):
         for position, (name, color, freq, amp, offset, y_min, y_max) in enumerate(ACTIVE_SIGNAL_CONFIGS):
             print(f"DEBUG: Creating chart for {name} with range {y_min}-{y_max}")
             chart = self.create_signal_chart(name, color, freq, amp, offset, y_min, y_max)
+            if name == "Body Movement":
+                spacer = QWidget()
+                spacer.setFixedHeight(20)
+                spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                self.charts_layout.addWidget(spacer)
             self.charts_layout.addWidget(chart, stretch=1)
             # Track the original order
             self.graph_order.append(name)
@@ -2495,7 +2494,6 @@ class SleepMonitorChart(QWidget):
                 );
                 border: 2px solid #3b82f6;
                 border-bottom: 3px solid #000000;
-                box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
             }
         """)
         container_layout = QHBoxLayout(container)
@@ -2998,6 +2996,9 @@ class SleepMonitorChart(QWidget):
         small_font.setPointSize(7)  # Compact tick labels with slightly better readability
         bottom_axis.setTickFont(small_font)  # X-axis numbers
         left_axis.setTickFont(small_font)    # Y-axis numbers
+        
+        axis_width = 46 if initial_y_max < 100 else 52 if initial_y_max < 1000 else 60
+        left_axis.setWidth(axis_width)
         
         # Ensure axis ticks are visible
         bottom_axis.setPen('k')  # Black color for visibility
@@ -5180,3 +5181,15 @@ Desaturations: {self.spo2_statistics['desaturation_events']}
         super().resizeEvent(event)
         if hasattr(self, 'watermark'):
             self.watermark.setGeometry(self.charts_widget.rect()) 
+
+
+
+
+
+
+
+
+
+
+
+

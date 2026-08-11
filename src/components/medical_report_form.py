@@ -7,6 +7,8 @@ from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog, QMessageBox
 from PyQt5.QtCore import Qt, QUrl, QTimer
+from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtWebEngineWidgets import QWebEngineView
 import json
 from pathlib import Path
 from datetime import datetime
@@ -927,28 +929,26 @@ class PDFViewerWidget(QDialog):
         self.patient_data = patient_data or {}
         self.analysis_results = analysis_results or {}
         self.dashboard_screenshot_path = dashboard_screenshot_path
+        self._handling_fallback = False
         self.setWindowTitle("Medical Report")
         self.setFixedSize(1200, 850)
-        self.generating = False  # Flag to prevent multiple generations
+        self.generating = False
         self.init_ui()
-        
-        # Load PDF after a short delay to ensure proper initialization
+
         if pdf_path and os.path.exists(pdf_path):
             QTimer.singleShot(500, lambda: self.load_pdf(pdf_path))
-    
+
     def init_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        
-        # Header with title and close button only
+
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(10, 5, 10, 5)
-        
+
         title_label = QLabel("Medical Report")
         title_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #333;")
-        
-        # Generate button
+
         generate_btn = QPushButton("Generate")
         generate_btn.setFixedSize(80, 25)
         generate_btn.setStyleSheet("""
@@ -965,8 +965,25 @@ class PDFViewerWidget(QDialog):
             }
         """)
         generate_btn.clicked.connect(self.generate_new_report)
-        
-        close_btn = QPushButton("✕ Close")
+
+        open_external_btn = QPushButton("Open PDF")
+        open_external_btn.setFixedSize(85, 25)
+        open_external_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1976D2;
+                color: white;
+                border: none;
+                padding: 4px 12px;
+                font-size: 11px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #1565C0;
+            }
+        """)
+        open_external_btn.clicked.connect(self.open_pdf_externally)
+
+        close_btn = QPushButton("Close")
         close_btn.setFixedSize(80, 25)
         close_btn.setStyleSheet("""
             QPushButton {
@@ -982,13 +999,13 @@ class PDFViewerWidget(QDialog):
             }
         """)
         close_btn.clicked.connect(self.close)
-        
+
         header_layout.addWidget(title_label)
         header_layout.addStretch()
         header_layout.addWidget(generate_btn)
+        header_layout.addWidget(open_external_btn)
         header_layout.addWidget(close_btn)
-        
-        # Create header widget
+
         header_widget = QLabel()
         header_widget.setLayout(header_layout)
         header_widget.setStyleSheet("background-color: #f8f8f8; border-bottom: 1px solid #ddd;")
@@ -999,20 +1016,20 @@ class PDFViewerWidget(QDialog):
         self.web_view = QWebEngineView()
         self.web_view.settings().setAttribute(self.web_view.settings().PluginsEnabled, True)
         self.web_view.settings().setAttribute(self.web_view.settings().PdfViewerEnabled, True)
-        
-        # Add to layout
+        self.web_view.settings().setAttribute(self.web_view.settings().JavascriptEnabled, True)
+        self.web_view.loadFinished.connect(self.on_load_finished)
+
         layout.addWidget(header_widget)
         layout.addWidget(self.web_view)
-        
         self.setLayout(layout)
-    
+
     def generate_new_report(self):
         """Generate a new report and save it to a local file."""
         if self.generating:
-            return  # Prevent multiple generations
-        
+            return
+
         self.generating = True
-        
+
         try:
             suggested_path = _default_report_output_path("sleep_report_clean.pdf")
             file_path, _ = QFileDialog.getSaveFileName(
@@ -1027,20 +1044,17 @@ class PDFViewerWidget(QDialog):
             if not file_path.lower().endswith(".pdf"):
                 file_path += ".pdf"
 
-            # Always refresh from the newest JSON before generating the PDF.
             latest_analysis_results = _load_latest_analysis_results()
             if latest_analysis_results:
                 self.analysis_results = latest_analysis_results
 
-            # Always use the basic report format and save it to the chosen local path.
             pdf_path = generate_sleep_report(
                 pdf_path=file_path,
                 patient_data=self.patient_data,
                 analysis_results=self.analysis_results,
-                dashboard_screenshot_path=self.dashboard_screenshot_path
+                dashboard_screenshot_path=self.dashboard_screenshot_path,
             )
-            
-            # Update the PDF path and reload
+
             self.pdf_path = pdf_path
             QMessageBox.information(
                 self,
@@ -1048,66 +1062,124 @@ class PDFViewerWidget(QDialog):
                 f"Report saved locally to:\n{pdf_path}"
             )
             QTimer.singleShot(100, lambda: self.load_pdf(pdf_path))
-            
         finally:
-            # Re-enable generation after a short delay
             QTimer.singleShot(2000, lambda: setattr(self, 'generating', False))
-    
+
     def load_pdf(self, pdf_path):
-        """Load PDF file in web view"""
+        """Load PDF file in the embedded view when possible."""
         if not os.path.exists(pdf_path):
             self.show_error("PDF file not found", f"The file {pdf_path} could not be found.")
             return
-        
+
+        self.pdf_path = pdf_path
+        self._handling_fallback = False
+
         try:
-            # Convert file path to file URL
             file_url = QUrl.fromLocalFile(os.path.abspath(pdf_path))
             print(f"Loading PDF from: {file_url.toString()}")
-            
-            # Load the PDF
             self.web_view.load(file_url)
-            
-            # Set up load finished handler
-            self.web_view.loadFinished.connect(lambda success: self.on_load_finished(success))
-            
-        except Exception as e:
-            self.show_error("Error loading PDF", f"Error: {str(e)}\nFile: {pdf_path}")
-    
+        except Exception as error:
+            self.show_pdf_fallback_message(str(error))
+
     def on_load_finished(self, success):
-        """Handle PDF load completion"""
+        """Handle PDF load completion."""
         if success:
-            print("✅ PDF loaded successfully in viewer")
-        else:
-            print("❌ Failed to load PDF in viewer")
-            # Try alternative loading method
-            self.try_alternative_loading()
-    
+            print("PDF loaded successfully in viewer")
+            self._handling_fallback = False
+            return
+
+        print("Failed to load PDF in viewer")
+        if self._handling_fallback:
+            self.show_pdf_fallback_message()
+            return
+
+        self._handling_fallback = True
+        self.try_alternative_loading()
+
     def try_alternative_loading(self):
-        """Try alternative PDF loading method"""
+        """Try a data URL fallback before switching to the external viewer."""
         try:
-            # Try loading with data URL
-            with open(self.pdf_path, 'rb') as f:
-                pdf_data = f.read()
-            
+            with open(self.pdf_path, 'rb') as file_handle:
+                pdf_data = file_handle.read()
+
             import base64
-            import urllib.parse
-            
-            # Create data URL
+
             b64_data = base64.b64encode(pdf_data).decode('utf-8')
             data_url = f"data:application/pdf;base64,{b64_data}"
-            
             self.web_view.load(QUrl(data_url))
-            print("✅ Trying alternative PDF loading method...")
-            
-        except Exception as e:
-            self.show_error("PDF Loading Failed", 
-                          f"Could not load PDF in viewer.\n\n"
-                          f"File: {self.pdf_path}\n"
-                          f"Error: {str(e)}\n\n"
-                          f"Please open the PDF file manually.")
-    
+            print("Trying alternative PDF loading method...")
+        except Exception as error:
+            self.show_pdf_fallback_message(str(error))
+
+    def open_pdf_externally(self):
+        """Open the PDF in the default system PDF application."""
+        if not self.pdf_path or not os.path.exists(self.pdf_path):
+            QMessageBox.warning(self, "PDF Not Found", "The PDF file does not exist yet.")
+            return False
+
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(self.pdf_path)))
+        if not opened:
+            QMessageBox.warning(
+                self,
+                "Open Failed",
+                f"Could not open the PDF automatically.\n\nPath:\n{self.pdf_path}"
+            )
+        return opened
+
+    def show_pdf_fallback_message(self, error_text=None):
+        """Show a clean fallback message and open the PDF externally."""
+        details = ""
+        if error_text:
+            details = f"<p><b>Viewer error:</b> {error_text}</p>"
+
+        fallback_html = f"""
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    padding: 32px;
+                    background: #f5f7fb;
+                    color: #1f2937;
+                }}
+                .card {{
+                    max-width: 720px;
+                    margin: 30px auto;
+                    background: white;
+                    border: 1px solid #dbe4f0;
+                    border-radius: 10px;
+                    padding: 28px;
+                    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+                }}
+                h2 {{
+                    margin-top: 0;
+                    color: #b45309;
+                }}
+                code {{
+                    display: block;
+                    padding: 10px;
+                    background: #f3f4f6;
+                    border-radius: 6px;
+                    word-break: break-word;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>Embedded PDF preview is not available</h2>
+                <p>The report was generated successfully, but this Qt viewer could not render the PDF on this machine.</p>
+                <p>Use the <b>Open PDF</b> button to view it in your default PDF application.</p>
+                <code>{self.pdf_path or ''}</code>
+                {details}
+            </div>
+        </body>
+        </html>
+        """
+        self.web_view.setHtml(fallback_html)
+        self.open_pdf_externally()
+
     def show_error(self, title, message):
-        """Show error message in web view"""
+        """Show an error message in the viewer area."""
         error_html = f"""
         <html>
         <head>
@@ -1139,15 +1211,15 @@ class PDFViewerWidget(QDialog):
         <body>
             <div class="error-container">
                 <h2>{title}</h2>
-                <p>{message.replace('\n', '<br>')}</p>
+                <p>{message.replace(chr(10), '<br>')}</p>
             </div>
         </body>
         </html>
         """
         self.web_view.setHtml(error_html)
-    
+
     def set_pdf_path(self, pdf_path):
-        """Set new PDF path and load it"""
+        """Set a new PDF path and load it."""
         self.pdf_path = pdf_path
         if os.path.exists(pdf_path):
             QTimer.singleShot(500, lambda: self.load_pdf(pdf_path))

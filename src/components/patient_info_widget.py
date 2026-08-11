@@ -45,7 +45,6 @@ class PatientInfoWidget(QWidget):
         # Main Professional Container
         main_container = QFrame()
         main_container.setObjectName("patientMainContainer")
-        main_container.setMinimumHeight(1170)  
         main_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         main_container.setStyleSheet("""
             QFrame#patientMainContainer {
@@ -63,7 +62,6 @@ class PatientInfoWidget(QWidget):
             }
             QFrame#patientMainContainer:hover {
                 border: 2px solid #3b82f6;
-                box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
             }
         """)
         
@@ -154,7 +152,6 @@ class PatientInfoWidget(QWidget):
         events_layout.setSpacing(8)
         events_layout.addWidget(self.create_detected_events_section())
         container_layout.addWidget(events_container)
-        
         container_layout.addStretch()
         
         scroll = QScrollArea()
@@ -467,10 +464,6 @@ class PatientInfoWidget(QWidget):
             if str(event.get("final_label") or event.get("rule_label") or "REVIEW")
             not in {"REVIEW", "APNEA_REVIEW", "NO_EVENT"}
         ]
-        self.detected_count_label.setText(str(len(events)))
-        self.detected_hint_label.setVisible(len(events) == 0)
-        self.detected_events_list.setVisible(len(events) > 0)
-        self.detected_events_list.clear()
 
         if not self.all_detected_events:
             self.detected_count_label.setText("0")
@@ -518,7 +511,7 @@ class PatientInfoWidget(QWidget):
             end_text = self._format_timestamp(float(event["end_sec"]))
             label = str(event.get("final_label") or event.get("rule_label") or "REVIEW")
             duration = float(event.get("duration_sec", 0.0))
-            item = QListWidgetItem(f"{start_text} - {end_text} | {label} | {duration:.1f}s")
+            item = QListWidgetItem(f"{start_text} - {end_text}\n{label} | {duration:.1f}s")
             item.setData(Qt.UserRole, event)
             self.detected_events_list.addItem(item)
 

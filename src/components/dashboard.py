@@ -342,10 +342,6 @@ class SleepSenseDashboard(QMainWindow):
         super().__init__()
         self.logo_frame = None
         self.logo_label = None
-        self.dashboard_screenshot_paths = []
-        self.current_patient_data = None
-        self.screenshot_overlay = None
-        self._screenshot_source_pixmap = None
         
         # Global event navigation system
         self.current_event_index = -1  # Global pointer for event navigation
@@ -463,7 +459,7 @@ class SleepSenseDashboard(QMainWindow):
             )
 
         # Update button text to show initial count
-        self.graph_dropdown_button.setText("Graphs (8/8) ▼")
+        self.graph_dropdown_button.setText("Graphs (8/8) v")
         
         # Use the user-activation signal so programmatic syncs do not retrigger refresh loops.
         self.time_window_dropdown.activated[int].connect(self.monitor_chart.on_time_window_changed)
@@ -948,7 +944,7 @@ class SleepSenseDashboard(QMainWindow):
         
         # Update button text to show selected count
         selected_count = sum(1 for visible in self.graph_visibility.values() if visible)
-        self.graph_dropdown_button.setText(f"Graphs ({selected_count}/8) ▼")
+        self.graph_dropdown_button.setText(f"Graphs ({selected_count}/8) v")
     
         
     def create_time_slider_bar(self):
@@ -956,8 +952,8 @@ class SleepSenseDashboard(QMainWindow):
         # Main container with same styling as graph containers
         main_container = QWidget()
         main_container.setObjectName("signalChartContainer")
-        main_container.setMinimumHeight(35) 
-        main_container.setMaximumHeight(35)
+        main_container.setMinimumHeight(40) 
+        main_container.setMaximumHeight(40)
         main_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
         # Apply professional double-shaded medical styling to container
@@ -983,24 +979,23 @@ class SleepSenseDashboard(QMainWindow):
                     stop: 1 #bae6fd
                 );
                 border: 2px solid #3b82f6;
-                box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
             }
         """)
         
         # Inner layout for the container
         container_layout = QHBoxLayout(main_container)
-        container_layout.setContentsMargins(4, 3, 4, 3) 
-        container_layout.setSpacing(6) 
+        container_layout.setContentsMargins(8, 6, 8, 6) 
+        container_layout.setSpacing(8) 
         
         # Time Position Label - smaller font
-        time_label = QLabel("Time Nav:")
-        time_label.setStyleSheet("font-size: 10px; font-weight: 700; color: #1e293b;")
+        time_label = QLabel("TIME NAV")
+        time_label.setStyleSheet("font-size: 10px; color: #374151; font-weight: 700; letter-spacing: 1px; padding-right: 2px;")
         container_layout.addWidget(time_label)
         
         # Left navigation button - with clear arrow
         self.slider_left_btn = QPushButton("◀")
         self.slider_left_btn.setObjectName("sliderNavButton")
-        self.slider_left_btn.setFixedHeight(20)  
+        self.slider_left_btn.setFixedHeight(22)  
         self.slider_left_btn.setFixedWidth(28)   
         # Apply clear arrow styling
         self.slider_left_btn.setStyleSheet("""
@@ -1048,10 +1043,8 @@ class SleepSenseDashboard(QMainWindow):
         self.time_slider.setMinimum(0)
         self.time_slider.setMaximum(100)
         self.time_slider.setValue(0)
-        self.time_slider.setFixedHeight(20)  
+        self.time_slider.setFixedHeight(22)  
         self.time_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.time_slider.setTracking(True)
-        self.slider_is_being_dragged = False
         
         # Apply custom styling to slider
         self.time_slider.setStyleSheet("""
@@ -1064,8 +1057,8 @@ class SleepSenseDashboard(QMainWindow):
                 );
                 border: 1px solid #94a3b8;
                 border-radius: 4px;
-                height: 8px;
-                margin: 2px 0;
+                height: 9px;
+                margin: 3px 0;
             }
             QSlider#timeSlider::handle:horizontal {
                 background: qlineargradient(
@@ -1107,7 +1100,7 @@ class SleepSenseDashboard(QMainWindow):
         # Right navigation button - with clear arrow
         self.slider_right_btn = QPushButton("▶")
         self.slider_right_btn.setObjectName("sliderNavButton")
-        self.slider_right_btn.setFixedHeight(20)  
+        self.slider_right_btn.setFixedHeight(22)  
         self.slider_right_btn.setFixedWidth(28)   
         # Apply clear arrow styling
         self.slider_right_btn.setStyleSheet("""
@@ -1152,7 +1145,6 @@ class SleepSenseDashboard(QMainWindow):
         # Current time display - smaller
         self.slider_time_label = QLabel("0:00")
         self.slider_time_label.setObjectName("sliderTimeLabel")
-        self.slider_time_label.setFixedWidth(84)
         self.slider_time_label.setStyleSheet("""
             QLabel#sliderTimeLabel {
                 background-color: #eff6ff;
@@ -1161,7 +1153,7 @@ class SleepSenseDashboard(QMainWindow):
                 border-radius: 3px;
                 padding: 2px 6px;
                 font-size: 10px;
-                min-width: 60px;
+                min-width: 40px;
             }
         """)
         self.slider_time_label.setAlignment(Qt.AlignCenter)
@@ -1301,8 +1293,6 @@ class SleepSenseDashboard(QMainWindow):
 
     def update_slider_position(self):
         """Update slider position based on current time offset"""
-        if getattr(self, 'slider_is_being_dragged', False):
-            return
         max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
         if self.time_slider and max_duration > 0:
             
@@ -1357,7 +1347,7 @@ class SleepSenseDashboard(QMainWindow):
             print(f"Warning: Stylesheet file '{qss_file}' not found!")
         
         self.setStyleSheet(stylesheet)
-    
+
     def create_professional_toolbar(self):
         """Create professional icon toolbar with grouped buttons"""
         toolbar = QToolBar("MainToolbar")
@@ -1578,7 +1568,6 @@ class SleepSenseDashboard(QMainWindow):
     def load_patient_data(self, patient_data):
         """Load patient data from database and display in dashboard"""
         print(f"Loading patient data: {patient_data['last_name']} {patient_data['first_name']}")
-        self.current_patient_data = dict(patient_data)
         
         # Create patient ID string for display
         patient_id_str = patient_data.get('patient_id', str(patient_data.get('id', '--------')))
@@ -1624,141 +1613,29 @@ class SleepSenseDashboard(QMainWindow):
             from PyQt5.QtWidgets import QApplication
             from PyQt5.QtGui import QPixmap, QScreen
             from datetime import datetime
-            import tempfile
             
-            source_pixmap = self.grab()
-            if source_pixmap.isNull():
-                QMessageBox.warning(self, "Screenshot Error", "Dashboard screenshot capture failed.")
-                return
-
-            if hasattr(self, 'screenshot_overlay') and self.screenshot_overlay:
-                try:
-                    self.screenshot_overlay.close()
-                except Exception:
-                    pass
-
-            self._screenshot_source_pixmap = source_pixmap
-            overlay = ScreenshotOverlayWidget(source_pixmap, self)
-            overlay.setGeometry(self.rect())
-            overlay.overlay_ratio_x = source_pixmap.width() / max(1, overlay.width())
-            overlay.overlay_ratio_y = source_pixmap.height() / max(1, overlay.height())
-
-            def finish_capture(selected_rect):
-                cropped_pixmap = source_pixmap.copy(selected_rect)
-                if cropped_pixmap.isNull():
-                    QMessageBox.warning(self, "Screenshot Error", "No valid area was selected.")
-                    overlay.close()
-                    return
-
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                file_path = os.path.join(
-                    tempfile.gettempdir(),
-                    f"sleep_sense_dashboard_screenshot_{timestamp}.png"
-                )
-
-                if not cropped_pixmap.save(file_path, "PNG"):
-                    QMessageBox.warning(self, "Screenshot Error", "Selected area screenshot could not be saved.")
-                    overlay.close()
-                    return
-
-                self.dashboard_screenshot_paths.append(file_path)
-                overlay.close()
-                self.show_screenshot_actions(file_path)
-
-            def cancel_capture():
-                overlay.close()
-
-            overlay.selection_confirmed.connect(finish_capture)
-            overlay.cancelled.connect(cancel_capture)
-            overlay.destroyed.connect(lambda: setattr(self, 'screenshot_overlay', None))
-
-            self.screenshot_overlay = overlay
-            overlay.show()
-            overlay.raise_()
-            overlay.activateWindow()
-            overlay.setFocus()
+            # Capture the entire application window
+            screen = QApplication.primaryScreen().grabWindow(self.winId())
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"sleep_sense_screenshot_{timestamp}.png"
+            
+            # Save dialog
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Screenshot",
+                filename,
+                "PNG Files (*.png);;All Files (*)"
+            )
+            
+            if file_path:
+                screen.save(file_path, "PNG")
+                QMessageBox.information(self, "Screenshot Saved", 
+                                   f"Screenshot saved to:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Screenshot Error", 
                                f"Failed to take screenshot:\n{str(e)}")
-
-    def show_screenshot_actions(self, file_path):
-        """Show the screenshot preview with report/delete actions only."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Dashboard Screenshot")
-        dialog.setModal(True)
-        dialog.resize(900, 600)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-
-        preview_label = QLabel()
-        preview_label.setAlignment(Qt.AlignCenter)
-        preview_label.setStyleSheet("background-color: #f8fafc; border: 1px solid #d1d5db;")
-
-        pixmap = QPixmap(file_path)
-        if not pixmap.isNull():
-            preview_label.setPixmap(
-                pixmap.scaled(860, 500, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            )
-        else:
-            preview_label.setText("Screenshot preview is not available.")
-
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-
-        send_button = QPushButton("Send to Report")
-        send_button.setFixedSize(130, 32)
-        send_button.clicked.connect(dialog.accept)
-
-        delete_button = QPushButton("Delete Screenshot")
-        delete_button.setFixedSize(140, 32)
-        delete_button.clicked.connect(lambda: self.delete_screenshot_and_close(file_path, dialog))
-
-        button_layout.addWidget(send_button)
-        button_layout.addWidget(delete_button)
-
-        layout.addWidget(preview_label)
-        layout.addLayout(button_layout)
-        dialog.exec_()
-
-    def delete_screenshot_and_close(self, file_path, dialog):
-        """Delete the previewed screenshot and close the preview dialog."""
-        self.remove_dashboard_screenshot(file_path, show_message=False)
-        dialog.reject()
-
-    def remove_dashboard_screenshot(self, file_path=None, show_message=True):
-        """Remove one or all pending dashboard screenshots from the report flow."""
-        paths_to_remove = [file_path] if file_path else list(self.dashboard_screenshot_paths)
-        for path in paths_to_remove:
-            if path in self.dashboard_screenshot_paths:
-                self.dashboard_screenshot_paths.remove(path)
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError as error:
-                    print(f"⚠️ Could not remove dashboard screenshot: {error}")
-
-        if not file_path:
-            self.dashboard_screenshot_paths = []
-
-        if show_message:
-            QMessageBox.information(
-                self,
-                "Screenshot Removed",
-                f"Screenshot removed. Pending screenshots: {len(self.dashboard_screenshot_paths)}"
-            )
-
-    def clear_dashboard_screenshots(self):
-        """Remove all pending dashboard screenshots."""
-        for screenshot_path in list(self.dashboard_screenshot_paths):
-            try:
-                if os.path.exists(screenshot_path):
-                    os.remove(screenshot_path)
-            except OSError as error:
-                print(f"⚠️ Could not remove dashboard screenshot: {error}")
-        self.dashboard_screenshot_paths = []
-        QMessageBox.information(self, "Screenshots Removed", "All dashboard screenshots were removed from the report queue.")
     
     def create_menubar(self):
         """Create menubar with File and View menus"""
@@ -2030,11 +1907,22 @@ class SleepSenseDashboard(QMainWindow):
             self,
             "Select PSG Data File",
             "",
-            "CSV Files (*.csv);;All Files (*)"
+            "Signal Files (*.csv *.txt);;CSV Files (*.csv);;Text Files (*.txt);;All Files (*)"
         )
         
         if file_path:
             print(f"🎬 Loading PSG data from: {file_path}")
             self.monitor_chart.skip_next_auto_playback = True
-            self.monitor_chart.load_psg_data_and_detect(file_path)
+            self.monitor_chart.load_psg_data(file_path)
             print("✅ PSG data loaded successfully - Playback ready!")
+
+
+
+
+
+
+
+
+
+
+
