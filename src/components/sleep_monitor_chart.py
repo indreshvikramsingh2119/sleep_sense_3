@@ -351,37 +351,31 @@ class SleepMonitorChart(QWidget):
             self.save_raw_data_file()
     
     def take_screenshot(self):
-        """Take a screenshot of the entire sleep monitor chart"""
+        """Take a screenshot of the sleep monitor chart, or delegate to the dashboard flow."""
         try:
-            # Get the main window or widget
-            parent_widget = self.parent()
-            while parent_widget and parent_widget.parent():
-                parent_widget = parent_widget.parent()
-            
-            if parent_widget:
-                # Capture the entire window
-                screen = QScreen.grabWindow(parent_widget.windowHandle())
-            else:
-                # Fallback to primary screen
-                screen = QApplication.primaryScreen().grabWindow(QApplication.activeWindow())
-            
-            # Generate filename with timestamp
+            parent_window = self.window()
+            if parent_window is not None and parent_window is not self and hasattr(parent_window, "take_screenshot"):
+                parent_window.take_screenshot()
+                return
+
             from datetime import datetime
+            source_pixmap = self.grab()
+            if source_pixmap.isNull():
+                raise RuntimeError("Could not capture the chart area.")
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"sleep_monitor_screenshot_{timestamp}.png"
-            
-            # Save dialog
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save Screenshot",
                 filename,
                 "PNG Files (*.png);;All Files (*)"
             )
-            
+
+            if file_path and not source_pixmap.save(file_path, "PNG"):
+                raise RuntimeError("Failed to save screenshot image.")
             if file_path:
-                screen.save(file_path, "PNG")
-                QMessageBox.information(self, "Screenshot Saved", 
-                                   f"Screenshot saved to:\n{file_path}")
+                QMessageBox.information(self, "Screenshot Saved", f"Screenshot saved to:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Screenshot Error", 
                                f"Failed to take screenshot:\n{str(e)}")
@@ -885,11 +879,6 @@ class SleepMonitorChart(QWidget):
         for position, (name, color, base_freq, amp, offset, y_min, y_max) in enumerate(ACTIVE_SIGNAL_CONFIGS):
             adjusted_freq = base_freq * frequency_factor
             chart = self.create_signal_chart(name, color, adjusted_freq, amp, offset, y_min, y_max)
-            if name == "Body Movement":
-                spacer = QWidget()
-                spacer.setFixedHeight(20)
-                spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-                self.charts_layout.addWidget(spacer)
             self.charts_layout.addWidget(chart, stretch=1)
           
             self.graph_order.append(name)
@@ -972,51 +961,6 @@ class SleepMonitorChart(QWidget):
         # Add all controls to container
         controls_layout.addWidget(self.play_pause_btn)
         
-        # Speed selection label and dropdown
-        self.speed_label = QLabel("Speed")
-        self.speed_label.setFixedHeight(21)
-        self.speed_label.setStyleSheet("font-size: 10px; font-weight: 700; color: #374151;")
-        controls_layout.addWidget(self.speed_label)
-        
-        self.speed_combo = QComboBox()
-        self.speed_combo.setObjectName("speedCombo")
-        self.speed_combo.setFixedHeight(24)
-        self.speed_combo.addItems(["0.5x", "1.0x", "2.0x", "4.0x"])
-        self.speed_combo.setCurrentText("1.0x")
-        self.speed_combo.setCursor(Qt.PointingHandCursor)
-        self.speed_combo.setStyleSheet("""
-            QComboBox#speedCombo {
-                border: 1px solid #cbd5e1;
-                border-radius: 8px;
-                padding: 2px 8px;
-                background-color: #f8fafc;
-                color: #111827;
-                font-size: 10px;
-            }
-            QComboBox#speedCombo::drop-down {
-                border: none;
-            }
-        """)
-        self.speed_combo.currentTextChanged.connect(self.change_playback_speed)
-        controls_layout.addWidget(self.speed_combo)
-        
-        # Add divider
-        divider = QFrame()
-        divider.setFrameShape(QFrame.VLine)
-        divider.setFrameShadow(QFrame.Sunken)
-        divider.setStyleSheet("""
-            QFrame {
-                background-color: #d1d5db;
-                color: #d1d5db;
-                max-width: 1px;
-                min-width: 1px;
-            }
-        """)
-        controls_layout.addWidget(divider)
-        
-        controls_layout.addWidget(self.speed_label)
-        controls_layout.addWidget(self.speed_combo)
-
         controls_layout.addWidget(self._divider())
 
         self.lbl_speed_title = QLabel("SPEED")
@@ -1112,11 +1056,6 @@ class SleepMonitorChart(QWidget):
         for position, (name, color, freq, amp, offset, y_min, y_max) in enumerate(ACTIVE_SIGNAL_CONFIGS):
             print(f"DEBUG: Creating chart for {name} with range {y_min}-{y_max}")
             chart = self.create_signal_chart(name, color, freq, amp, offset, y_min, y_max)
-            if name == "Body Movement":
-                spacer = QWidget()
-                spacer.setFixedHeight(20)
-                spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-                self.charts_layout.addWidget(spacer)
             self.charts_layout.addWidget(chart, stretch=1)
             # Track the original order
             self.graph_order.append(name)
@@ -2465,8 +2404,8 @@ class SleepMonitorChart(QWidget):
         
         container = QWidget()
         container.setObjectName("signalChartContainer")
-        container.setMinimumHeight(118)
-        container.setMaximumHeight(118)
+        container.setMinimumHeight(124)
+        container.setMaximumHeight(124)
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
         # Apply professional double-shaded medical styling to container
@@ -5181,9 +5120,6 @@ Desaturations: {self.spo2_statistics['desaturation_events']}
         super().resizeEvent(event)
         if hasattr(self, 'watermark'):
             self.watermark.setGeometry(self.charts_widget.rect()) 
-
-
-
 
 
 

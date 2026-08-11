@@ -3,6 +3,7 @@ Sleep Sense Dashboard - Main Dashboard Component
 """
 
 import os
+import tempfile
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea,
@@ -97,6 +98,7 @@ class ScreenshotOverlayWidget(QWidget):
 
         self.overlay_ratio_x = 1.0
         self.overlay_ratio_y = 1.0
+        self._drag_start_in_footer = False
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -111,6 +113,8 @@ class ScreenshotOverlayWidget(QWidget):
         if self.size().isEmpty() or self.source_pixmap.isNull():
             self._cached_scaled_background = QPixmap()
             self._cached_background_size = QSize()
+            self.overlay_ratio_x = 1.0
+            self.overlay_ratio_y = 1.0
             return
         if self._cached_background_size == self.size() and not self._cached_scaled_background.isNull():
             return
@@ -120,24 +124,16 @@ class ScreenshotOverlayWidget(QWidget):
             Qt.FastTransformation,
         )
         self._cached_background_size = QSize(self.size())
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.dragging = True
-            self.selection_start = event.pos()
-            self.selection_end = event.pos()
-            self.update()
-
-    def mouseMoveEvent(self, event):
-        if self.dragging:
-            self.selection_end = event.pos()
-            self.update()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self.dragging:
-            self.selection_end = event.pos()
-            self.dragging = False
-            self.update()
+        self.overlay_ratio_x = (
+            self.source_pixmap.width() / self.width()
+            if self.width() > 0
+            else 1.0
+        )
+        self.overlay_ratio_y = (
+            self.source_pixmap.height() / self.height()
+            if self.height() > 0
+            else 1.0
+        )
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Escape, Qt.Key_Backspace):
@@ -248,6 +244,45 @@ class ScreenshotOverlayWidget(QWidget):
             self.update()
 
 
+class ScreenshotCropResultDialog(QDialog):
+    """Small confirmation dialog shown after the crop is captured."""
+
+    def __init__(self, image_path, parent=None):
+        super().__init__(parent)
+        self.image_path = image_path
+        self.setWindowTitle("Screenshot Captured")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        message = QLabel("Screenshot captured successfully.")
+        message.setStyleSheet("font-size: 14px; font-weight: 700; color: #111827;")
+        layout.addWidget(message)
+
+        subtext = QLabel("Do you want to add this screenshot to the medical patient report?")
+        subtext.setWordWrap(True)
+        subtext.setStyleSheet("font-size: 11px; color: #4b5563;")
+        layout.addWidget(subtext)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+
+        add_button = QPushButton("Add to Report")
+        add_button.setFixedSize(120, 32)
+        add_button.clicked.connect(self.accept)
+
+        discard_button = QPushButton("Discard")
+        discard_button.setFixedSize(100, 32)
+        discard_button.clicked.connect(self.reject)
+
+        button_row.addWidget(add_button)
+        button_row.addWidget(discard_button)
+        layout.addLayout(button_row)
+
+
 class ScreenshotSelectorDialog(QDialog):
     """Dialog for selecting a crop area from a dashboard screenshot."""
 
@@ -342,6 +377,8 @@ class SleepSenseDashboard(QMainWindow):
         super().__init__()
         self.logo_frame = None
         self.logo_label = None
+        self.dashboard_screenshot_paths = []
+        self.screenshot_overlay = None
         
         # Global event navigation system
         self.current_event_index = -1  # Global pointer for event navigation
@@ -1607,35 +1644,96 @@ class SleepSenseDashboard(QMainWindow):
         self.event_window.exec_()  # Modal dialog
     
     def take_screenshot(self):
-        """Take a screenshot of the entire application"""
+        """Take a drag-selected screenshot on top of the current dashboard."""
         try:
-            # Get the main window
-            from PyQt5.QtWidgets import QApplication
-            from PyQt5.QtGui import QPixmap, QScreen
-            from datetime import datetime
-            
-            # Capture the entire application window
-            screen = QApplication.primaryScreen().grabWindow(self.winId())
-            
-            # Generate filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"sleep_sense_screenshot_{timestamp}.png"
-            
-            # Save dialog
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save Screenshot",
-                filename,
-                "PNG Files (*.png);;All Files (*)"
+            source_pixmap = self.grab()
+            if source_pixmap.isNull():
+                raise RuntimeError("Could not capture the dashboard window.")
+
+            if self.screenshot_overlay is not None:
+                try:
+                    self.screenshot_overlay.cancelled.disconnect()
+                except Exception:
+                    pass
+                try:
+                    self.screenshot_overlay.selection_confirmed.disconnect()
+                except Exception:
+                    pass
+                self.screenshot_overlay.deleteLater()
+                self.screenshot_overlay = None
+
+            overlay = ScreenshotOverlayWidget(source_pixmap, self)
+            overlay.setGeometry(self.rect())
+            overlay.selection_confirmed.connect(
+                lambda rect, pixmap=source_pixmap, widget=overlay: self._finalize_dashboard_screenshot(pixmap, rect, widget)
             )
-            
-            if file_path:
-                screen.save(file_path, "PNG")
-                QMessageBox.information(self, "Screenshot Saved", 
-                                   f"Screenshot saved to:\n{file_path}")
+            overlay.cancelled.connect(lambda widget=overlay: self._cancel_dashboard_screenshot(widget))
+            self.screenshot_overlay = overlay
+            overlay.show()
+            overlay.raise_()
+            overlay.activateWindow()
         except Exception as e:
             QMessageBox.critical(self, "Screenshot Error", 
                                f"Failed to take screenshot:\n{str(e)}")
+
+    def _cancel_dashboard_screenshot(self, overlay=None):
+        """Close the inline screenshot overlay without saving anything."""
+        if overlay is None:
+            overlay = self.screenshot_overlay
+        if overlay is not None:
+            overlay.hide()
+            overlay.deleteLater()
+        if self.screenshot_overlay is overlay:
+            self.screenshot_overlay = None
+
+    def _finalize_dashboard_screenshot(self, source_pixmap, selected_rect, overlay=None):
+        """Crop the selected area, ask to attach it to the report, and then clean up."""
+        from datetime import datetime
+
+        if overlay is None:
+            overlay = self.screenshot_overlay
+
+        if selected_rect.isNull() or selected_rect.width() <= 5 or selected_rect.height() <= 5:
+            QMessageBox.information(self, "Select Area", "Please drag to select a screenshot area first.")
+            return
+
+        cropped_pixmap = source_pixmap.copy(selected_rect)
+        if cropped_pixmap.isNull():
+            raise RuntimeError("Selected screenshot area could not be captured.")
+
+        temp_dir = tempfile.gettempdir()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_path = os.path.join(temp_dir, f"sleep_sense_dashboard_{timestamp}.png")
+
+        if not cropped_pixmap.save(temp_path, "PNG"):
+            raise RuntimeError("Failed to prepare screenshot image.")
+
+        if overlay is not None:
+            overlay.hide()
+            overlay.deleteLater()
+        if self.screenshot_overlay is overlay:
+            self.screenshot_overlay = None
+
+        choice = QMessageBox.question(
+            self,
+            "Screenshot Captured",
+            "Screenshot captured successfully.\n\nAdd this screenshot to the medical patient report?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+
+        if choice == QMessageBox.Yes:
+            screenshot_paths = list(getattr(self, "dashboard_screenshot_paths", []))
+            if temp_path not in screenshot_paths:
+                screenshot_paths.append(temp_path)
+            self.dashboard_screenshot_paths = screenshot_paths
+            self.open_medical_report()
+        else:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
     
     def create_menubar(self):
         """Create menubar with File and View menus"""
@@ -1915,11 +2013,6 @@ class SleepSenseDashboard(QMainWindow):
             self.monitor_chart.skip_next_auto_playback = True
             self.monitor_chart.load_psg_data(file_path)
             print("✅ PSG data loaded successfully - Playback ready!")
-
-
-
-
-
 
 
 
