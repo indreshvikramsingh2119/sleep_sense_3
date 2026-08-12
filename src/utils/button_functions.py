@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QTextDocument
 from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
+from path_utils import get_asset_path
 
 
 class ButtonFunctions:
@@ -250,10 +251,8 @@ class ButtonFunctions:
             quick_start_action = menu.addAction('Quick start', self.view_quick_start)
             # Load and set icon
             from PyQt5.QtGui import QIcon
-            from PyQt5.QtCore import QFile
-            icon_path = os.path.join(os.path.dirname(__file__), '..', '..', 'icons', 'home.svg')
-            if os.path.exists(icon_path):
-                quick_start_action.setIcon(QIcon(icon_path))
+            icon_path = get_asset_path("icons/home.svg")
+            quick_start_action.setIcon(QIcon(icon_path))
             
         elif menu_type == 'tools':
             menu.addAction('Re-analyze', self.tools_reanalyze)

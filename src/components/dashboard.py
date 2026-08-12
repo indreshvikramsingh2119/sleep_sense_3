@@ -19,6 +19,7 @@ from .archive_window import ArchiveWindow
 from .event_window import EventWindow
 from ..utils.toolbar_utils import create_toolbar_button, get_icon_definitions, get_toolbar_qss_styles
 from src.utils.button_functions import ButtonFunctions
+from path_utils import get_asset_path
 
 
 class ScreenshotSelectionLabel(QLabel):
@@ -1456,7 +1457,7 @@ class SleepSenseDashboard(QMainWindow):
         # Extended Database Options (initially hidden - using QAction)
         from PyQt5.QtGui import QIcon
         
-        self.action_patient_record = QAction(QIcon(os.path.join(script_dir, "icons/patient_report_card.svg")), "Patient Record Card", self)
+        self.action_patient_record = QAction(QIcon(get_asset_path("icons/patient_report_card.svg")), "Patient Record Card", self)
         self.action_patient_record.setToolTip("Patient Record Card")
         self.action_patient_record.setStatusTip("Open Patient Record Card Form")
         self.action_patient_record.triggered.connect(self.open_patient_report_card)
@@ -1464,7 +1465,7 @@ class SleepSenseDashboard(QMainWindow):
         self.action_patient_record.setEnabled(True)
         toolbar.addAction(self.action_patient_record)
                 
-        self.action_medical_report = QAction(QIcon(os.path.join(script_dir, "icons/medical_report.svg")), "Medical Report", self)
+        self.action_medical_report = QAction(QIcon(get_asset_path("icons/medical_report.svg")), "Medical Report", self)
         self.action_medical_report.setToolTip("Medical Report")
         self.action_medical_report.setStatusTip("Open Medical Report Form")
         self.action_medical_report.triggered.connect(self.open_medical_report)
@@ -1472,7 +1473,7 @@ class SleepSenseDashboard(QMainWindow):
         self.action_medical_report.setEnabled(True)
         toolbar.addAction(self.action_medical_report)
         
-        self.action_event_list = QAction(QIcon(os.path.join(script_dir, icons[7]["icon"])), "Event List", self)
+        self.action_event_list = QAction(QIcon(get_asset_path("icons/event_list.svg")), "Event List", self)
         self.action_event_list.setToolTip("Event List")
         self.action_event_list.setStatusTip("View detected events")
         self.action_event_list.triggered.connect(self.open_event_list)
@@ -2012,7 +2013,6 @@ class SleepSenseDashboard(QMainWindow):
             self.monitor_chart.skip_next_auto_playback = True
             self.monitor_chart.load_psg_data(file_path)
             print("✅ PSG data loaded successfully - Playback ready!")
-
 
 
 

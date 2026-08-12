@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 import os
+from path_utils import get_asset_path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ANALYSIS_JSON_DIR = REPO_ROOT / "data" / "analysis_json"
@@ -112,8 +113,8 @@ def _load_latest_analysis_results():
 
 
 def _get_report_logo_path():
-    logo_path = REPO_ROOT / "assets" / "images" / "dmk_logo.png"
-    return str(logo_path) if logo_path.exists() else None
+    logo_path = get_asset_path("assets/images/dmk_logo.png")
+    return logo_path if Path(logo_path).exists() else None
 
 
 def _build_patient_information_rows(patient_data, styles):

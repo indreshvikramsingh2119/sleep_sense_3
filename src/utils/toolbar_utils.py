@@ -3,10 +3,10 @@ Toolbar Utils Module - Professional Icon Toolbar for Sleep Sense
 Contains reusable functions for creating consistent toolbar buttons
 """
 
-import os
 from PyQt5.QtWidgets import QPushButton, QToolBar
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt, QSize
+from path_utils import get_asset_path
 
 
 def create_toolbar_button(icon_path, tooltip, status_tip, callback):
@@ -25,7 +25,7 @@ def create_toolbar_button(icon_path, tooltip, status_tip, callback):
     btn = QPushButton()
     
     # Set icon if exists, otherwise use text fallback
-    if os.path.exists(icon_path):
+    if icon_path and QIcon(icon_path).isNull() is False:
         icon = QIcon(icon_path)
         btn.setIcon(icon)
         btn.setIconSize(QSize(24, 24))  # Set icon size
@@ -75,63 +75,63 @@ def get_icon_definitions():
     return [
         {
             "name": "previous",
-            "icon": "icons/previous.svg",
+            "icon": get_asset_path("icons/previous.svg"),
             "tooltip": "Previous",
             "status_tip": "Go to previous record/page",
             "callback_name": "go_to_previous"
         },
         {
             "name": "next",
-            "icon": "icons/next.svg", 
+            "icon": get_asset_path("icons/next.svg"), 
             "tooltip": "Next",
             "status_tip": "Go to next record/page",
             "callback_name": "go_to_next"
         },
         {
             "name": "prepare_device",
-            "icon": "icons/prepare_device.svg",
+            "icon": get_asset_path("icons/prepare_device.svg"),
             "tooltip": "Prepare Device",
             "status_tip": "Initialize and connect device",
             "callback_name": "prepare_device"
         },
         {
             "name": "download_data",
-            "icon": "icons/download_data.svg",
+            "icon": get_asset_path("icons/download_data.svg"),
             "tooltip": "Download Data",
             "status_tip": "Download data from device",
             "callback_name": "download_data"
         },
         {
             "name": "database",
-            "icon": "icons/database.svg",
+            "icon": get_asset_path("icons/database.svg"),
             "tooltip": "Database",
             "status_tip": "Open patient database",
             "callback_name": "open_database"
         },
         {
             "name": "report_view",
-            "icon": "icons/report_view.svg",
+            "icon": get_asset_path("icons/report_view.svg"),
             "tooltip": "Report View",
             "status_tip": "View ECG/Sleep reports",
             "callback_name": "open_report_view"
         },
         {
             "name": "signal_view",
-            "icon": "icons/signal_view.svg",
+            "icon": get_asset_path("icons/signal_view.svg"),
             "tooltip": "Signal View",
             "status_tip": "View live physiological signals",
             "callback_name": "open_signal_view"
         },
         {
             "name": "event_list",
-            "icon": "icons/event_list.svg",
+            "icon": get_asset_path("icons/event_list.svg"),
             "tooltip": "Event List",
             "status_tip": "View detected events",
             "callback_name": "open_event_list"
         },
         {
             "name": "archive",
-            "icon": "icons/archive.svg",
+            "icon": get_asset_path("icons/archive.svg"),
             "tooltip": "Archive",
             "status_tip": "Access archived records",
             "callback_name": "open_archive"
