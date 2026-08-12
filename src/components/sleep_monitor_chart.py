@@ -13,11 +13,12 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 from scipy.signal import find_peaks
+from db_utils import get_db_path, save_raw_csv_session
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog, QApplication, QDialog
 )
-from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QPoint, QRect, QMimeData, QPointF
+from PyQt5.QtCore import Qt, QTimer, QTime, QThread, pyqtSignal, pyqtSignal as Signal, QPoint, QRect, QMimeData, QPointF
 import sip
 from PyQt5.QtGui import QPixmap, QScreen
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen
@@ -87,6 +88,29 @@ class SleepMonitorChart(QWidget):
     time_position_updated = pyqtSignal()  # Signal when time position changes
     time_window_mode_changed = pyqtSignal(bool)  # True when All PSG mode is active
     apnea_events_updated = pyqtSignal(object)  # list[dict]
+
+    class _SaveWorker(QThread):
+        """
+        KYON: save ke time UI freeze na ho
+        isliye background thread mein save hota hai.
+        """
+        done = Signal(int, str, str)  # session_id, saved_at, copied_csv_path
+        failed = Signal(str)  # error message
+
+        def __init__(self, patient_id, source_csv_path, parent=None):
+            super().__init__(parent)
+            self.patient_id = patient_id
+            self.source_csv_path = source_csv_path
+
+        def run(self):
+            try:
+                session_id, saved_at, copied_csv_path = save_raw_csv_session(
+                    self.patient_id,
+                    self.source_csv_path,
+                )
+                self.done.emit(session_id, saved_at, copied_csv_path)
+            except Exception as e:
+                self.failed.emit(str(e))
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -123,6 +147,8 @@ class SleepMonitorChart(QWidget):
         self.all_psg_mode = False  # When True, render the entire recording in one view
         self.analysis_results = None
         self.analysis_json_path = None
+        self._save_in_progress = False
+        self._worker = None
         
                 
         # SpO2 specific statistics
@@ -334,10 +360,25 @@ class SleepMonitorChart(QWidget):
         self.dashboard_hidden_graphs_dropdown = hidden_graphs_dropdown
 
     def confirm_and_save_raw_data(self):
-        """Prompt user to confirm and save raw data"""
-        if not hasattr(self, 'patient_id') or self.patient_id == "--------":
-            QMessageBox.warning(self, "No Patient Selected", 
-                           "Please select a patient ID before saving data.")
+        """
+        Raw CSV ko copy karke save karta hai.
+        """
+        if not hasattr(self, "patient_id") or self.patient_id in ("", "--------", None):
+            QMessageBox.warning(self, "No Patient Selected",
+                                "Please select a Patient ID before saving.")
+            return
+
+        if not getattr(self, "loaded_csv_path", None):
+            QMessageBox.warning(
+                self,
+                "No CSV Loaded",
+                "Please upload a CSV/TXT file before saving raw data.",
+            )
+            return
+
+        if getattr(self, "_save_in_progress", False):
+            QMessageBox.information(self, "Please Wait",
+                                    "Previous save is still running...")
             return
         
         reply = QMessageBox.question(
@@ -348,7 +389,7 @@ class SleepMonitorChart(QWidget):
         )
         
         if reply == QMessageBox.Yes:
-            self.save_raw_data_file()
+            self._do_save_async()
     
     def take_screenshot(self):
         """Take a screenshot of the sleep monitor chart, or delegate to the dashboard flow."""
@@ -380,34 +421,33 @@ class SleepMonitorChart(QWidget):
             QMessageBox.critical(self, "Screenshot Error", 
                                f"Failed to take screenshot:\n{str(e)}")
 
-    def save_raw_data_file(self):
-        """Write a timestamped raw-data JSON file and return (path, timestamp_iso)."""
-        timestamp_iso = datetime.now().isoformat(timespec="seconds")
-        safe_ts = timestamp_iso.replace(":", "-")
-        out_dir = os.path.join(os.getcwd(), "raw_data")
-        os.makedirs(out_dir, exist_ok=True)
-        filename = f"raw_data_{self.patient_id}_{safe_ts}.json"
-        file_path = os.path.join(out_dir, filename)
+    def _do_save_async(self):
+        """
+        SQLite me patient/time save hota hai aur uploaded raw CSV copy hoti hai.
+        """
+        self._save_in_progress = True
 
-        
-        channels = {}
-        for name, color, _freq, _amp, _offset, _y_min, _y_max in ACTIVE_SIGNAL_CONFIGS:
-            x, y = self.get_signal_data_for_window(name, self.current_time_window, self.current_time_offset)
-            channels[name] = {"x": x.tolist(), "y": y.tolist(), "color": color}
+        self._worker = self._SaveWorker(self.patient_id, self.loaded_csv_path, parent=self)
+        self._worker.done.connect(self._on_save_done)
+        self._worker.failed.connect(self._on_save_failed)
+        self._worker.start()
 
-        payload = {
-            "patient_id": self.patient_id,
-            "timestamp": timestamp_iso,
-            "channels": channels
-        }
+    def _on_save_done(self, session_id: int, saved_at: str, copied_csv_path: str):
+        self._save_in_progress = False
+        label = f"Session #{session_id} - {self.patient_id}"
+        self.raw_data_saved.emit(copied_csv_path, saved_at)
+        db_path = get_db_path()
+        QMessageBox.information(
+            self, "Saved",
+            f"Data saved successfully!\n\nPatient : {self.patient_id}\n"
+            f"Session : #{session_id}\nTime    : {saved_at}"
+            f"\n\nDatabase:\n{db_path}"
+            f"\nCSV copy:\n{copied_csv_path}"
+        )
 
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-
-        # Emit signal to update save file list in patient info widget
-        self.raw_data_saved.emit(file_path, timestamp_iso)
-        
-        return file_path, timestamp_iso
+    def _on_save_failed(self, error_msg: str):
+        self._save_in_progress = False
+        QMessageBox.critical(self, "Save Failed", f"Could not save data:\n{error_msg}")
 
     def on_time_window_changed(self, index):
         """Handle time window dropdown change"""
@@ -811,6 +851,8 @@ class SleepMonitorChart(QWidget):
     def set_time_window(self, seconds):
         """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
         print(f"🔍 DEBUG: set_time_window({seconds}) called in sleep_monitor_chart.py")
+        previous_window = self.get_effective_time_window_seconds()
+        previous_visible_end = self.current_time_offset + previous_window
         # Normalize "All PSG" into a real duration so the plot never receives a negative range.
         self.all_psg_mode = float(seconds) <= 0 if seconds is not None else False
         if self.all_psg_mode:
@@ -819,6 +861,14 @@ class SleepMonitorChart(QWidget):
             self.current_time_offset = 0
         else:
             self.current_time_window = seconds
+            max_duration = self._get_playback_max_duration()
+            if max_duration > 0:
+                max_offset = self._get_playback_max_offset()
+                # Keep the visible window anchored to the same right-edge timestamp
+                # so switching from 1h -> 10m still shows the last 10 minutes when
+                # the slider is already at the end.
+                desired_offset = max(0.0, previous_visible_end - float(self.current_time_window))
+                self.current_time_offset = min(max_offset, desired_offset)
         
         # Use dashboard controls if available, otherwise use local controls
         dropdown = getattr(self, 'dashboard_time_window_dropdown', None) or getattr(self, 'time_window_dropdown', None)
@@ -845,6 +895,8 @@ class SleepMonitorChart(QWidget):
                 print(f"Debug: No charts exist, calling update_charts_for_time_window instead")
                 self.update_charts_for_time_window(seconds)
 
+            # Keep dashboard slider and time label in sync with the new window.
+            self.update_time_position_label()
             self.time_window_mode_changed.emit(self.is_all_psg_mode())
             
             print(f"Time window set to: {seconds} seconds")
@@ -2680,11 +2732,6 @@ class SleepMonitorChart(QWidget):
         zoom_layout.addStretch()
         plot_container_layout.addWidget(zoom_frame)
         
-        zoom_layout.addStretch()
-        plot_container_layout.addWidget(zoom_frame)
-        zoom_layout.addStretch()
-        plot_container_layout.addWidget(zoom_frame)
-        
         # Create horizontal layout for buttons
         buttons_container = QFrame()
         buttons_container.setObjectName("buttonsContainer")
@@ -3075,23 +3122,7 @@ class SleepMonitorChart(QWidget):
                 chart_name = container.plot_widget.chart_name
                 new_height = event.size().height()
                 print(f"Debug: Container resize event for {chart_name} - New size: {new_height}px")
-                
-                # Completely prevent any resize attempts on expanded containers
-                current_max_height = container.maximumHeight()
-                current_min_height = container.minimumHeight()
-                current_height = container.height()
-                
-                # Check if this is an expanded container (max height is very large or min height > 120)
-                is_expanded = current_max_height > 1000 or current_min_height > 120 or current_height > 120
-                
-                if is_expanded:
-                    print(f"Debug: Allowing resize of expanded container '{chart_name}' (current: {current_height}px, attempted: {new_height}px)")
-                    # Allow Qt's normal resize flow even for expanded containers
-                    if original_resize:
-                        original_resize(event)
-                    self.on_container_resized(container)
-                    return
-                
+
             if original_resize:
                 original_resize(event)
             # Update overlays when container resizes
@@ -3151,7 +3182,6 @@ class SleepMonitorChart(QWidget):
             'frequency': plot_widget.graph_frequency if hasattr(plot_widget, 'graph_frequency') else 1.0,
             'amplitude': plot_widget.graph_amplitude if hasattr(plot_widget, 'graph_amplitude') else 1.0,
             'offset': plot_widget.graph_offset if hasattr(plot_widget, 'graph_offset') else 0,
-            'position': self.charts_layout.indexOf(container)
         }
         
         # Hide the container
@@ -5120,12 +5150,3 @@ Desaturations: {self.spo2_statistics['desaturation_events']}
         super().resizeEvent(event)
         if hasattr(self, 'watermark'):
             self.watermark.setGeometry(self.charts_widget.rect()) 
-
-
-
-
-
-
-
-
-

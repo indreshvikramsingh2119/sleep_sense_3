@@ -11,3 +11,6 @@ scipy>=1.11.0
 scikit-learn>=1.4.0
 matplotlib>=3.8.0
 joblib>=1.3.0
+
+# Note: SQLite Viewer is a VS Code extension (qwtel.sqlite-viewer), not a Python package.
+# The app itself uses Python's built-in sqlite3 module, so no extra pip dependency is needed.

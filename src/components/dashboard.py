@@ -954,9 +954,8 @@ class SleepSenseDashboard(QMainWindow):
         """Toggle graph visibility based on checkbox state"""
         self.graph_visibility[graph_name] = checked
         
-        # Directly find and hide/show the chart container
         if hasattr(self, 'monitor_chart') and self.monitor_chart:
-            # Find the container for this graph
+            # Directly find and hide/show the chart container
             container = None
             for i in range(self.monitor_chart.charts_layout.count()):
                 widget = self.monitor_chart.charts_layout.itemAt(i).widget()
@@ -2013,8 +2012,6 @@ class SleepSenseDashboard(QMainWindow):
             self.monitor_chart.skip_next_auto_playback = True
             self.monitor_chart.load_psg_data(file_path)
             print("✅ PSG data loaded successfully - Playback ready!")
-
-
 
 
 

@@ -3,6 +3,8 @@ Patient Information Widget - Patient Info Panel Component
 """
 
 import os
+import subprocess
+import sys
 import json
 from datetime import datetime
 from PyQt5.QtWidgets import (
@@ -10,8 +12,10 @@ from PyQt5.QtWidgets import (
     QFrame, QFileDialog, QListWidget, QListWidgetItem, QScrollArea,
     QMessageBox, QSizePolicy, QComboBox
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QUrl
+from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtGui import QFont
+from db_utils import get_db_path
 
 
 class PatientInfoWidget(QWidget):
@@ -307,7 +311,7 @@ class PatientInfoWidget(QWidget):
         header.addWidget(self.raw_count_label)
         frame_layout.addLayout(header)
 
-        self.raw_hint_label = QLabel("Press Save -> Yes to generate raw data with a timestamp.")
+        self.raw_hint_label = QLabel("Press Save -> Yes to copy the loaded raw CSV and store patient/time in DB.")
         self.raw_hint_label.setStyleSheet("font-size: 11px; color: #6b7280;")
         self.raw_hint_label.setWordWrap(True)
         frame_layout.addWidget(self.raw_hint_label)
@@ -347,6 +351,12 @@ class PatientInfoWidget(QWidget):
             }
         """)
         frame_layout.addWidget(self.raw_file_list)
+
+        open_folder_btn = QPushButton(" Open Data Folder")
+        open_folder_btn.setObjectName("actionButton")
+        open_folder_btn.setMinimumHeight(38)
+        open_folder_btn.clicked.connect(self.open_data_folder)
+        frame_layout.addWidget(open_folder_btn)
 
         return frame
 
@@ -455,6 +465,24 @@ class PatientInfoWidget(QWidget):
         item = QListWidgetItem(item_text)
         item.setToolTip(file_path)
         self.raw_file_list.insertItem(0, item)
+
+    def open_data_folder(self):
+        """Open the local folder that contains the SQLite database."""
+        folder = os.path.dirname(get_db_path())
+
+        if sys.platform == "win32":
+            os.startfile(folder)
+            return
+
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        if opened:
+            return
+
+        # Fallback for environments where Qt URL opening is blocked.
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", folder])
+        else:
+            subprocess.Popen(["xdg-open", folder])
 
     def update_detected_events_list(self, events):
         """Render automatic detected events and make them clickable."""
