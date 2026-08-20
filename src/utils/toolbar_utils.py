@@ -6,7 +6,7 @@ Contains reusable functions for creating consistent toolbar buttons
 from PyQt5.QtWidgets import QPushButton, QToolBar
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt, QSize
-from path_utils import get_asset_path
+from .app_paths import get_resource_path as get_asset_path
 
 
 def create_toolbar_button(icon_path, tooltip, status_tip, callback):
@@ -122,20 +122,20 @@ def get_icon_definitions():
             "status_tip": "View live physiological signals",
             "callback_name": "open_signal_view"
         },
-        {
-            "name": "event_list",
-            "icon": get_asset_path("icons/event_list.svg"),
-            "tooltip": "Event List",
-            "status_tip": "View detected events",
-            "callback_name": "open_event_list"
-        },
-        {
-            "name": "archive",
-            "icon": get_asset_path("icons/archive.svg"),
-            "tooltip": "Archive",
-            "status_tip": "Access archived records",
-            "callback_name": "open_archive"
-        }
+        # {
+        #     "name": "event_list",
+        #     "icon": get_asset_path("icons/event_list.svg"),
+        #     "tooltip": "Event List",
+        #     "status_tip": "View detected events",
+        #     "callback_name": "open_event_list"
+        # },
+        # {
+        #     "name": "archive",
+        #     "icon": get_asset_path("icons/archive.svg"),
+        #     "tooltip": "Archive",
+        #     "status_tip": "Access archived records",
+        #     "callback_name": "open_archive"
+        # }
     ]
 
 

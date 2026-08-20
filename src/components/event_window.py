@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QLabel, QFrame, QSplitter, QGroupBox, QLineEdit, QCheckBox,
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
     QToolBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QComboBox,
+    QMenu, QAction,
     QScrollBar, QSlider
 )
 from PyQt5.QtCore import Qt, QSize
@@ -32,6 +33,7 @@ class EventWindow(QDialog):
         super().__init__(parent)
         self.setModal(True)
         self.setWindowTitle("Event Window")
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setFixedSize(1200, 800)
         self.monitor_chart = None
         
@@ -67,9 +69,9 @@ class EventWindow(QDialog):
         # Create main content area with splitter
         content_splitter = QSplitter(Qt.Horizontal)
         
-        # Left side - Event tree
-        left_widget = self.create_event_tree_section()
-        content_splitter.addWidget(left_widget)
+        # Event tree disabled by request.
+        # left_widget = self.create_event_tree_section()
+        # content_splitter.addWidget(left_widget)
         
         # Right side container
         right_widget = QWidget()
@@ -234,6 +236,8 @@ class EventWindow(QDialog):
         self.event_list_table.setShowGrid(True)
         self.event_list_table.verticalHeader().setVisible(False)
         self.event_list_table.setSortingEnabled(True)
+        self.event_list_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.event_list_table.customContextMenuRequested.connect(self.show_event_list_context_menu)
         
         layout.addWidget(self.event_list_table)
         
@@ -861,8 +865,10 @@ class EventWindow(QDialog):
         
         # Update event list table
         self.event_list_table.setRowCount(len(events))
-        for row, (event, start, stop, duration, param) in enumerate(events):
-            self.event_list_table.setItem(row, 0, QTableWidgetItem(event))
+        for row, ((event, start, stop, duration, param), event_detail) in enumerate(zip(events, self._visible_event_details)):
+            label_item = QTableWidgetItem(event)
+            label_item.setData(Qt.UserRole, event_detail)
+            self.event_list_table.setItem(row, 0, label_item)
             self.event_list_table.setItem(row, 1, QTableWidgetItem(start))
             self.event_list_table.setItem(row, 2, QTableWidgetItem(stop))
             self.event_list_table.setItem(row, 3, QTableWidgetItem(duration))
@@ -871,6 +877,7 @@ class EventWindow(QDialog):
     def detect_current_events(self, time_window, time_offset):
         """Return rule-based detected events in the current time window."""
         events = []
+        visible_event_details = []
 
         window_start = float(time_offset)
         window_end = window_start + float(time_window)
@@ -885,7 +892,10 @@ class EventWindow(QDialog):
                 continue
 
             label = str(event.get("final_label") or event.get("rule_label") or event.get("label") or "REVIEW")
+            if event.get("is_manually_edited"):
+                label = f"{label} *"
             duration_sec = float(event.get("duration_sec", max(0.0, end_sec - start_sec)))
+            visible_event_details.append(dict(event))
             events.append((
                 label,
                 self.format_time(start_sec),
@@ -894,7 +904,18 @@ class EventWindow(QDialog):
                 self.format_event_parameter(event),
             ))
         
+        self._visible_event_details = visible_event_details
         return events
+
+    def _event_in_window(self, event, time_window, time_offset):
+        try:
+            start_sec = float(event.get("start_sec", 0.0))
+            end_sec = float(event.get("end_sec", start_sec))
+        except (TypeError, ValueError):
+            return False
+        window_start = float(time_offset)
+        window_end = window_start + float(time_window)
+        return not (end_sec < window_start or start_sec > window_end)
 
     def ensure_rule_based_detection(self):
         """Run rule-only detection once if a PSG file is loaded and no result exists."""
@@ -919,9 +940,67 @@ class EventWindow(QDialog):
             key=lambda event: float(event.get("start_sec", 0.0)),
         )
 
+    def show_event_list_context_menu(self, pos):
+        """Show label actions for the selected detected event."""
+        row = self.event_list_table.rowAt(pos.y())
+        if row < 0:
+            return
+        event = None
+        label_item = self.event_list_table.item(row, 0)
+        if label_item is not None:
+            event = label_item.data(Qt.UserRole)
+        if not isinstance(event, dict):
+            if not hasattr(self, "_visible_event_details") or row >= len(self._visible_event_details):
+                return
+            event = self._visible_event_details[row]
+        if not self.monitor_chart:
+            return
+
+        menu = QMenu(self)
+        current_label = str(event.get("final_label") or event.get("rule_label") or event.get("label") or "REVIEW")
+        for label in ("APNEA", "OSA", "CSA", "MSA", "HYPOPNEA"):
+            if label == current_label and not event.get("is_manually_edited"):
+                continue
+            action = QAction(f"Change to {label}", self)
+            action.triggered.connect(lambda checked=False, ev=event, lbl=label: self._change_event_label_from_row(ev, lbl))
+            menu.addAction(action)
+
+        if event.get("is_manually_edited") or event.get("manual_label_override"):
+            menu.addSeparator()
+            reset_action = QAction("Reset to auto label", self)
+            reset_action.triggered.connect(lambda checked=False, ev=event: self._reset_event_label_from_row(ev))
+            menu.addAction(reset_action)
+
+        if menu.actions():
+            menu.exec_(self.event_list_table.viewport().mapToGlobal(pos))
+
+    def _change_event_label_from_row(self, event, label):
+        """Apply a manual override for an auto-detected event."""
+        if not self.monitor_chart:
+            return
+        if hasattr(self.monitor_chart, "set_manual_label_for_event") and self.monitor_chart.set_manual_label_for_event(event, label):
+            if hasattr(self.monitor_chart, "_refresh_auto_rule_ai_views"):
+                self.monitor_chart._refresh_auto_rule_ai_views()
+            self.update_event_list_real_time()
+
+    def _reset_event_label_from_row(self, event):
+        """Remove the manual override for an auto-detected event."""
+        if not self.monitor_chart:
+            return
+        if hasattr(self.monitor_chart, "reset_manual_label_for_event") and self.monitor_chart.reset_manual_label_for_event(event):
+            if hasattr(self.monitor_chart, "_refresh_auto_rule_ai_views"):
+                self.monitor_chart._refresh_auto_rule_ai_views()
+            self.update_event_list_real_time()
+
     def format_event_parameter(self, event):
         """Format rule metrics for the event list parameter column."""
         parts = ["Rule-based"]
+        if event.get("is_manually_edited"):
+            original_label = event.get("original_label")
+            if original_label:
+                parts.append(f"Edited (manual) | auto was {original_label}")
+            else:
+                parts.append("Edited (manual)")
         try:
             parts.append(f"Flow ↓ {float(event.get('airflow_drop_percent', 0.0)):.1f}%")
         except (TypeError, ValueError):
@@ -952,14 +1031,14 @@ class EventWindow(QDialog):
         
     def load_sample_data(self):
         """Load real event structure and setup updates."""
-        # Event tree data
-        self.populate_event_tree()
+        # Event tree disabled by request.
+        # self.populate_event_tree()
         
         # Initialize with real-time data
         self.update_time_display()
         
         # Connect tree selection to event list
-        self.event_tree.itemClicked.connect(self.on_tree_item_clicked)
+        # self.event_tree.itemClicked.connect(self.on_tree_item_clicked)
         
         # Connect dropdown to update graph
         self.event_type_combo.currentTextChanged.connect(self.on_event_type_changed)
@@ -1015,27 +1094,44 @@ class EventWindow(QDialog):
         
         # Get all events
         all_events = self.detect_current_events(time_window, time_offset)
+        all_event_details = list(getattr(self, "_visible_event_details", []))
         
         # Filter based on selection
         filtered_events = []
+        def base_label(value):
+            return str(value).replace(" *", "").strip()
+
         if event_type == "All events":
             filtered_events = all_events
         elif event_type == "General":
             filtered_events = []
+            self._visible_event_details = []
         elif event_type == "OSA":
-            filtered_events = [
-                e for e in all_events
-                if e[0] in ["OSA", "CSA", "MSA", "HSA", "HYPOPNEA", "APNEA"]
-            ]
+            filtered_events = []
+            filtered_details = []
+            for event_row, event_detail in zip(all_events, all_event_details):
+                if base_label(event_row[0]) in ["OSA", "CSA", "MSA", "HYPOPNEA", "APNEA"]:
+                    filtered_events.append(event_row)
+                    filtered_details.append(event_detail)
+            self._visible_event_details = filtered_details
         elif event_type == "Oximetry":
-            filtered_events = [e for e in all_events if "SpO2" in e[4]]
+            filtered_events = []
+            filtered_details = []
+            for event_row, event_detail in zip(all_events, all_event_details):
+                if "SpO2" in event_row[4]:
+                    filtered_events.append(event_row)
+                    filtered_details.append(event_detail)
+            self._visible_event_details = filtered_details
         else:
             filtered_events = []
+            self._visible_event_details = []
             
         # Update event list table
         self.event_list_table.setRowCount(len(filtered_events))
-        for row, (event, start, stop, duration, param) in enumerate(filtered_events):
-            self.event_list_table.setItem(row, 0, QTableWidgetItem(event))
+        for row, ((event, start, stop, duration, param), event_detail) in enumerate(zip(filtered_events, self._visible_event_details)):
+            label_item = QTableWidgetItem(event)
+            label_item.setData(Qt.UserRole, event_detail)
+            self.event_list_table.setItem(row, 0, label_item)
             self.event_list_table.setItem(row, 1, QTableWidgetItem(start))
             self.event_list_table.setItem(row, 2, QTableWidgetItem(stop))
             self.event_list_table.setItem(row, 3, QTableWidgetItem(duration))
@@ -1057,7 +1153,7 @@ class EventWindow(QDialog):
         self.current_time_window = window_map.get(window_text, 60)
         self.update_scroll_limits()
         self.update_flow_graph_real_time()
-    
+
     def on_graph_type_changed(self, graph_type):
         """Handle graph type change"""
         self.update_flow_graph_real_time()
@@ -1121,3 +1217,4 @@ class EventWindow(QDialog):
         super().showEvent(event)
         # Update with current data when window is shown
         self.update_time_display()
+

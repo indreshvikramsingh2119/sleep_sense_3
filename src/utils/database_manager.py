@@ -1,34 +1,37 @@
 """
-Database Manager - SQLite Operations for Sleep Sense Application
-Handles patient data storage and retrieval
+Database Manager - SQLite operations for the Sleep Sense application.
+Handles patient data storage and retrieval.
 """
 
 import sqlite3
 import os
 from datetime import datetime
 
+from src.utils.db_utils import get_db_path
+
 
 class DatabaseManager:
-    """Manages SQLite database operations for patient data"""
+    """Manage SQLite database operations for patient data."""
     
     def __init__(self, db_path=None):
-        """Initialize database manager with database path"""
+        """Initialize the database manager with an optional database path."""
         if db_path is None:
-            # Default database path in data directory
-            script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            db_path = os.path.join(script_dir, "data", "sleep_sense.db")
+            db_path = get_db_path()
         
         self.db_path = db_path
         self.init_database()
     
     def get_connection(self):
-        """Get database connection"""
+        """Get a database connection."""
+        from pathlib import Path
+
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row  # Enable row factory for dict-like access
         return conn
     
     def init_database(self):
-        """Initialize database with required tables"""
+        """Initialize the database with required tables."""
         conn = self.get_connection()
         cursor = conn.cursor()
         
@@ -96,20 +99,40 @@ class DatabaseManager:
                 recommendations TEXT,
                 doctor_name TEXT,
                 specialization TEXT,
+                pdf_path TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (patient_id) REFERENCES patients(id)
             )
         """)
+
+        self._ensure_reports_columns(cursor)
         
         conn.commit()
         conn.close()
+
+    def _ensure_reports_columns(self, cursor):
+        """Add missing columns to older reports tables while preserving data."""
+        cursor.execute("PRAGMA table_info(reports)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "pdf_path" not in columns:
+            cursor.execute("ALTER TABLE reports ADD COLUMN pdf_path TEXT")
     
     def save_patient(self, patient_data):
-        """Save patient data to database"""
+        """Save patient data to the database."""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
+            last_name = str(patient_data.get('last_name', '')).strip()
+            first_name = str(patient_data.get('first_name', '')).strip()
+            dob = str(patient_data.get('dob', '')).strip()
+            existing_patient = self.get_patient_by_name_dob(last_name, first_name, dob)
+            if existing_patient:
+                print(
+                    f"Duplicate patient not saved: {last_name} {first_name} ({dob}) already exists with ID {existing_patient['id']}"
+                )
+                return None
+
             cursor.execute("""
                 INSERT INTO patients (
                     last_name, first_name, dob, patient_id, gender, title,
@@ -159,9 +182,58 @@ class DatabaseManager:
             return None
         finally:
             conn.close()
+
+    # All editable columns from the patient form (except id / created_at)
+    PATIENT_FIELDS = (
+        'last_name', 'first_name', 'dob', 'patient_id', 'gender', 'title',
+        'street', 'name_suffix', 'zip_code', 'phone', 'city_state', 'fax',
+        'country', 'clinic', 'cost_unit', 'department', 'ins_no', 'physician',
+        'policyholder_no', 'valid_until', 'status', 'weight', 'bmi', 'height',
+        'blood_pressure', 'referred_by', 'history', 'comments',
+    )
+
+    def update_patient(self, patient_db_id, patient_data):
+        """Update an existing patient row by its database ID."""
+        if not patient_db_id:
+            print("update_patient called without a patient ID")
+            return False
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        try:
+            last_name = str(patient_data.get('last_name', '')).strip()
+            first_name = str(patient_data.get('first_name', '')).strip()
+            dob = str(patient_data.get('dob', '')).strip()
+            existing_patient = self.get_patient_by_name_dob(last_name, first_name, dob)
+            if existing_patient and existing_patient.get('id') != patient_db_id:
+                print(
+                    f"Duplicate patient update blocked: {last_name} {first_name} ({dob}) already exists with ID {existing_patient['id']}"
+                )
+                return False
+
+            assignments = ", ".join(f"{name} = ?" for name in self.PATIENT_FIELDS)
+            values = [patient_data.get(name, '') for name in self.PATIENT_FIELDS]
+            values.append(patient_db_id)
+
+            cursor.execute(f"UPDATE patients SET {assignments} WHERE id = ?", values)
+            conn.commit()
+
+            if cursor.rowcount == 0:
+                print(f"No patient found with ID {patient_db_id}")
+                return False
+
+            print(f"Patient {patient_db_id} updated successfully")
+            return True
+        except Exception as e:
+            conn.rollback()
+            print(f"Error updating patient: {e}")
+            return False
+        finally:
+            conn.close()
     
     def get_all_patients(self):
-        """Get all patients from database"""
+        """Get all patients from the database."""
         conn = self.get_connection()
         cursor = conn.cursor()
         
@@ -190,7 +262,7 @@ class DatabaseManager:
             conn.close()
     
     def get_patient_by_id(self, patient_id):
-        """Get patient by database ID"""
+        """Get a patient by database ID."""
         conn = self.get_connection()
         cursor = conn.cursor()
         
@@ -287,16 +359,17 @@ class DatabaseManager:
             conn.close()
     
     def save_report(self, report_data):
-        """Save medical report data to database"""
+        """Save medical report data to the database."""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
+            self._ensure_reports_columns(cursor)
             cursor.execute("""
                 INSERT INTO reports (
                     patient_id, patient_name, report_date, findings, diagnosis,
-                    recommendations, doctor_name, specialization
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    recommendations, doctor_name, specialization, pdf_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 report_data.get('patient_id'),
                 report_data.get('patient_name'),
@@ -305,29 +378,33 @@ class DatabaseManager:
                 report_data.get('diagnosis'),
                 report_data.get('recommendations'),
                 report_data.get('doctor_name'),
-                report_data.get('specialization')
+                report_data.get('specialization'),
+                report_data.get('pdf_path')
             ))
             
             conn.commit()
-            print(f"Medical report saved successfully for patient: {report_data.get('patient_name')}")
-            return True
+            report_id = cursor.lastrowid
+            print(f"Medical report saved (id={report_id}) for patient: {report_data.get('patient_name')}")
+            return report_id
         except Exception as e:
             conn.rollback()
             print(f"Error saving medical report: {e}")
-            return False
+            return None
         finally:
             conn.close()
     
     def get_all_reports(self):
-        """Get all medical reports from database"""
+        """Get all medical reports from the database."""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
+            self._ensure_reports_columns(cursor)
             cursor.execute("""
-                SELECT id, patient_id, patient_name, report_date, doctor_name, specialization
+                SELECT id, patient_id, patient_name, report_date, doctor_name,
+                       specialization, pdf_path
                 FROM reports
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
             """)
             
             reports = []
@@ -338,7 +415,8 @@ class DatabaseManager:
                     'patient_name': row['patient_name'],
                     'report_date': row['report_date'],
                     'doctor_name': row['doctor_name'],
-                    'specialization': row['specialization']
+                    'specialization': row['specialization'],
+                    'pdf_path': row['pdf_path']
                 })
             
             return reports
@@ -349,17 +427,18 @@ class DatabaseManager:
             conn.close()
     
     def get_patient_reports(self, patient_id):
-        """Get all reports for a specific patient"""
+        """Get all reports for a specific patient."""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
+            self._ensure_reports_columns(cursor)
             cursor.execute("""
                 SELECT id, patient_id, patient_name, report_date, findings, diagnosis,
-                    recommendations, doctor_name, specialization, created_at
+                    recommendations, doctor_name, specialization, pdf_path, created_at
                 FROM reports
                 WHERE patient_id = ?
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
             """, (patient_id,))
             
             reports = []
@@ -374,6 +453,7 @@ class DatabaseManager:
                     'recommendations': row['recommendations'],
                     'doctor_name': row['doctor_name'],
                     'specialization': row['specialization'],
+                    'pdf_path': row['pdf_path'],
                     'created_at': row['created_at']
                 })
             

@@ -4,22 +4,26 @@ Sleep Sense Dashboard - Main Dashboard Component
 
 import os
 import tempfile
+from pathlib import Path
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea,
-    QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox, QCheckBox, QStyle
+    QSplitterHandle, QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox, QCheckBox, QStyle, QGraphicsOpacityEffect
 )
-from PyQt5.QtCore import Qt, QSize, QPoint, QRect, pyqtSignal
-from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor, QPen
+from PyQt5.QtCore import Qt, QSize, QPoint, QRect, pyqtSignal, QUrl, QEvent
+from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor, QPen, QDesktopServices
 
 from .patient_info_widget import PatientInfoWidget
 from .sleep_monitor_chart import SleepMonitorChart
 from .database_window import DatabaseWindow
-from .archive_window import ArchiveWindow
-from .event_window import EventWindow
+# from .archive_window import ArchiveWindow
+# from .event_window import EventWindow
 from ..utils.toolbar_utils import create_toolbar_button, get_icon_definitions, get_toolbar_qss_styles
+from ..utils.dialog_helpers import show_styled_warning
+from ..utils.database_manager import DatabaseManager
 from src.utils.button_functions import ButtonFunctions
-from path_utils import get_asset_path
+from ..utils.app_paths import get_resource_path as get_asset_path
+from ..utils.report_metrics_calculator import calculate_report_context
 
 
 class ScreenshotSelectionLabel(QLabel):
@@ -76,6 +80,164 @@ class ScreenshotSelectionLabel(QLabel):
         painter.drawRect(rect)
 
 
+# Patient panel width settings
+PATIENT_PANEL_RAIL_WIDTH = 40
+PATIENT_PANEL_OPEN_WIDTH = 380
+PATIENT_PANEL_SNAP_WIDTH = 240
+
+# Database icons stay invisible until Database is active.
+DATABASE_ICON_INACTIVE_OPACITY = 0.0
+
+
+class CollapsedPanelRail(QFrame):
+    """Rail shown when the patient panel is collapsed."""
+
+    def __init__(self, title="PATIENT PANEL", parent=None):
+        super().__init__(parent)
+        self.setObjectName("patientRail")
+        self.rail_title = title
+        self.hover_active = False
+        self.on_expand = None
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Click to reopen the patient panel")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet("""
+            QFrame#patientRail {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #ffffff, stop:1 #e8eef6);
+                border: 1px solid #cbd5e1;
+                border-left: 3px solid #2563eb;
+                border-radius: 6px;
+            }
+        """)
+
+    def enterEvent(self, event):
+        self.hover_active = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self.hover_active = False
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and callable(self.on_expand):
+            self.on_expand()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.TextAntialiasing)
+
+        rail_w = self.width()
+        rail_h = self.height()
+        accent_color = QColor(29, 78, 216) if self.hover_active else QColor(37, 99, 235)
+
+        chip_rect = QRect(int((rail_w - 24) / 2), 10, 24, 24)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(accent_color)
+        painter.drawRoundedRect(chip_rect, 5, 5)
+
+        arrow_font = QFont()
+        arrow_font.setPointSize(9)
+        arrow_font.setBold(True)
+        painter.setFont(arrow_font)
+        painter.setPen(QPen(QColor(255, 255, 255)))
+        painter.drawText(chip_rect, Qt.AlignCenter, "▶")
+
+        painter.save()
+        painter.translate(rail_w / 2.0, rail_h / 2.0 + 18)
+        painter.rotate(-90)
+        title_font = QFont()
+        title_font.setPointSize(8)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QPen(QColor(51, 65, 85) if self.hover_active else QColor(100, 116, 139)))
+        text_width = max(0, rail_h - 100)
+        painter.drawText(
+            QRect(int(-text_width / 2), -10, text_width, 20),
+            Qt.AlignCenter,
+            self.rail_title,
+        )
+        painter.restore()
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(148, 163, 184, 160))
+        for offset_y in (-6, 0, 6):
+            painter.drawEllipse(int(rail_w / 2 - 1.5), int(rail_h - 28 + offset_y), 3, 3)
+
+        painter.end()
+
+
+class PanelSplitterHandle(QSplitterHandle):
+    """Visible grip handle that makes panel dragging obvious."""
+
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        self.setCursor(Qt.SplitHCursor)
+        self.hover_active = False
+        self.setToolTip("Drag to change panel width • Double-click to hide/show")
+
+    def enterEvent(self, event):
+        self.hover_active = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self.hover_active = False
+        self.update()
+
+    def mouseDoubleClickEvent(self, event):
+        toggle_callback = getattr(self.splitter(), "on_handle_double_clicked", None)
+        if callable(toggle_callback):
+            toggle_callback()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        handle_w = self.width()
+        handle_h = self.height()
+        center_x = handle_w / 2.0
+        center_y = handle_h / 2.0
+
+        track_color = QColor(59, 130, 246, 60) if self.hover_active else QColor(148, 163, 184, 70)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(track_color)
+        painter.drawRoundedRect(int(center_x - 1.5), 6, 3, max(0, handle_h - 12), 2, 2)
+
+        capsule_w = 8
+        capsule_h = 54
+        capsule_color = QColor(37, 99, 235) if self.hover_active else QColor(203, 213, 225)
+        painter.setBrush(capsule_color)
+        painter.drawRoundedRect(
+            int(center_x - capsule_w / 2),
+            int(center_y - capsule_h / 2),
+            capsule_w,
+            capsule_h,
+            4,
+            4,
+        )
+
+        dot_color = QColor(255, 255, 255) if self.hover_active else QColor(100, 116, 139)
+        painter.setBrush(dot_color)
+        for offset_y in (-8, 0, 8):
+            painter.drawEllipse(int(center_x - 1.5), int(center_y + offset_y - 1.5), 3, 3)
+
+        painter.end()
+
+
+class PanelSplitter(QSplitter):
+    """QSplitter with a custom visible handle."""
+
+    def createHandle(self):
+        return PanelSplitterHandle(self.orientation(), self)
+
+
 class ScreenshotOverlayWidget(QWidget):
     """Inline overlay that lets the user drag-select a crop area on the dashboard."""
 
@@ -88,11 +250,12 @@ class ScreenshotOverlayWidget(QWidget):
         self.selection_start = QPoint()
         self.selection_end = QPoint()
         self.dragging = False
-        self._cached_scaled_background = QPixmap()
-        self._cached_background_size = QSize()
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.SubWindow)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(False)
         self.setMouseTracking(True)
         self.setCursor(Qt.CrossCursor)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -104,27 +267,6 @@ class ScreenshotOverlayWidget(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.setFocus()
-        self._update_background_cache()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_background_cache()
-
-    def _update_background_cache(self):
-        if self.size().isEmpty() or self.source_pixmap.isNull():
-            self._cached_scaled_background = QPixmap()
-            self._cached_background_size = QSize()
-            self.overlay_ratio_x = 1.0
-            self.overlay_ratio_y = 1.0
-            return
-        if self._cached_background_size == self.size() and not self._cached_scaled_background.isNull():
-            return
-        self._cached_scaled_background = self.source_pixmap.scaled(
-            self.size(),
-            Qt.IgnoreAspectRatio,
-            Qt.FastTransformation,
-        )
-        self._cached_background_size = QSize(self.size())
         self.overlay_ratio_x = (
             self.source_pixmap.width() / self.width()
             if self.width() > 0
@@ -157,69 +299,209 @@ class ScreenshotOverlayWidget(QWidget):
             int(rect.height() * self.overlay_ratio_y),
         ).intersected(self.source_pixmap.rect())
 
+    def _clamp_pos(self, pos):
+        bounds = self.rect()
+        if bounds.isNull():
+            return pos
+        return QPoint(
+            max(bounds.left(), min(pos.x(), bounds.right())),
+            max(bounds.top(), min(pos.y(), bounds.bottom())),
+        )
+
+    def _header_rect(self):
+        width = min(560, max(320, self.width() - 48))
+        return QRect((self.width() - width) // 2, 16, width, 64)
+
+    def _footer_rect(self):
+        width = min(390, max(340, self.width() - 48))
+        return QRect(self.width() - width - 18, self.height() - 100, width, 72)
+
+    def _capture_button_rect(self):
+        footer = self._footer_rect()
+        return QRect(footer.right() - 178, footer.y() + 28, 160, 34)
+
+    def _cancel_button_rect(self):
+        footer = self._footer_rect()
+        return QRect(footer.right() - 350, footer.y() + 28, 152, 34)
+
+    def _drag_drop_icon_pixmap(self):
+        """Create a small blue drag/drop-style icon for warning dialogs."""
+        pixmap = QPixmap(48, 48)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#3b82f6"))
+        painter.drawEllipse(4, 4, 40, 40)
+
+        pen = QPen(QColor("white"))
+        pen.setWidth(3)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+
+        painter.drawLine(24, 12, 24, 36)
+        painter.drawLine(24, 12, 18, 18)
+        painter.drawLine(24, 12, 30, 18)
+        painter.drawLine(24, 36, 18, 30)
+        painter.drawLine(24, 36, 30, 30)
+        painter.drawLine(12, 24, 36, 24)
+        painter.drawLine(12, 24, 18, 18)
+        painter.drawLine(12, 24, 18, 30)
+        painter.drawLine(36, 24, 30, 18)
+        painter.drawLine(36, 24, 30, 30)
+        painter.end()
+        return pixmap
+
+    def _is_control_zone(self, pos):
+        return self._header_rect().contains(pos) or self._footer_rect().contains(pos)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        if self._cached_scaled_background.isNull() or self._cached_background_size != self.size():
-            self._update_background_cache()
-        if not self._cached_scaled_background.isNull():
-            painter.drawPixmap(0, 0, self._cached_scaled_background)
-
-        painter.fillRect(self.rect(), QColor(15, 23, 42, 70))
-
-        header = QRect(16, 16, max(300, self.width() - 32), 56)
+        header = self._header_rect()
         painter.setPen(Qt.NoPen)
-        painter.fillRect(header, QColor(255, 255, 255, 235))
-        painter.setPen(QColor("#111827"))
-        painter.drawText(header.adjusted(16, 8, -16, -8), Qt.AlignLeft | Qt.AlignVCenter,
-                         "Drag to select the screenshot area")
-        painter.setPen(QColor("#4b5563"))
-        painter.drawText(header.adjusted(16, 26, -16, -8), Qt.AlignLeft | Qt.AlignVCenter,
-                         "Press Esc to cancel. Release mouse, then click Capture Selected Area.")
+        painter.setBrush(QColor("#d3e2ff"))
+        painter.drawRoundedRect(header, 12, 12)
+
+        painter.setPen(QColor("#96b4ea"))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(header, 12, 12)
+
+        title_font = painter.font()
+        title_font.setBold(True)
+        title_font.setPointSize(title_font.pointSize() + 1)
+
+        hint_font = painter.font()
+        hint_font.setBold(True)
+
+        painter.setFont(title_font)
+        painter.setPen(QColor("#0f172a"))
+        painter.drawText(header.adjusted(18, 8, -18, -34), Qt.AlignCenter,
+                         "Select screenshot area")
+        painter.setFont(hint_font)
+        painter.setPen(QColor("#475569"))
+        painter.drawText(header.adjusted(18, 32, -18, -10), Qt.AlignCenter,
+                         "Drag to select. Release mouse, then click Capture Selected Area.")
 
         rect = self.selection_rect()
         if not rect.isNull():
-            painter.fillRect(rect, QColor(59, 130, 246, 70))
+            painter.fillRect(rect, QColor(59, 130, 246, 60))
             pen = QPen(QColor(59, 130, 246))
             pen.setWidth(2)
             painter.setPen(pen)
             painter.drawRect(rect)
 
-        footer_height = 60
-        footer = QRect(0, self.height() - footer_height, self.width(), footer_height)
+        footer = self._footer_rect()
         painter.setPen(Qt.NoPen)
-        painter.fillRect(footer, QColor(255, 255, 255, 240))
+        painter.setBrush(QColor("#d3e2ff"))
+        painter.drawRoundedRect(footer, 12, 12)
 
-        capture_rect = QRect(self.width() - 180, self.height() - 46, 160, 32)
-        cancel_rect = QRect(self.width() - 350, self.height() - 46, 150, 32)
-        painter.setBrush(QColor("#16a34a"))
-        painter.setPen(QColor("#15803d"))
-        painter.drawRoundedRect(capture_rect, 6, 6)
+        painter.setPen(QColor("#96b4ea"))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(footer, 12, 12)
+
+        hint_rect = QRect(footer.left() + 12, footer.top() + 8, footer.width() - 24, 16)
+        painter.setFont(hint_font)
+        painter.setPen(QColor("#334155"))
+        painter.drawText(hint_rect, Qt.AlignCenter | Qt.AlignVCenter,
+                         "Use the buttons below to confirm or cancel.")
+
+        capture_rect = self._capture_button_rect()
+        cancel_rect = self._cancel_button_rect()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#2563eb"))
+        painter.drawRoundedRect(capture_rect, 8, 8)
         painter.setPen(QColor("white"))
         painter.drawText(capture_rect, Qt.AlignCenter, "Capture Selected Area")
 
-        painter.setBrush(QColor("#f3f4f6"))
-        painter.setPen(QColor("#d1d5db"))
-        painter.drawRoundedRect(cancel_rect, 6, 6)
-        painter.setPen(QColor("#374151"))
+        painter.setBrush(QColor("#eef2f7"))
+        painter.drawRoundedRect(cancel_rect, 8, 8)
+        painter.setPen(QColor("#334155"))
         painter.drawText(cancel_rect, Qt.AlignCenter, "Cancel")
 
     def mousePressInFooter(self, pos):
-        capture_rect = QRect(self.width() - 180, self.height() - 46, 160, 32)
-        cancel_rect = QRect(self.width() - 350, self.height() - 46, 150, 32)
+        capture_rect = self._capture_button_rect()
+        cancel_rect = self._cancel_button_rect()
         if capture_rect.contains(pos):
             return "capture"
         if cancel_rect.contains(pos):
             return "cancel"
         return None
 
+    def _update_cursor_for_pos(self, pos):
+        action = self.mousePressInFooter(pos)
+        if action in ("capture", "cancel"):
+            self.setCursor(Qt.PointingHandCursor)
+        else:
+            self.setCursor(Qt.CrossCursor)
+
     def mousePressEvent(self, event):
         action = self.mousePressInFooter(event.pos())
         if action == "capture":
             rect = self.source_selection_rect()
             if rect.isNull() or rect.width() <= 5 or rect.height() <= 5:
-                QMessageBox.information(self, "Select Area", "Please drag to select a screenshot area first.")
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("Select Area")
+                msg_box.setText("Please drag to select a screenshot area first.")
+                msg_box.setIconPixmap(self._drag_drop_icon_pixmap())
+                msg_box.setStyleSheet("""
+                    QMessageBox {
+                        background-color: #f8fbff;
+                    }
+                    QMessageBox QLabel {
+                        color: #111827;
+                        font-size: 13px;
+                        font-weight: 500;
+                    }
+                    QMessageBox QPushButton {
+                        min-width: 54px;
+                        min-height: 22px;
+                        padding: 4px 12px;
+                        border-radius: 6px;
+                        border: 1px solid #1d4ed8;
+                        background-color: #2563eb;
+                        color: white;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+                    QMessageBox QPushButton:hover {
+                        background-color: #3b82f6;
+                        border: 1px solid #1e40af;
+                    }
+                    QMessageBox QPushButton:pressed {
+                        background-color: #1e40af;
+                        border: 1px solid #1e3a8a;
+                    }
+                """)
+                ok_button = msg_box.button(QMessageBox.Ok)
+                if ok_button is not None:
+                    ok_button.setAutoDefault(False)
+                    ok_button.setDefault(True)
+                    ok_button.setStyleSheet("""
+                        QPushButton {
+                            min-width: 54px;
+                            min-height: 22px;
+                            padding: 4px 12px;
+                            border-radius: 6px;
+                            border: 1px solid #1d4ed8;
+                            background-color: #2563eb;
+                            color: white;
+                            font-size: 11px;
+                            font-weight: 700;
+                        }
+                        QPushButton:hover {
+                            background-color: #3b82f6;
+                            border: 1px solid #1e40af;
+                        }
+                        QPushButton:pressed {
+                            background-color: #1e40af;
+                            border: 1px solid #1e3a8a;
+                        }
+                    """)
+                msg_box.exec_()
                 return
             self.selection_confirmed.emit(rect)
             return
@@ -227,22 +509,39 @@ class ScreenshotOverlayWidget(QWidget):
             self.cancelled.emit()
             return
 
+        if self._is_control_zone(event.pos()):
+            return
+
         if event.button() == Qt.LeftButton:
             self.dragging = True
-            self.selection_start = event.pos()
-            self.selection_end = event.pos()
+            pos = self._clamp_pos(event.pos())
+            self.selection_start = pos
+            self.selection_end = pos
             self.update()
 
     def mouseMoveEvent(self, event):
         if self.dragging:
-            self.selection_end = event.pos()
+            self.selection_end = self._clamp_pos(event.pos())
             self.update()
+        else:
+            if self._is_control_zone(event.pos()):
+                self.setCursor(Qt.PointingHandCursor)
+            else:
+                self.setCursor(Qt.CrossCursor)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self.dragging:
-            self.selection_end = event.pos()
+            self.selection_end = self._clamp_pos(event.pos())
             self.dragging = False
             self.update()
+        if self._is_control_zone(event.pos()):
+            self.setCursor(Qt.PointingHandCursor)
+        else:
+            self.setCursor(Qt.CrossCursor)
+
+    def leaveEvent(self, event):
+        self.setCursor(Qt.CrossCursor)
+        super().leaveEvent(event)
 
 
 class ScreenshotCropResultDialog(QDialog):
@@ -253,35 +552,147 @@ class ScreenshotCropResultDialog(QDialog):
         self.image_path = image_path
         self.setWindowTitle("Screenshot Captured")
         self.setModal(True)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(460)
+        self.setMinimumHeight(180)
+        self.setStyleSheet("""
+            QDialog {
+                background: #f8fafc;
+            }
+            QLabel#screenshotConfirmTitle {
+                color: #0f172a;
+                font-size: 16px;
+                font-weight: 800;
+            }
+            QLabel#screenshotConfirmBody {
+                color: #475569;
+                font-size: 12px;
+                line-height: 1.4;
+            }
+            QPushButton#confirmYesButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #3b82f6,
+                    stop: 0.5 #2563eb,
+                    stop: 1 #1d4ed8
+                );
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 18px;
+                font-size: 12px;
+                font-weight: 700;
+                min-width: 88px;
+            }
+            QPushButton#confirmYesButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #60a5fa,
+                    stop: 0.5 #3b82f6,
+                    stop: 1 #2563eb
+                );
+            }
+            QPushButton#confirmYesButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #1d4ed8,
+                    stop: 0.5 #1e40af,
+                    stop: 1 #1e3a8a
+                );
+            }
+            QPushButton#confirmNoButton {
+                background: #eef2f7;
+                color: #334155;
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+                padding: 8px 18px;
+                font-size: 12px;
+                font-weight: 700;
+                min-width: 88px;
+            }
+            QPushButton#confirmNoButton:hover {
+                background: #e2e8f0;
+                border-color: #94a3b8;
+            }
+            QPushButton#confirmNoButton:pressed {
+                background: #cbd5e1;
+            }
+        """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
 
         message = QLabel("Screenshot captured successfully.")
-        message.setStyleSheet("font-size: 14px; font-weight: 700; color: #111827;")
+        message.setObjectName("screenshotConfirmTitle")
+        message.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(message)
 
         subtext = QLabel("Do you want to add this screenshot to the medical patient report?")
+        subtext.setObjectName("screenshotConfirmBody")
         subtext.setWordWrap(True)
-        subtext.setStyleSheet("font-size: 11px; color: #4b5563;")
         layout.addWidget(subtext)
+
+        spacer = QFrame()
+        spacer.setFixedHeight(1)
+        spacer.setStyleSheet("background: #e2e8f0; border: none;")
+        layout.addWidget(spacer)
 
         button_row = QHBoxLayout()
         button_row.addStretch()
 
-        add_button = QPushButton("Add to Report")
-        add_button.setFixedSize(120, 32)
+        add_button = QPushButton("Yes")
+        add_button.setObjectName("confirmYesButton")
+        add_button.setFixedHeight(36)
+        add_button.setAutoDefault(False)
+        add_button.setDefault(False)
+        add_button.setStyleSheet("""
+            QPushButton#confirmYesButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #3b82f6,
+                    stop: 0.5 #2563eb,
+                    stop: 1 #1d4ed8
+                );
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 18px;
+                font-size: 12px;
+                font-weight: 700;
+                min-width: 88px;
+            }
+            QPushButton#confirmYesButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #60a5fa,
+                    stop: 0.5 #3b82f6,
+                    stop: 1 #2563eb
+                );
+            }
+            QPushButton#confirmYesButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #1d4ed8,
+                    stop: 0.5 #1e40af,
+                    stop: 1 #1e3a8a
+                );
+            }
+        """)
         add_button.clicked.connect(self.accept)
 
-        discard_button = QPushButton("Discard")
-        discard_button.setFixedSize(100, 32)
+        discard_button = QPushButton("No")
+        discard_button.setObjectName("confirmNoButton")
+        discard_button.setFixedHeight(36)
+        discard_button.setAutoDefault(False)
+        discard_button.setDefault(False)
         discard_button.clicked.connect(self.reject)
 
         button_row.addWidget(add_button)
         button_row.addWidget(discard_button)
         layout.addLayout(button_row)
+
+        self.setLayout(layout)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
 
 
 class ScreenshotSelectorDialog(QDialog):
@@ -342,10 +753,46 @@ class ScreenshotSelectorDialog(QDialog):
 
         capture_button = QPushButton("Capture Selected Area")
         capture_button.setFixedSize(170, 32)
+        capture_button.setCursor(Qt.PointingHandCursor)
+        capture_button.setAutoDefault(False)
+        capture_button.setDefault(False)
+        capture_button.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #3b82f6,
+                    stop: 0.5 #2563eb,
+                    stop: 1 #1d4ed8
+                );
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 7px 14px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #60a5fa,
+                    stop: 0.5 #3b82f6,
+                    stop: 1 #2563eb
+                );
+            }
+            QPushButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #1d4ed8,
+                    stop: 0.5 #1e40af,
+                    stop: 1 #1e3a8a
+                );
+            }
+        """)
         capture_button.clicked.connect(self.accept_selection)
 
         cancel_button = QPushButton("Cancel")
         cancel_button.setFixedSize(100, 32)
+        cancel_button.setCursor(Qt.PointingHandCursor)
         cancel_button.clicked.connect(self.reject)
 
         button_row.addWidget(capture_button)
@@ -370,6 +817,100 @@ class ScreenshotSelectorDialog(QDialog):
         ).intersected(self.source_pixmap.rect())
         self.accept()
 
+
+class ReportRequirementsDialog(QDialog):
+    """Styled warning dialog for report prerequisites."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowTitle("Report Requirements")
+        self.setMinimumWidth(520)
+        self.setStyleSheet("""
+            QDialog {
+                background: #f8fafc;
+            }
+            QLabel#reportRequirementsTitle {
+                color: #0f172a;
+                font-size: 16px;
+                font-weight: 800;
+            }
+            QLabel#reportRequirementsBody {
+                color: #475569;
+                font-size: 12px;
+                line-height: 1.45;
+            }
+            QPushButton#reportConfirmButton {
+                background: #2563eb;
+                color: white;
+                border: none;
+                border-radius: 9px;
+                padding: 7px 12px;
+                font-size: 12px;
+                font-weight: 700;
+                min-width: 88px;
+            }
+            QPushButton#reportConfirmButton:hover {
+                background: #1d4ed8;
+            }
+            QPushButton#reportConfirmButton:pressed {
+                background: #1e40af;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+
+        top_row = QHBoxLayout()
+
+        icon = QLabel("!")
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setFixedSize(60, 60)
+        icon.setStyleSheet("""
+            QLabel {
+                background: #fde68a;
+                color: #a16207;
+                border: 1px solid #f59e0b;
+                border-radius: 30px;
+                font-size: 28px;
+                font-weight: 900;
+            }
+        """)
+        top_row.addWidget(icon)
+
+        text_column = QVBoxLayout()
+        title = QLabel("Report is not ready yet")
+        title.setObjectName("reportRequirementsTitle")
+        text_column.addWidget(title)
+
+        body = QLabel(
+            "Please select a patient ID and upload the data first before opening the medical report."
+        )
+        body.setObjectName("reportRequirementsBody")
+        body.setWordWrap(True)
+        text_column.addWidget(body)
+        text_column.addStretch()
+
+        top_row.addLayout(text_column)
+        layout.addLayout(top_row)
+
+        spacer = QFrame()
+        spacer.setFixedHeight(1)
+        spacer.setStyleSheet("background: #e2e8f0; border: none;")
+        layout.addWidget(spacer)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+
+        confirm_button = QPushButton("Yes, got it")
+        confirm_button.setObjectName("reportConfirmButton")
+        confirm_button.setFixedHeight(34)
+        confirm_button.setCursor(Qt.PointingHandCursor)
+        confirm_button.clicked.connect(self.accept)
+        button_row.addWidget(confirm_button)
+        layout.addLayout(button_row)
+
 class SleepSenseDashboard(QMainWindow):
     
     """Main Sleep Sense Dashboard Window"""
@@ -380,10 +921,13 @@ class SleepSenseDashboard(QMainWindow):
         self.logo_label = None
         self.dashboard_screenshot_paths = []
         self.screenshot_overlay = None
+        self.current_patient_db_id = None
         
         # Global event navigation system
         self.current_event_index = -1  # Global pointer for event navigation
         self.all_events = []  # Master event array sorted chronologically
+        self.graph_visibility = self._default_graph_visibility()
+        self.graph_toggle_buttons = {}
         
         self.button_functions = ButtonFunctions(self)
         self.init_ui()
@@ -424,7 +968,12 @@ class SleepSenseDashboard(QMainWindow):
         
         # Professional Icon Toolbar
         self.toolbar = self.create_professional_toolbar()
+        self._set_database_icons_active(False)
         top_layout.addWidget(self.toolbar)
+
+        # Quick graph toggle chips (center-top)
+        self.graph_toggle_bar = self.create_graph_toggle_bar()
+        top_layout.addWidget(self.graph_toggle_bar)
         
         # Add spacer to push controls to the right
         top_layout.addStretch()
@@ -449,19 +998,33 @@ class SleepSenseDashboard(QMainWindow):
         content_layout.setSpacing(16)
         
         # Splitter for resizable panels
-        splitter = QSplitter(Qt.Horizontal)
-        
+        splitter = PanelSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(12)
+        splitter.setChildrenCollapsible(False)
+        splitter.on_handle_double_clicked = self.toggle_patient_panel
+        splitter.splitterMoved.connect(self.on_patient_splitter_moved)
+        self.main_splitter = splitter
+
         # Left Panel - Patient Info
         patient_panel = QFrame()
         patient_panel.setObjectName("patientPanel")
-        patient_panel.setMinimumWidth(380)  
+        patient_panel.setMinimumWidth(PATIENT_PANEL_RAIL_WIDTH)
         patient_panel.setMaximumWidth(450) 
         patient_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         patient_layout = QVBoxLayout(patient_panel)
-        patient_layout.setContentsMargins(2, 2, 2, 2)  # Reduced margins for more left shift
-        
+        patient_layout.setContentsMargins(2, 2, 2, 2)
+        self.patient_panel = patient_panel
+
         self.patient_info = PatientInfoWidget()
+        self.patient_info.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         patient_layout.addWidget(self.patient_info)
+
+        # Collapsed rail - shown when the panel is hidden
+        self.patient_rail = CollapsedPanelRail("PATIENT PANEL")
+        self.patient_rail.on_expand = self.expand_patient_panel
+        self.patient_rail.hide()
+        self._patient_panel_collapsed = False
+        patient_layout.addWidget(self.patient_rail)
         
         splitter.addWidget(patient_panel)
         
@@ -496,8 +1059,9 @@ class SleepSenseDashboard(QMainWindow):
                 self.monitor_chart.auto_rule_ai_result.get("events", [])
             )
 
-        # Update button text to show initial count
-        self.graph_dropdown_button.setText("Graphs (8/8) v")
+        # Sync graph chip states with the current defaults and hide Abdomen by default.
+        self._update_graph_controls_state()
+        self.toggle_graph_visibility("Abdomen", self.graph_visibility["Abdomen"])
         
         # Use the user-activation signal so programmatic syncs do not retrigger refresh loops.
         self.time_window_dropdown.activated[int].connect(self.monitor_chart.on_time_window_changed)
@@ -515,6 +1079,7 @@ class SleepSenseDashboard(QMainWindow):
         splitter.setSizes([300, 1000])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1) 
+        self._set_patient_panel_collapsed(False)
         
         content_layout.addWidget(splitter)
         
@@ -523,6 +1088,52 @@ class SleepSenseDashboard(QMainWindow):
         main_layout.addWidget(scroll_area)
         
         main_layout.setContentsMargins(0, 0, 0, 0)
+
+    def on_patient_splitter_moved(self, pos, index):
+        """Collapse the patient panel when it is dragged below the snap width."""
+        if index != 1:
+            return
+        if self.patient_panel.width() < PATIENT_PANEL_SNAP_WIDTH:
+            self.collapse_patient_panel()
+        else:
+            self._set_patient_panel_collapsed(False)
+
+    def _set_patient_panel_collapsed(self, collapsed):
+        """Show the rail when collapsed and the full panel when expanded."""
+        if getattr(self, "_patient_panel_collapsed", None) == collapsed:
+            return
+        self._patient_panel_collapsed = collapsed
+        self.patient_info.setVisible(not collapsed)
+        self.patient_rail.setVisible(collapsed)
+
+    def collapse_patient_panel(self):
+        """Collapse the patient panel into a narrow rail instead of hiding it."""
+        if not hasattr(self, "main_splitter"):
+            return
+        self._set_patient_panel_collapsed(True)
+        total_width = max(1, self.main_splitter.width() - self.main_splitter.handleWidth())
+        self.main_splitter.setSizes([
+            PATIENT_PANEL_RAIL_WIDTH,
+            max(1, total_width - PATIENT_PANEL_RAIL_WIDTH),
+        ])
+
+    def expand_patient_panel(self):
+        """Expand the patient panel back to its normal width."""
+        if not hasattr(self, "main_splitter"):
+            return
+        self._set_patient_panel_collapsed(False)
+        total_width = max(1, self.main_splitter.width() - self.main_splitter.handleWidth())
+        self.main_splitter.setSizes([
+            PATIENT_PANEL_OPEN_WIDTH,
+            max(1, total_width - PATIENT_PANEL_OPEN_WIDTH),
+        ])
+
+    def toggle_patient_panel(self):
+        """Toggle between the collapsed rail and the expanded patient panel."""
+        if getattr(self, "_patient_panel_collapsed", False):
+            self.expand_patient_panel()
+        else:
+            self.collapse_patient_panel()
         
     def _create_event_nav_button(self, text, tooltip, callback, icon):
         button = QPushButton(text)
@@ -573,10 +1184,95 @@ class SleepSenseDashboard(QMainWindow):
         """)
         return button
 
+    def _default_graph_visibility(self):
+        return {
+            "Body Position": True,
+            "Airflow": True,
+            "Snoring": True,
+            "Thorax": True,
+            "Abdomen": False,
+            "SpO2": True,
+            "Pulse": True,
+            "Body Movement": True,
+        }
+
+    def create_graph_toggle_bar(self):
+        """Create the center-top quick graph toggle buttons."""
+        container = QFrame()
+        container.setObjectName("graphToggleBar")
+        container.setStyleSheet("""         
+            QFrame#graphToggleBar {
+                background: transparent;
+                border: none;
+                margin: 0 10px;
+            }
+        """)
+
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(6)
+
+        for graph_name in self.graph_visibility.keys():
+            button = QPushButton()
+            button.setObjectName("graphToggleChip")
+            button.setCheckable(True)
+            button.setMinimumHeight(28)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(
+                lambda checked, name=graph_name: self.toggle_graph_visibility(name, checked)
+            )
+            button.setStyleSheet("""
+                QPushButton#graphToggleChip {
+                    background-color: #ffffff;
+                    border: 1px solid #d1d5db;
+                    border-radius: 14px;
+                    padding: 4px 10px;
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: #475569;
+                }
+                QPushButton#graphToggleChip:hover {
+                    background-color: #f8fafc;
+                    border-color: #94a3b8;
+                }
+                QPushButton#graphToggleChip:checked {
+                    background: qlineargradient(
+                        x1: 0, y1: 0, x2: 0, y2: 1,
+                        stop: 0 #eff6ff,
+                        stop: 0.5 #dbeafe,
+                        stop: 1 #bfdbfe
+                    );
+                    border: 1px solid #3b82f6;
+                    color: #1e3a8a;
+                }
+                QPushButton#graphToggleChip:pressed {
+                    background-color: #dbeafe;
+                }
+            """)
+            self.graph_toggle_buttons[graph_name] = button
+            layout.addWidget(button)
+
+        return container
+
+    def _refresh_graph_toggle_buttons(self):
+        """Sync center graph toggle buttons with current visibility state."""
+        for graph_name, button in self.graph_toggle_buttons.items():
+            is_visible = bool(self.graph_visibility.get(graph_name, False))
+            button.blockSignals(True)
+            button.setChecked(is_visible)
+            prefix = "✓ " if is_visible else ""
+            button.setText(f"{prefix}{graph_name.strip()}")
+            button.blockSignals(False)
+
+    def _update_graph_controls_state(self):
+        """Refresh all graph-selection UI with the latest visibility state."""
+        self._refresh_graph_toggle_buttons()
+
     def create_controls_container(self):
         """Create controls container with Time Window and Hidden Graphs"""
         controls_container = QFrame()
         controls_container.setObjectName("controlsContainer")
+        controls_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         controls_container.setStyleSheet("""
             QFrame#controlsContainer {
                 background-color: #ffffff;
@@ -633,51 +1329,6 @@ class SleepSenseDashboard(QMainWindow):
         divider.setFixedWidth(1)
         controls_layout.addWidget(divider)
         
-        # Graph Selection Dropdown
-        graphs_label = QLabel("GRAPHS")
-        graphs_label.setStyleSheet("font-size: 10px; color: #374151; font-weight: 800; letter-spacing: 1px;")
-        controls_layout.addWidget(graphs_label)
-        
-        # Create dropdown button for graph selection
-        self.graph_dropdown_button = QPushButton("Select Graphs v")
-        self.graph_dropdown_button.setObjectName("graphDropdownButton")
-        self.graph_dropdown_button.setFixedHeight(22)
-        self.graph_dropdown_button.setMinimumWidth(100)
-        self.graph_dropdown_button.setStyleSheet("""
-            QPushButton#graphDropdownButton {
-                background-color: #ffffff;
-                border: 1px solid #d1d5db;
-                border-radius: 4px;
-                padding: 2px 8px;
-                font-size: 10px;
-                font-weight: 600;
-                color: #374151;
-                text-align: left;
-            }
-            QPushButton#graphDropdownButton:hover {
-                background-color: #f8fafc;
-                border-color: #9ca3af;
-            }
-            QPushButton#graphDropdownButton:pressed {
-                background-color: #e2e8f0;
-            }
-        """)
-        self.graph_dropdown_button.clicked.connect(self.show_graph_selection_menu)
-        
-        # Store graph visibility state
-        self.graph_visibility = {
-            "Body Position": True ,
-            "Airflow": True, 
-            "Snoring": True,
-            "Thorax": True,
-            "Abdomen": True,
-            "SpO2": True,
-            "Pulse": True,
-            "Body Movement": True
-        }
-        
-        controls_layout.addWidget(self.graph_dropdown_button)
-        
         # Add vertical divider line
         divider2 = QFrame()
         divider2.setFrameShape(QFrame.VLine)
@@ -693,64 +1344,6 @@ class SleepSenseDashboard(QMainWindow):
         divider2.setFixedWidth(1)
         controls_layout.addWidget(divider2)
         
-        # Screenshot Button
-        self.btn_screenshot = QPushButton("📷")
-        self.btn_screenshot.setObjectName("screenshotButton")
-        self.btn_screenshot.setFixedSize(30, 22)
-        self.btn_screenshot.setToolTip("Take Screenshot")
-        self.btn_screenshot.setStatusTip("Capture entire application window")
-        self.btn_screenshot.clicked.connect(self.take_screenshot)
-        self.btn_screenshot.setStyleSheet("""
-            QPushButton#screenshotButton {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #f8fafc,
-                    stop: 1 #f1f5f9
-                );
-                border: 1px solid #d1d5db;
-                border-radius: 4px;
-                color: #374151;
-                font-size: 14px;
-                font-weight: bold;
-                text-align: center;
-            }
-            QPushButton#screenshotButton:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                      stop: 0 #ffffff,
-                    stop: 0.5 #dbeafe,
-                    stop: 1 #bfdbfe
-                );
-                border: 1px solid #3b82f6;
-                color: #1e40af;
-            }
-            QPushButton#screenshotButton:pressed {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #f8fafc,
-                    stop: 0.5 #e2e8f0,
-                    stop: 1 #cbd5e1
-                );
-                border: 1px solid #94a3b8;
-                color: #1e293b;
-            }
-        """)
-        # Add vertical divider line
-        divider4 = QFrame()
-        divider4.setFrameShape(QFrame.VLine)
-        divider4.setFrameShadow(QFrame.Sunken)
-        divider4.setStyleSheet("""
-            QFrame {
-                background-color: #d1d5db;
-                color: #d1d5db;
-                border: none;
-                margin: 0 4px;
-            }
-        """)
-        divider4.setFixedWidth(1)
-        controls_layout.addWidget(divider4)
-
         # Event Navigation Buttons
         event_label = QLabel("EVENT NAV")
         event_label.setStyleSheet("font-size: 10px; color: #374151; font-weight: 800; letter-spacing: 1px;")
@@ -787,6 +1380,21 @@ class SleepSenseDashboard(QMainWindow):
             icon=self.style().standardIcon(QStyle.SP_MediaSkipForward),
         )
         controls_layout.addWidget(self.btn_last_event)
+
+        # Add vertical divider line
+        divider4 = QFrame()
+        divider4.setFrameShape(QFrame.VLine)
+        divider4.setFrameShadow(QFrame.Sunken)
+        divider4.setStyleSheet("""
+            QFrame {
+                background-color: #d1d5db;
+                color: #d1d5db;
+                border: none;
+                margin: 0 4px;
+            }
+        """)
+        divider4.setFixedWidth(1)
+        controls_layout.addWidget(divider4)
 
         # Screenshot Button
         self.btn_screenshot = QPushButton("📷")
@@ -832,9 +1440,7 @@ class SleepSenseDashboard(QMainWindow):
             }
         """)
         controls_layout.addWidget(self.btn_screenshot)
-        
-        controls_layout.addStretch()
-        
+
         return controls_container
 
     def _get_effective_window_seconds(self):
@@ -872,85 +1478,6 @@ class SleepSenseDashboard(QMainWindow):
             self.monitor_chart.set_time_window(seconds)
             print(f"Debug: Dashboard called set_time_window({seconds})")
     
-        
-    def show_graph_selection_menu(self):
-        """Show dropdown menu with checkboxes for graph selection"""
-        from PyQt5.QtWidgets import QMenu, QWidgetAction, QVBoxLayout
-        
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #ffffff;
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                padding: 4px;
-                font-size: 11px;
-                color: #374151;
-                min-width: 150px;
-            }
-            QMenu::item {
-                padding: 4px 8px;
-                border-radius: 3px;
-            }
-            QMenu::item:selected {
-                background-color: #f3f4f6;
-            }
-        """)
-        
-        # Create a widget to hold checkboxes
-        checkbox_widget = QWidget()
-        checkbox_layout = QVBoxLayout(checkbox_widget)
-        checkbox_layout.setContentsMargins(4, 4, 4, 4)
-        checkbox_layout.setSpacing(2)
-        
-        # Add checkboxes for each graph
-        for graph_name in self.graph_visibility.keys():
-            # Use display name without trailing spaces for checkbox text
-            display_name = graph_name.rstrip()
-            checkbox = QCheckBox(display_name)
-            checkbox.setChecked(self.graph_visibility[graph_name])
-            checkbox.toggled.connect(lambda checked, name=graph_name: self.toggle_graph_visibility(name, checked))
-            checkbox.setStyleSheet("""
-                QCheckBox {
-                    font-size: 10px;
-                    color: #374151;
-                    spacing: 8px;
-                    padding: 3px;
-                    font-weight: 500;
-                }
-                QCheckBox::indicator {
-                    width: 17px;
-                    height: 16px;
-                    border: 2px solid #d1d5db;
-                    border-radius: 3px;
-                    background-color: #ffffff;
-                }
-                QCheckBox::indicator:hover {
-                    border-color: #9ca3af;
-                    background-color: #f8fafc;
-                }
-                QCheckBox::indicator:checked {
-                    background-color: #2563eb;
-                    border-color: #2563eb;
-                    image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTIuNSA2TDQuNSA5TDkuNSAzIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIgZmlsbC1ydWxlPSJldmVub2RkIi8+Cjwvc3ZnPg==);
-                }
-                QCheckBox::indicator:checked:hover {
-                    background-color: #1d4ed8;
-                    border-color: #1d4ed8;
-                }
-            """)
-            checkbox_layout.addWidget(checkbox)
-        
-        # Add the checkbox widget to the menu
-        action = QWidgetAction(self)
-        action.setDefaultWidget(checkbox_widget)
-        menu.addAction(action)
-        
-        # Show the menu below the button
-        button_rect = self.graph_dropdown_button.rect()
-        global_pos = self.graph_dropdown_button.mapToGlobal(button_rect.bottomLeft())
-        menu.exec_(global_pos)
-    
     def toggle_graph_visibility(self, graph_name, checked):
         """Toggle graph visibility based on checkbox state"""
         self.graph_visibility[graph_name] = checked
@@ -978,10 +1505,7 @@ class SleepSenseDashboard(QMainWindow):
                     print(f"Graph '{graph_name}' hidden")
             else:
                 print(f"Graph '{graph_name}' not found")
-        
-        # Update button text to show selected count
-        selected_count = sum(1 for visible in self.graph_visibility.values() if visible)
-        self.graph_dropdown_button.setText(f"Graphs ({selected_count}/8) v")
+        self._update_graph_controls_state()
     
         
     def create_time_slider_bar(self):
@@ -1367,6 +1891,36 @@ class SleepSenseDashboard(QMainWindow):
             )
             self.slider_time_label.setText(format_time(displayed_time))
             
+    def resizeEvent(self, event):
+        """Keep the active screenshot overlay aligned with window resizes."""
+        super().resizeEvent(event)
+
+        overlay = getattr(self, "screenshot_overlay", None)
+        if overlay is None:
+            return
+
+        capture_widget = self.centralWidget() or self
+        overlay.setGeometry(capture_widget.geometry())
+        overlay.update()
+
+    def changeEvent(self, event):
+        """Keep the active screenshot overlay synced with minimize/restore."""
+        super().changeEvent(event)
+        if event.type() != QEvent.WindowStateChange:
+            return
+
+        overlay = getattr(self, "screenshot_overlay", None)
+        if overlay is None:
+            return
+
+        if self.isMinimized():
+            overlay.hide()
+        else:
+            capture_widget = self.centralWidget() or self
+            overlay.setGeometry(capture_widget.geometry())
+            overlay.show()
+            overlay.raise_()
+
     def load_stylesheet(self):
         """Load QSS stylesheet"""
         
@@ -1400,19 +1954,21 @@ class SleepSenseDashboard(QMainWindow):
         # Navigation Group: Previous / Next
         self.btn_previous = create_toolbar_button(
             os.path.join(script_dir, icons[0]["icon"]),
-            icons[0]["tooltip"],
-            icons[0]["status_tip"],
-            self.go_to_previous
+            "Hide database icons",
+            "Hide the database extra icons",
+            self.hide_database_menu_icons
         )
         toolbar.addWidget(self.btn_previous)
         
         self.btn_next = create_toolbar_button(
             os.path.join(script_dir, icons[1]["icon"]),
-            icons[1]["tooltip"],
-            icons[1]["status_tip"],
-            self.go_to_next
+            "Show database icons",
+            "Show the database extra icons",
+            self.show_database_menu_icons
         )
         toolbar.addWidget(self.btn_next)
+
+        self.set_toolbar_navigation_enabled(False)
         
         toolbar.addSeparator()
         
@@ -1425,14 +1981,15 @@ class SleepSenseDashboard(QMainWindow):
         )
         toolbar.addWidget(self.btn_prepare_device)
         
-        self.btn_download_data = create_toolbar_button(
-            os.path.join(script_dir, icons[3]["icon"]),
-            icons[3]["tooltip"],
-            icons[3]["status_tip"],
-            self.download_data
-        )
-        self.btn_download_data.setEnabled(False)  
-        toolbar.addWidget(self.btn_download_data)
+        # Download Data button temporarily disabled.
+        # self.btn_download_data = create_toolbar_button(
+        #     os.path.join(script_dir, icons[3]["icon"]),
+        #     icons[3]["tooltip"],
+        #     icons[3]["status_tip"], 
+        #     self.download_data
+        # )  
+        # self.btn_download_data.setEnabled(False)  
+        # toolbar.addWidget(self.btn_download_data)
         
         
         # Data Group: Database / Archive
@@ -1444,75 +2001,57 @@ class SleepSenseDashboard(QMainWindow):
         )
         toolbar.addWidget(self.btn_database)
         
-        self.btn_archive = create_toolbar_button(
-            os.path.join(script_dir, icons[8]["icon"]),
-            icons[8]["tooltip"],
-            icons[8]["status_tip"],
-            self.open_archive
-        )
-        toolbar.addWidget(self.btn_archive)
+        # Archive button disabled by request.
+        # self.btn_archive = create_toolbar_button(
+        #     os.path.join(script_dir, icons[8]["icon"]),
+        #     icons[8]["tooltip"],
+        #     icons[8]["status_tip"],
+        #     self.open_archive
+        # )
+        # toolbar.addWidget(self.btn_archive)
         
         toolbar.addSeparator()
         
         # Extended Database Options (initially hidden - using QAction)
         from PyQt5.QtGui import QIcon
         
-        self.action_patient_record = QAction(QIcon(get_asset_path("icons/patient_report_card.svg")), "Patient Record Card", self)
+        self.action_patient_record = QAction(QIcon(os.path.join(script_dir, "icons/patient_report_card.svg")), "Patient Record Card", self)
         self.action_patient_record.setToolTip("Patient Record Card")
         self.action_patient_record.setStatusTip("Open Patient Record Card Form")
         self.action_patient_record.triggered.connect(self.open_patient_report_card)
-        self.action_patient_record.setVisible(False)
-        self.action_patient_record.setEnabled(True)
+        self.action_patient_record.setVisible(True)
+        self.action_patient_record.setEnabled(False)
         toolbar.addAction(self.action_patient_record)
                 
-        self.action_medical_report = QAction(QIcon(get_asset_path("icons/medical_report.svg")), "Medical Report", self)
+        self.action_medical_report = QAction(QIcon(os.path.join(script_dir, "icons/medical_report.svg")), "Medical Report", self)
         self.action_medical_report.setToolTip("Medical Report")
         self.action_medical_report.setStatusTip("Open Medical Report Form")
         self.action_medical_report.triggered.connect(self.open_medical_report)
-        self.action_medical_report.setVisible(False)
-        self.action_medical_report.setEnabled(True)
+        self.action_medical_report.setVisible(True)
+        self.action_medical_report.setEnabled(False)
         toolbar.addAction(self.action_medical_report)
         
-        self.action_event_list = QAction(QIcon(get_asset_path("icons/event_list.svg")), "Event List", self)
-        self.action_event_list.setToolTip("Event List")
-        self.action_event_list.setStatusTip("View detected events")
-        self.action_event_list.triggered.connect(self.open_event_list)
-        self.action_event_list.setVisible(False)
-        self.action_event_list.setEnabled(True)
-        toolbar.addAction(self.action_event_list)
+        # self.action_event_list = QAction(QIcon(os.path.join(script_dir, icons[7]["icon"])), "Event List", self)
+        # self.action_event_list.setToolTip("Event List")
+        # self.action_event_list.setStatusTip("View detected events")
+        # self.action_event_list.triggered.connect(self.open_event_list)
+        # self.action_event_list.setVisible(False)
+        # self.action_event_list.setEnabled(True)
+        # toolbar.addAction(self.action_event_list)
         
         return toolbar
     
     # Toolbar Button Callback Methods
-    def go_to_previous(self):
-        """Go to previous time window"""
-        print("Previous button clicked")
-        self.hide_extended_buttons()
-        if self.monitor_chart.is_all_psg_mode():
-            self.update_slider_position()
-            return
-        if hasattr(self.monitor_chart, '_get_playback_max_duration') and self.monitor_chart._get_playback_max_duration() > 0:
-            step_size = self._get_effective_window_seconds()
-            self.monitor_chart.current_time_offset = max(0, self.monitor_chart.current_time_offset - step_size)
-            self.monitor_chart.refresh_charts()
-            self.update_slider_position()
-            print(f"Toolbar previous: offset={self.monitor_chart.current_time_offset:.1f}s")
-    
-    def go_to_next(self):
-        """Go to next time window"""
-        print("Next button clicked")
-        self.hide_extended_buttons()
-        if self.monitor_chart.is_all_psg_mode():
-            self.update_slider_position()
-            return
-        max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
-        if max_duration > 0:
-            step_size = self._get_effective_window_seconds()
-            max_offset = self.monitor_chart._get_playback_max_offset() if hasattr(self.monitor_chart, '_get_playback_max_offset') else max(0.0, max_duration - self._get_effective_window_seconds())
-            self.monitor_chart.current_time_offset = min(max_offset, self.monitor_chart.current_time_offset + step_size)
-            self.monitor_chart.refresh_charts()
-            self.update_slider_position()
-            print(f"Toolbar next: offset={self.monitor_chart.current_time_offset:.1f}s") 
+    def set_toolbar_navigation_enabled(self, enabled):
+        """Enable or disable the database icon toggle buttons."""
+        labels = ("Hide database icons", "Show database icons")
+        buttons = (getattr(self, "btn_previous", None), getattr(self, "btn_next", None))
+
+        for button, label in zip(buttons, labels):
+            if button is None:
+                continue
+            button.setEnabled(bool(enabled))
+            button.setToolTip(label if enabled else "Pehle Database button dabaayein")
     
     def prepare_device(self):
         """Initialize and connect device"""
@@ -1520,48 +2059,97 @@ class SleepSenseDashboard(QMainWindow):
         self.hide_extended_buttons()
         # TODO: Implement device preparation logic
    
-        self.btn_download_data.setEnabled(True)
+        # self.btn_download_data.setEnabled(True)
     
-    def download_data(self):
-        """Download data from device"""
-        # Check if monitor chart has selection active and block if needed
-        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
-            return
-        
-        print("Download Data button clicked")
-        # TODO: Implement data download logic
+    # def download_data(self):
+    #     """Download data from device"""
+    #     # Check if monitor chart has selection active and block if needed
+    #     if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+    #         return
+    #
+    #     print("Download Data button clicked")
+    #     # TODO: Implement data download logic
     
     def open_database(self):
-        """Open patient database as modeless window and show extended buttons"""
+        """Open patient database as modeless window and toggle extended buttons"""
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
         
         print("Database button clicked")
+
+        existing_window = getattr(self, "database_window", None)
+        if existing_window is not None:
+            try:
+                if existing_window.isVisible():
+                    self.show_database_menu_icons()
+                    self.set_toolbar_navigation_enabled(True)
+                    existing_window.raise_()
+                    existing_window.activateWindow()
+                    existing_window.show()
+                    return
+            except Exception:
+                pass
+
         # Show extended buttons immediately
-        self.action_patient_record.setVisible(True)
-        self.action_medical_report.setVisible(True)
-        self.action_event_list.setVisible(True)
+        self.show_database_menu_icons()
+        self.set_toolbar_navigation_enabled(True)
         # Open database window as modeless (non-blocking)
         self.database_window = DatabaseWindow(self)
         self.database_window.show()
     
-    def hide_extended_buttons(self):
-        """Hide extended database buttons"""
-        self.action_patient_record.setVisible(False)
-        self.action_medical_report.setVisible(False)
-        self.action_event_list.setVisible(False)  
-    
-    def open_archive(self):
-        """Access archived records as modal dialog"""
-        # Check if monitor chart has selection active and block if needed
-        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+    def _set_database_icons_active(self, active):
+        """Keep database actions in the layout, but hide them until active."""
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None:
             return
-        
-        print("Archive button clicked")
-        self.hide_extended_buttons()
-        self.archive_window = ArchiveWindow(self)
-        self.archive_window.exec_()  # Modal dialog
+
+        for action in (
+            getattr(self, "action_patient_record", None),
+            getattr(self, "action_medical_report", None),
+        ):
+            if action is None:
+                continue
+
+            action.setVisible(True)
+            action.setEnabled(bool(active))
+
+            tool_button = toolbar.widgetForAction(action)
+            if tool_button is None:
+                continue
+
+            fade_effect = tool_button.graphicsEffect()
+            if not isinstance(fade_effect, QGraphicsOpacityEffect):
+                fade_effect = QGraphicsOpacityEffect(tool_button)
+                tool_button.setGraphicsEffect(fade_effect)
+            fade_effect.setOpacity(1.0 if active else DATABASE_ICON_INACTIVE_OPACITY)
+            tool_button.setCursor(Qt.PointingHandCursor if active else Qt.ArrowCursor)
+
+    def show_database_menu_icons(self):
+        """Enable the database extra icons and show them at full strength."""
+        self._set_database_icons_active(True)
+        print("Database menu icons active")
+
+    def hide_database_menu_icons(self):
+        """Fade and disable the database extra icons while keeping their space."""
+        self._set_database_icons_active(False)
+        print("Database menu icons faded")
+
+    def hide_extended_buttons(self):
+        """Hide database mode extras and disable the database toggle buttons."""
+        self.hide_database_menu_icons()
+        self.set_toolbar_navigation_enabled(False)
+    
+    # def open_archive(self):
+    #     """Access archived records as modal dialog"""
+    #     # Check if monitor chart has selection active and block if needed
+    #     if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+    #         return
+    #
+    #     print("Archive button clicked")
+    #     self.hide_extended_buttons()
+    #     self.archive_window = ArchiveWindow(self)
+    #     self.archive_window.exec_()  # Modal dialog
     
     def open_patient_report_card(self):
         """Open Patient Report Card Form as modal dialog"""
@@ -1582,18 +2170,68 @@ class SleepSenseDashboard(QMainWindow):
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
+
+        if not getattr(self.monitor_chart, "loaded_csv_path", None) or not getattr(self, "current_patient_db_id", None):
+            dialog = ReportRequirementsDialog(self)
+            dialog.exec_()
+            return
         
         print("Medical Report button clicked")
         # Import the medical report generation function and PDF viewer
         from .medical_report_form import generate_sleep_report, PDFViewerWidget
-        
+        from .full_psg_hypnogram import generate_full_psg_hypnogram
+
         # Generate the report and show in internal viewer
         try:
+            patient_data = None
+            patient_db_id = getattr(self, "current_patient_db_id", None)
+            if patient_db_id:
+                try:
+                    db_manager = DatabaseManager()
+                    patient_data = db_manager.get_patient_by_id(patient_db_id)
+                except Exception as db_error:
+                    print(f"⚠️ Could not fetch patient from DB for report: {db_error}")
+            else:
+                print("⚠️ No current patient DB id available for report generation")
+
             screenshot_paths = list(getattr(self, 'dashboard_screenshot_paths', []))
+            report_context = calculate_report_context(
+                getattr(self.monitor_chart, "analysis_results", None),
+                getattr(self.monitor_chart, "psg_full_data", {}).get("signals", {}) if getattr(self.monitor_chart, "psg_full_data", None) else {},
+                getattr(getattr(self.monitor_chart, "auto_rule_ai_result", None), "get", lambda *_: [])("events", []),
+            )
+
+            hypnogram_path = None
+            try:
+                psg_payload = getattr(self.monitor_chart, "psg_full_data", None) or {}
+                signals = psg_payload.get("signals", {})
+                if signals:
+                    output_folder = Path.home() / "SleepSenseReports" / "generated_assets"
+                    hypnogram_path = generate_full_psg_hypnogram(
+                        psg_data=signals,
+                        output_folder=str(output_folder),
+                        sampling_rate=10.0,
+                        patient_id=str(patient_data.get("patient_id") or patient_db_id or "patient") if patient_data else str(patient_db_id or "patient"),
+                        study_id=Path(getattr(self.monitor_chart, "loaded_csv_path", "study")).stem if getattr(self.monitor_chart, "loaded_csv_path", None) else "study",
+                        detected_events=(getattr(self.monitor_chart, "auto_rule_ai_result", {}) or {}).get("events", []),
+                    )
+                    print(f"✅ Full PSG hypnogram generated: {hypnogram_path}")
+            except Exception as hypnogram_error:
+                print(f"⚠️ Could not generate full PSG hypnogram: {hypnogram_error}")
+
+            if hypnogram_path:
+                screenshot_paths.insert(0, hypnogram_path)
+
             pdf_path = generate_sleep_report(
-                dashboard_screenshot_path=screenshot_paths if screenshot_paths else None
+                patient_data=patient_data,
+                dashboard_screenshot_path=screenshot_paths if screenshot_paths else None,
+                report_context=report_context,
             )
             print("✅ Medical report generated successfully!")
+
+            # Also save the report to the DB, otherwise nothing ever appears in
+            # the Database window's "3. Reports" section.
+            self.save_generated_report_to_db(patient_data, patient_db_id, pdf_path)
             
             # Show PDF in internal viewer
             self.pdf_viewer = PDFViewerWidget(pdf_path, self)
@@ -1601,17 +2239,59 @@ class SleepSenseDashboard(QMainWindow):
             
         except Exception as e:
             print(f"❌ Error generating medical report: {str(e)}")
+
+    def save_generated_report_to_db(self, patient_data, patient_db_id, pdf_path):
+        """Insert the generated report into the reports table with its PDF path."""
+        if not patient_db_id or not pdf_path:
+            print("⚠️ Report was not saved to the DB - patient id or pdf path missing")
+            return None
+
+        from datetime import datetime
+
+        patient_data = patient_data or {}
+        full_name = " ".join(
+            part for part in [
+                str(patient_data.get('last_name') or '').strip(),
+                str(patient_data.get('first_name') or '').strip(),
+            ] if part
+        ) or "Unknown"
+
+        report_row = {
+            'patient_id': patient_db_id,
+            'patient_name': full_name,
+            # Store both date and time so multiple reports on the same day remain distinct
+            'report_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'findings': '',
+            'diagnosis': '',
+            'recommendations': '',
+            'doctor_name': str(patient_data.get('physician') or '').strip(),
+            'specialization': str(patient_data.get('department') or '').strip(),
+            'pdf_path': str(pdf_path),
+        }
+
+        try:
+            report_id = DatabaseManager().save_report(report_row)
+            if report_id:
+                print(f"🗂️ Report saved to DB (id={report_id})")
+            return report_id
+        except Exception as error:
+            print(f"⚠️ Report could not be saved to DB: {error}")
+            return None
     
     def load_patient_data(self, patient_data):
         """Load patient data from database and display in dashboard"""
         print(f"Loading patient data: {patient_data['last_name']} {patient_data['first_name']}")
+
+        # Keep the database primary key so report generation can fetch a fresh row later.
+        self.current_patient_db_id = patient_data.get('id')
         
         # Create patient ID string for display
-        patient_id_str = patient_data.get('patient_id', str(patient_data.get('id', '--------')))
+        patient_id_str = patient_data.get('patient_id') or str(patient_data.get('id', '--------'))
         
         # Set patient ID in monitor chart
         if hasattr(self, 'monitor_chart'):
             self.monitor_chart.set_patient_id(patient_id_str)
+            self.monitor_chart.patient_db_id = patient_data.get('id')
         
         # Update patient info widget
         if hasattr(self, 'patient_info'):
@@ -1619,10 +2299,32 @@ class SleepSenseDashboard(QMainWindow):
                 'last_name': patient_data.get('last_name', ''),
                 'first_name': patient_data.get('first_name', ''),
                 'dob': patient_data.get('dob', ''),
-                'patient_id': patient_id_str
+                'patient_id': patient_id_str,
+                'gender': patient_data.get('gender', ''),
+                'age': patient_data.get('age', ''),
             })
         
         print(f"Patient data loaded successfully in dashboard")
+
+    def load_psg_data_from_path(self, file_path):
+        """Load a previously saved PSG file directly from disk."""
+        if not file_path:
+            return False
+
+        from pathlib import Path
+
+        if not Path(file_path).exists():
+            QMessageBox.warning(
+                self,
+                "File Missing",
+                f"Saved PSG file not found:\n{file_path}",
+            )
+            return False
+
+        print(f"🎬 Loading PSG data from saved session: {file_path}")
+        self.monitor_chart.skip_next_auto_playback = True
+        self.monitor_chart.load_psg_data(file_path)
+        return True
     
     def open_signal_view(self):
         """View live physiological signals"""
@@ -1633,22 +2335,58 @@ class SleepSenseDashboard(QMainWindow):
         print("Signal View button clicked")
         # TODO: Implement signal view logic
     
-    def open_event_list(self):
-        """View detected events"""
-        # Check if monitor chart has selection active and block if needed
-        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
-            return
-        
-        print("Event List button clicked")
-        self.event_window = EventWindow(self)
-        self.event_window.exec_()  # Modal dialog
+    # def open_event_list(self):
+    #     """View detected events"""
+    #     # Check if monitor chart has selection active and block if needed
+    #     if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+    #         return
+    #
+    #     print("Event List button clicked")
+    #     self.event_window = EventWindow(self)
+    #     self.event_window.exec_()  # Modal dialog
     
     def take_screenshot(self):
         """Take a drag-selected screenshot on top of the current dashboard."""
         try:
-            source_pixmap = self.grab()
+            if not getattr(self.monitor_chart, "loaded_csv_path", None):
+                show_styled_warning(
+                    self,
+                    "No Data Uploaded",
+                    "Please upload the data first before taking a screenshot.",
+                )
+                return
+
+            self.repaint()
+            if getattr(self, "monitor_chart", None) is not None:
+                self.monitor_chart.repaint()
+                self.monitor_chart.update()
+                scroll_area = getattr(self.monitor_chart, "scroll_area", None)
+                if scroll_area is not None and hasattr(scroll_area, "viewport"):
+                    scroll_area.viewport().repaint()
+                charts_widget = getattr(self.monitor_chart, "charts_widget", None)
+                if charts_widget is not None:
+                    charts_widget.repaint()
+                try:
+                    import pyqtgraph as pg
+
+                    for plot_widget in self.monitor_chart.findChildren(pg.PlotWidget):
+                        try:
+                            plot_widget.getViewBox().update()
+                        except Exception:
+                            pass
+                        plot_widget.repaint()
+                except Exception:
+                    pass
+            QApplication.processEvents()
+            QApplication.sendPostedEvents(None, 0)
+            QApplication.processEvents()
+
+            capture_widget = self.centralWidget() or self
+            capture_widget.repaint()
+            QApplication.processEvents()
+            source_pixmap = capture_widget.grab()
             if source_pixmap.isNull():
-                raise RuntimeError("Could not capture the dashboard window.")
+                raise RuntimeError("Could not capture the dashboard area.")
 
             if self.screenshot_overlay is not None:
                 try:
@@ -1663,7 +2401,7 @@ class SleepSenseDashboard(QMainWindow):
                 self.screenshot_overlay = None
 
             overlay = ScreenshotOverlayWidget(source_pixmap, self)
-            overlay.setGeometry(self.rect())
+            overlay.setGeometry(capture_widget.geometry())
             overlay.selection_confirmed.connect(
                 lambda rect, pixmap=source_pixmap, widget=overlay: self._finalize_dashboard_screenshot(pixmap, rect, widget)
             )
@@ -1714,15 +2452,9 @@ class SleepSenseDashboard(QMainWindow):
         if self.screenshot_overlay is overlay:
             self.screenshot_overlay = None
 
-        choice = QMessageBox.question(
-            self,
-            "Screenshot Captured",
-            "Screenshot captured successfully.\n\nAdd this screenshot to the medical patient report?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
+        choice = ScreenshotCropResultDialog(temp_path, self).exec_()
 
-        if choice == QMessageBox.Yes:
+        if choice == QDialog.Accepted:
             screenshot_paths = list(getattr(self, "dashboard_screenshot_paths", []))
             if temp_path not in screenshot_paths:
                 screenshot_paths.append(temp_path)
@@ -1779,9 +2511,9 @@ class SleepSenseDashboard(QMainWindow):
         signal_view_action.triggered.connect(self.button_functions.view_signal_view)
         view_menu.addAction(signal_view_action)
 
-        event_list_action = QAction('Event list', self)
-        event_list_action.triggered.connect(self.button_functions.view_event_list)
-        view_menu.addAction(event_list_action)
+        # event_list_action = QAction('Event list', self)
+        # event_list_action.triggered.connect(self.button_functions.view_event_list)
+        # view_menu.addAction(event_list_action)
     
     def start_auto_playback(self):
         """Playback is intentionally manual only."""
@@ -1999,6 +2731,14 @@ class SleepSenseDashboard(QMainWindow):
     
     def load_psg_data_from_file(self):
         """Open file dialog to select and load PSG data file"""
+        if not getattr(self, "current_patient_db_id", None):
+            QMessageBox.warning(
+                self,
+                "No Patient Selected",
+                "Please select a patient from the database before uploading data.",
+            )
+            return
+
         from PyQt5.QtWidgets import QFileDialog
         
         file_path, _ = QFileDialog.getOpenFileName(
@@ -2013,6 +2753,3 @@ class SleepSenseDashboard(QMainWindow):
             self.monitor_chart.skip_next_auto_playback = True
             self.monitor_chart.load_psg_data(file_path)
             print("✅ PSG data loaded successfully - Playback ready!")
-
-
-

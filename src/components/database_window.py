@@ -1,20 +1,73 @@
 """
-Patient Database Window - Sleep Sense Application
-Replicates the database interface shown in the reference image
+Patient Database Window - Sleep Sense Application.
+Replicates the database interface shown in the reference image.
 """
 
 from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QFrame, QSplitter, QGroupBox, QLineEdit, QCheckBox,
+    QLabel, QFrame, QSplitter, QGroupBox, QLineEdit,
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
-    QToolBar, QSizePolicy
+    QToolBar, QSizePolicy, QMessageBox, QInputDialog
 )
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont
+import hashlib
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.utils.database_manager import DatabaseManager
+from src.utils.db_utils import list_sessions
+
+
+# ---------------------------------------------------------------------------
+# EDIT PASSWORD
+# ---------------------------------------------------------------------------
+
+#
+#  password: admin123
+EDIT_PASSWORD_HASH = "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9"
+
+
+class StrictClickButton(QPushButton):
+    """Push button that only activates on a deliberate click, not a drag."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._press_pos = None
+        self._click_valid = False
+        self.setFocusPolicy(Qt.NoFocus)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._press_pos = event.pos()
+            self._click_valid = True
+        else:
+            self._click_valid = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._click_valid and self._press_pos is not None:
+            delta = event.pos() - self._press_pos
+            if delta.manhattanLength() > 4:
+                self._click_valid = False
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if not self._click_valid or event.button() != Qt.LeftButton:
+            self._click_valid = False
+            self._press_pos = None
+            event.ignore()
+            return
+
+        if not self.rect().contains(event.pos()):
+            self._click_valid = False
+            self._press_pos = None
+            event.ignore()
+            return
+
+        self._click_valid = False
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
 
 
 class DatabaseWindow(QDialog):
@@ -27,6 +80,8 @@ class DatabaseWindow(QDialog):
         self.setFixedSize(1200, 800)
         self.db_manager = DatabaseManager()
         self.init_ui()
+ 
+        self.connect_signals()
         self.load_patients_from_database()
         
     def init_ui(self):
@@ -130,66 +185,31 @@ class DatabaseWindow(QDialog):
         search_layout.addWidget(self.search_input)
         layout.addLayout(search_layout)
         
-        # Checkboxes
-        checkbox_layout = QHBoxLayout()
-        self.full_text_search = QCheckBox("Full text search")
-        self.search_at_keypress = QCheckBox("Search at key press")
-        
-        checkbox_style = """
-            QCheckBox {
-                font-size: 12px;
-                color: #34495e;
-                spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border: 2px solid #d1e3f4;
-                border-radius: 3px;
-                background-color: #ffffff;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #3498db;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #3498db;
-                border-color: #3498db;
-                l
-        """
-        
-        self.full_text_search.setStyleSheet(checkbox_style)
-        self.search_at_keypress.setStyleSheet(checkbox_style)
-        
-        checkbox_layout.addWidget(self.full_text_search)
-        checkbox_layout.addWidget(self.search_at_keypress)
-        checkbox_layout.addStretch()
-        layout.addLayout(checkbox_layout)
-        
         # Patients table
         self.patients_table = QTableWidget()
-        self.patients_table.setColumnCount(3)
-        self.patients_table.setHorizontalHeaderLabels(["Last name", "First name", "Date of birth"])
+        self.patients_table.setColumnCount(4)
+        self.patients_table.setHorizontalHeaderLabels(["Last name", "First name", "Date of birth", "Edit"])
         
         # Professional medical table styling
         self.patients_table.setStyleSheet("""
             QTableWidget {
-                border: 1px solid #d1e3f4;
+                border: 1px solid #b7c8d8;
                 border-radius: 6px;
                 background-color: #ffffff;
-                gridline-color: #e8f4f8;
+                gridline-color: #b7c8d8;
                 selection-background-color: #e3f2fd;
                 selection-color: #1565c0;
             }
             QTableWidget::item {
                 padding: 8px;
-                border-bottom: 1px solid #e8f4f8;
+                border: 1px solid #c1cfdb;
             }
             QTableWidget::item:selected {
-                background-color: #e3f2fd;
-                color: #1565c0;
+                background-color: #d9ecfb;
+                color: #123b63;
             }
             QTableWidget::item:hover {
-                background-color: #f5f9fc;
+                background-color: #edf7fe;
             }
             QHeaderView::section {
                 background-color: #f8fbfd;
@@ -197,12 +217,12 @@ class DatabaseWindow(QDialog):
                 font-weight: 600;
                 font-size: 13px;
                 padding: 10px 8px;
-                border: 1px solid #d1e3f4;
+                border: 1px solid #b7c8d8;
                 border-right: none;
                 border-bottom: 2px solid #3498db;
             }
             QHeaderView::section:last {
-                border-right: 1px solid #d1e3f4;
+                border-right: 1px solid #b7c8d8;
             }
         """)
         
@@ -211,11 +231,22 @@ class DatabaseWindow(QDialog):
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.Fixed)
+        self.patients_table.setColumnWidth(3, 110)
         self.patients_table.setAlternatingRowColors(True)
         self.patients_table.setSelectionBehavior(QTableWidget.SelectRows)
+        # KYON: default ExtendedSelection me halka sa drag hote hi kai rows
+        # select ho jate the, aur neeche wala code sabse upar wali row utha
+        # leta tha - isliye galat patient ke records dikhne lagte the.
+        self.patients_table.setSelectionMode(QTableWidget.SingleSelection)
         self.patients_table.setShowGrid(True)
         self.patients_table.verticalHeader().setVisible(False)
         self.patients_table.setSortingEnabled(True)
+        # Disable inline editing triggered by double-click. Edit must happen only
+        # through the Edit button.
+        self.patients_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        # Fix row height so the Edit button stays vertically centered.
+        self.patients_table.verticalHeader().setDefaultSectionSize(36)
         
         layout.addWidget(self.patients_table)
         
@@ -257,16 +288,16 @@ class DatabaseWindow(QDialog):
         # Professional medical table styling
         self.records_table.setStyleSheet("""
             QTableWidget {
-                border: 1px solid #d1e3f4;
+                border: 1px solid #b7c8d8;
                 border-radius: 6px;
                 background-color: #ffffff;
-                gridline-color: #e8f4f8;
+                gridline-color: #b7c8d8;
                 selection-background-color: #e3f2fd;
                 selection-color: #1565c0;
             }
             QTableWidget::item {
                 padding: 8px;
-                border-bottom: 1px solid #e8f4f8;
+                border: 1px solid #c1cfdb;
             }
             QTableWidget::item:selected {
                 background-color: #e3f2fd;
@@ -281,12 +312,12 @@ class DatabaseWindow(QDialog):
                 font-weight: 600;
                 font-size: 13px;
                 padding: 10px 8px;
-                border: 1px solid #d1e3f4;
+                border: 1px solid #b7c8d8;
                 border-right: none;
                 border-bottom: 2px solid #3498db;
             }
             QHeaderView::section:last {
-                border-right: 1px solid #d1e3f4;
+                border-right: 1px solid #b7c8d8;
             }
         """)
         
@@ -303,6 +334,7 @@ class DatabaseWindow(QDialog):
         self.records_table.setShowGrid(True)
         self.records_table.verticalHeader().setVisible(False)
         self.records_table.setSortingEnabled(True)
+        self.records_table.setEditTriggers(QTableWidget.NoEditTriggers)
         
         layout.addWidget(self.records_table)
         
@@ -336,21 +368,21 @@ class DatabaseWindow(QDialog):
         # Reports table
         self.reports_table = QTableWidget()
         self.reports_table.setColumnCount(3)
-        self.reports_table.setHorizontalHeaderLabels(["Date, time", "Analysis status", "Manual status"])
+        self.reports_table.setHorizontalHeaderLabels(["Report date", "Doctor", "Specialization"])
         
         # Professional medical table styling
         self.reports_table.setStyleSheet("""
             QTableWidget {
-                border: 1px solid #d1e3f4;
+                border: 1px solid #b7c8d8;
                 border-radius: 6px;
                 background-color: #ffffff;
-                gridline-color: #e8f4f8;
+                gridline-color: #b7c8d8;
                 selection-background-color: #e3f2fd;
                 selection-color: #1565c0;
             }
             QTableWidget::item {
                 padding: 8px;
-                border-bottom: 1px solid #e8f4f8;
+                border: 1px solid #c1cfdb;
             }
             QTableWidget::item:selected {
                 background-color: #e3f2fd;
@@ -365,12 +397,12 @@ class DatabaseWindow(QDialog):
                 font-weight: 600;
                 font-size: 13px;
                 padding: 10px 8px;
-                border: 1px solid #d1e3f4;
+                border: 1px solid #b7c8d8;
                 border-right: none;
                 border-bottom: 2px solid #3498db;
             }
             QHeaderView::section:last {
-                border-right: 1px solid #d1e3f4;
+                border-right: 1px solid #b7c8d8;
             }
         """)
         
@@ -384,6 +416,7 @@ class DatabaseWindow(QDialog):
         self.reports_table.setShowGrid(True)
         self.reports_table.verticalHeader().setVisible(False)
         self.reports_table.setSortingEnabled(True)
+        self.reports_table.setEditTriggers(QTableWidget.NoEditTriggers)
         
         layout.addWidget(self.reports_table)
         
@@ -482,61 +515,267 @@ class DatabaseWindow(QDialog):
         layout.addWidget(self.cancel_btn)
         
         return toolbar
-        
-    def load_patients_from_database(self):
-        """Load patients from database"""
-        patients = self.db_manager.get_all_patients()
-        
-        self.patients_table.setRowCount(len(patients))
-        for row, patient in enumerate(patients):
-            self.patients_table.setItem(row, 0, QTableWidgetItem(patient['last_name']))
-            self.patients_table.setItem(row, 1, QTableWidgetItem(patient['first_name']))
-            self.patients_table.setItem(row, 2, QTableWidgetItem(patient['dob']))
-            # Store patient ID in the row for later retrieval
-            self.patients_table.item(row, 0).setData(Qt.UserRole, patient['id'])
-        
-        # Clear records table for now
-        self.records_table.setRowCount(0)
-        # Load reports for patients
-        self.load_reports_from_database()
-        
+
+    def connect_signals(self):
+        """Connect signals only once when the window is created."""
         # Connect search functionality
         self.search_input.textChanged.connect(self.filter_patients)
-        self.full_text_search.stateChanged.connect(self.filter_patients)
-        self.search_at_keypress.stateChanged.connect(self.filter_patients)
-        
+
         # Connect button actions
         self.selection_btn.clicked.connect(self.handle_selection)
         self.delete_btn.clicked.connect(self.handle_delete)
         self.cancel_btn.clicked.connect(self.reject)  # Close dialog
+
+        # Load recordings and reports only when a patient row is actually clicked
+        self.patients_table.itemClicked.connect(self.on_patient_clicked)
+        # Double-click a recording -> load that CSV into the charts
+        self.records_table.itemDoubleClicked.connect(self.open_selected_record)
+        # Double-click a report -> open the PDF
+        self.reports_table.itemDoubleClicked.connect(self.open_selected_report)
+
+    def on_patient_clicked(self, item):
+        """Handle explicit patient-row clicks only."""
+        self.on_patient_selection_changed()
+
+    def on_patient_selection_changed(self):
+        """Refresh Records and Reports for the selected patient.
+
+        Pehle dono tables khali karte hain, taaki patient badalte waqt
+        pichhle patient ka data ek pal ke liye bhi na dikhe.
+        """
+        self.records_table.setRowCount(0)
+        self.reports_table.setRowCount(0)
+
+        patient = self.get_selected_patient()
+        if not patient:
+            return
+
+        self.load_records_for_patient(patient)
+        self.load_reports_from_database(patient)
+
+    def get_selected_patient(self):
+        """Jis row par user ne click kiya, usi patient ka poora DB row (ya None).
+
+        currentRow() use karte hain, selectedItems()[0] nahi - wo hamesha
+        sabse UPAR wali selected row deta hai, click ki hui row nahi.
+        """
+        row = self.patients_table.currentRow()
+        if row < 0 or self.patients_table.isRowHidden(row):
+            return None
+
+        name_item = self.patients_table.item(row, 0)
+        if name_item is None:
+            return None
+
+        patient_db_id = name_item.data(Qt.UserRole)
+        if patient_db_id is None:
+            return None
+
+        return self.db_manager.get_patient_by_id(patient_db_id)
+
+    def load_records_for_patient(self, patient):
+        """Populate the Records table with the selected patient's saved sessions."""
+        self.records_table.setRowCount(0)
+        if not patient:
+            return
+
+        try:
+            sessions = list_sessions(
+                patient_id=(patient.get('patient_id') or None),
+                patient_db_id=patient.get('id'),
+            )
+        except Exception as error:
+            print(f"Error loading sessions: {error}")
+            return
+
+        was_sorting = self.records_table.isSortingEnabled()
+        self.records_table.setSortingEnabled(False)
+        self.records_table.setRowCount(len(sessions))
+
+        for row, session in enumerate(sessions):
+            saved_at = str(session.get('saved_at') or '')
+            if 'T' in saved_at:
+                recording_date, start_time = saved_at.split('T', 1)
+            else:
+                recording_date, start_time = saved_at, ''
+
+            file_path = str(session.get('file_path') or '')
+            archived = "Yes" if file_path and os.path.exists(file_path) else "Missing"
+
+            first_item = QTableWidgetItem(patient.get('last_name') or "")
+            first_item.setData(Qt.UserRole, file_path)
+            self.records_table.setItem(row, 0, first_item)
+            self.records_table.setItem(row, 1, QTableWidgetItem(patient.get('first_name') or ""))
+            self.records_table.setItem(row, 2, QTableWidgetItem(recording_date))
+            self.records_table.setItem(row, 3, QTableWidgetItem(start_time))
+            self.records_table.setItem(row, 4, QTableWidgetItem(session.get('duration') or "--"))
+            self.records_table.setItem(row, 5, QTableWidgetItem(archived))
+
+        self.records_table.setSortingEnabled(was_sorting)
+
+    def open_selected_record(self, item):
+        """Double-click a Records row to load that recording in the dashboard."""
+        row = item.row()
+        first_item = self.records_table.item(row, 0)
+        if first_item is None:
+            return
+
+        file_path = first_item.data(Qt.UserRole)
+        if not file_path:
+            QMessageBox.warning(self, "No File", "This session did not save a file path.")
+            return
+
+        if not os.path.exists(file_path):
+            QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"The recording file no longer exists:\n{file_path}",
+            )
+            return
+
+        parent = self.parent()
+        patient = self.get_selected_patient()
+        if patient and parent and hasattr(parent, 'load_patient_data'):
+            parent.load_patient_data(patient)
+
+        if parent and hasattr(parent, 'load_psg_data_from_path'):
+            if parent.load_psg_data_from_path(file_path):
+                self.accept()
+        else:
+            QMessageBox.warning(self, "Not Available", "The dashboard cannot load this recording.")
+
+    def load_patients_from_database(self):
+        """Load patients from the database."""
+        patients = self.db_manager.get_all_patients()
+
+        # Disable sorting while filling, otherwise rows can shuffle mid-load.
+        was_sorting = self.patients_table.isSortingEnabled()
+        self.patients_table.setSortingEnabled(False)
+
+        self.patients_table.setRowCount(len(patients))
+        for row, patient in enumerate(patients):
+            self.patients_table.setItem(row, 0, QTableWidgetItem(patient['last_name'] or ""))
+            self.patients_table.setItem(row, 1, QTableWidgetItem(patient['first_name'] or ""))
+            self.patients_table.setItem(row, 2, QTableWidgetItem(patient['dob'] or ""))
+            # Store the patient ID in the row for later retrieval
+            self.patients_table.item(row, 0).setData(Qt.UserRole, patient['id'])
+            # Each row gets its own Edit button
+            self.patients_table.setCellWidget(row, 3, self.create_edit_button())
+
+        self.patients_table.setSortingEnabled(was_sorting)
+        
+        # Clear the Records table for now
+        self.records_table.setRowCount(0)
+        # Load reports for the selected patient
+        self.load_reports_from_database(self.get_selected_patient())
+
+    def create_edit_button(self):
+        """Create a simple Edit button for one row."""
+        button = StrictClickButton("Edit")
+        button.setCursor(Qt.PointingHandCursor)
+        button.setFixedHeight(24)
+        button.setMinimumWidth(64)
+        button.setStyleSheet("""
+            QPushButton {
+                background-color: #f8fbfd;
+                color: #1e3a5f;
+                border: 1px solid #3498db;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-weight: 700;
+                font-size: 12px;
+                min-width: 64px;
+            }
+            QPushButton:hover {
+                background-color: #e3f2fd;
+                border-color: #2980b9;
+            }
+            QPushButton:pressed {
+                background-color: #d6eaf8;
+            }
+        """)
+        # NOTE: Do not capture the row index here. When QTableWidget sorts,
+        # cell widgets do not move with the data, so we resolve the real row
+        # at click time using indexAt().
+        button.clicked.connect(lambda checked=False, btn=button: self.handle_edit_patient(btn))
+        return button
+
+    def verify_edit_password(self):
+        """Ask for the password before editing. Return True only if it matches."""
+        password, ok = QInputDialog.getText(
+            self,
+            "Password Required",
+            "Please enter the password before editing:",
+            QLineEdit.Password,
+        )
+        if not ok:
+            return False
+
+        entered_hash = hashlib.sha256((password or "").encode("utf-8")).hexdigest()
+        if entered_hash != EDIT_PASSWORD_HASH:
+            QMessageBox.warning(
+                self,
+                "Wrong Password",
+                "The password is incorrect. These details cannot be edited.",
+            )
+            return False
+
+        return True
+
+    def handle_edit_patient(self, cell_widget):
+        """Edit button -> password -> prefilled patient form -> DB update."""
+        index = self.patients_table.indexAt(cell_widget.pos())
+        if not index.isValid():
+            print("Could not resolve row for edit button")
+            return
+
+        row = index.row()
+        name_item = self.patients_table.item(row, 0)
+        if name_item is None:
+            return
+
+        patient_db_id = name_item.data(Qt.UserRole)
+        if patient_db_id is None:
+            QMessageBox.warning(self, "Not Found", "Could not find the patient ID for this row.")
+            return
+
+        if not self.verify_edit_password():
+            return
+
+        patient_data = self.db_manager.get_patient_by_id(patient_db_id)
+        if not patient_data:
+            QMessageBox.critical(self, "Error", "Could not load patient details from the database.")
+            return
+
+        from src.components.patient_record_form import PatientRecordForm
+
+        form = PatientRecordForm(self, patient_data=patient_data)
+        if form.exec_() == QDialog.Accepted:
+            self.load_patients_from_database()
         
     def filter_patients(self):
         """Filter patients table based on search criteria"""
         search_text = self.search_input.text().lower()
-        full_text = self.full_text_search.isChecked()
         
         for row in range(self.patients_table.rowCount()):
             visible = False
-            
-            if not search_text or self.search_at_keypress.isChecked():
+
+            if not search_text:
+                visible = True
+            else:
                 for col in range(self.patients_table.columnCount()):
                     item = self.patients_table.item(row, col)
                     if item and search_text in item.text().lower():
                         visible = True
                         break
-            else:
-                visible = True  # Show all if search at key press is disabled
                 
             self.patients_table.setRowHidden(row, not visible)
             
     def handle_selection(self):
         """Handle Selection button click"""
-        selected_items = self.patients_table.selectedItems()
-        if selected_items:
-            # Get the first selected row
-            row = selected_items[0].row()
-            
-            # Get patient database ID from the row
+        row = self.patients_table.currentRow()
+        if row >= 0 and not self.patients_table.isRowHidden(row):
+            # Get the patient database ID from the row
             patient_db_id = self.patients_table.item(row, 0).data(Qt.UserRole)
             
             # Get patient data from the selected row
@@ -544,22 +783,22 @@ class DatabaseWindow(QDialog):
             first_name = self.patients_table.item(row, 1).text()
             dob = self.patients_table.item(row, 2).text()
             
-            # Fetch full patient data from database
+            # Fetch the full patient data from the database
             full_patient_data = self.db_manager.get_patient_by_id(patient_db_id)
             
             if full_patient_data:
                 print(f"Selected patient: {full_patient_data['last_name']} {full_patient_data['first_name']} (DB ID: {patient_db_id})")
                 
-                # Set patient data in parent dashboard
+                # Set patient data in the parent dashboard
                 if self.parent() and hasattr(self.parent(), 'load_patient_data'):
                     self.parent().load_patient_data(full_patient_data)
                 else:
-                    # Fallback to old method if load_patient_data doesn't exist
+                    # Fallback to the old method if load_patient_data does not exist
                     if self.parent() and hasattr(self.parent(), 'monitor_chart'):
                         patient_id_str = f"{last_name}_{first_name}_{dob}"
                         self.parent().monitor_chart.set_patient_id(patient_id_str)
                         
-                        # Update patient info widget
+                        # Update the patient info widget
                         if hasattr(self.parent(), 'patient_info'):
                             self.parent().patient_info.set_patient_data({
                                 'last_name': last_name,
@@ -571,9 +810,9 @@ class DatabaseWindow(QDialog):
                 # Close the dialog
                 self.accept()
             else:
-                print("Error: Could not fetch patient data from database")
+                print("Error: Could not fetch patient data from the database")
         else:
-            print("No patients selected")
+            QMessageBox.information(self, "No Selection", "Pehle ek patient select karein.")
             
     def handle_view(self):
         """Handle View button click"""
@@ -595,13 +834,12 @@ class DatabaseWindow(QDialog):
         print("Delete action triggered")
         
         # Get selected patient
-        selected_items = self.patients_table.selectedItems()
-        if not selected_items:
-            print("No patient selected for deletion")
+        row = self.patients_table.currentRow()
+        if row < 0 or self.patients_table.isRowHidden(row):
+            QMessageBox.information(self, "No Selection", "Pehle ek patient select karein.")
             return
             
         # Get patient data
-        row = selected_items[0].row()
         patient_db_id = self.patients_table.item(row, 0).data(Qt.UserRole)
         last_name = self.patients_table.item(row, 0).text()
         first_name = self.patients_table.item(row, 1).text()
@@ -621,23 +859,67 @@ class DatabaseWindow(QDialog):
             success = self.db_manager.delete_patient(patient_db_id)
             if success:
                 print(f"Patient {last_name} {first_name} deleted successfully")
-                # Refresh the patients list and reports
+                # Refresh the patients list (reports/records update inside this call)
                 self.load_patients_from_database()
-                self.load_reports_from_database()
             else:
                 print("Failed to delete patient")
         else:
             print("Delete cancelled")
     
-    def load_reports_from_database(self):
-        """Load reports from database"""
-        reports = self.db_manager.get_all_reports()
-        
+    def load_reports_from_database(self, patient=None):
+        """Load reports. If a patient is provided, show only that patient's reports."""
+        if patient and patient.get('id'):
+            reports = self.db_manager.get_patient_reports(patient['id'])
+        else:
+            reports = self.db_manager.get_all_reports()
+
+        was_sorting = self.reports_table.isSortingEnabled()
+        self.reports_table.setSortingEnabled(False)
         self.reports_table.setRowCount(len(reports))
+
         for row, report in enumerate(reports):
-            self.reports_table.setItem(row, 0, QTableWidgetItem(report['patient_name']))
-            self.reports_table.setItem(row, 1, QTableWidgetItem(report['report_date']))
-            self.reports_table.setItem(row, 2, QTableWidgetItem(report['doctor_name']))
-            self.reports_table.setItem(row, 3, QTableWidgetItem(report['specialization']))
-            # Store report ID in row for later retrieval
-            self.reports_table.item(row, 0).setData(Qt.UserRole, report['id'])
+            date_item = QTableWidgetItem(str(report.get('report_date') or ''))
+            # Store both the PDF path and the report ID in the row
+            date_item.setData(Qt.UserRole, str(report.get('pdf_path') or ''))
+            date_item.setData(Qt.UserRole + 1, report.get('id'))
+            self.reports_table.setItem(row, 0, date_item)
+            self.reports_table.setItem(row, 1, QTableWidgetItem(str(report.get('doctor_name') or '')))
+            self.reports_table.setItem(row, 2, QTableWidgetItem(str(report.get('specialization') or '')))
+
+        self.reports_table.setSortingEnabled(was_sorting)
+
+    def open_selected_report(self, item):
+        """Double-click a report row to open its PDF."""
+        first_item = self.reports_table.item(item.row(), 0)
+        if first_item is None:
+            return
+
+        pdf_path = first_item.data(Qt.UserRole)
+        if not pdf_path:
+            QMessageBox.information(
+                self,
+                "No PDF",
+                "This report did not save a PDF path.\n"
+                "It was probably created before this feature existed.",
+            )
+            return
+
+        if not os.path.exists(pdf_path):
+            QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"The report PDF no longer exists:\n{pdf_path}",
+            )
+            return
+
+        try:
+            from .medical_report_form import PDFViewerWidget
+            viewer = PDFViewerWidget(pdf_path, self, allow_print=True)
+            viewer.exec_()
+        except Exception as error:
+            # If the internal viewer fails, open the PDF with the system default app
+            print(f"Internal PDF viewer failed: {error}")
+            from PyQt5.QtGui import QDesktopServices
+            from PyQt5.QtCore import QUrl
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(pdf_path)):
+                QMessageBox.critical(self, "Cannot Open", f"Could not open the PDF:\n{pdf_path}")

@@ -9,8 +9,8 @@ from PyQt5.QtWidgets import (
     QFrame, QScrollArea, QDateEdit, QGroupBox, QGridLayout,
     QSizePolicy, QApplication, QMessageBox
 )
-from PyQt5.QtCore import Qt, QDate
-from PyQt5.QtGui import QFont, QPixmap
+from PyQt5.QtCore import Qt, QDate, QRegularExpression
+from PyQt5.QtGui import QFont, QPixmap, QRegularExpressionValidator
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,14 +19,251 @@ from src.utils.database_manager import DatabaseManager
 
 class PatientRecordForm(QDialog):
     """Full Page Patient Record Form"""
+
+    FORM_LABEL_WIDTH = 122
+    FORM_FIELD_WIDTH = 136
+    FORM_FIELD_HEIGHT = 34
+    PHONE_PREFIX = "+91 "
+
+    REQUIRED_LINE_EDIT_STYLE = """
+        QLineEdit {
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 0, y2: 1,
+                stop: 0 #fff9c4,
+                stop: 1 #ffeb3b
+            );
+            border: 2px solid #ffc107;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #2c3e50;
+            font-weight: 600;
+        }
+        QLineEdit:focus {
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 0, y2: 1,
+                stop: 0 #ffecb3,
+                stop: 1 #ffe082
+            );
+            border: 2px solid #ff9800;
+        }
+    """
+
+    DEFAULT_LINE_EDIT_STYLE = """
+        QLineEdit {
+            border: 2px solid #e1e8ed;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+            background-color: #ffffff;
+            color: #2c3e50;
+        }
+        QLineEdit:focus {
+            border: 2px solid #4a90e2;
+            background-color: #f0f8ff;
+        }
+        QLineEdit:hover {
+            border-color: #4a90e2;
+        }
+    """
+
+    REQUIRED_DATE_EDIT_STYLE = """
+        QDateEdit {
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 0, y2: 1,
+                stop: 0 #fff9c4,
+                stop: 1 #ffeb3b
+            );
+            border: 2px solid #ffc107;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #2c3e50;
+            font-weight: 600;
+        }
+        QDateEdit:focus {
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 0, y2: 1,
+                stop: 0 #ffecb3,
+                stop: 1 #ffe082
+            );
+            border: 2px solid #ff9800;
+        }
+    """
+
+    DEFAULT_DATE_EDIT_STYLE = """
+        QDateEdit {
+            border: 2px solid #e1e8ed;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+            background-color: #ffffff;
+            color: #2c3e50;
+        }
+        QDateEdit:focus {
+            border: 2px solid #4a90e2;
+            background-color: #f0f8ff;
+        }
+        QDateEdit:hover {
+            border-color: #4a90e2;
+        }
+    """
+
+    ERROR_LINE_EDIT_STYLE = """
+        QLineEdit {
+            background-color: #ffcccb;
+            border: 2px solid red;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #2c3e50;
+            font-weight: 600;
+        }
+        QLineEdit:focus {
+            background-color: #ffcccb;
+            border: 2px solid #dc2626;
+        }
+    """
+
+    ERROR_DATE_EDIT_STYLE = """
+        QDateEdit {
+            background-color: #ffcccb;
+            border: 2px solid red;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #2c3e50;
+            font-weight: 600;
+        }
+        QDateEdit:focus {
+            background-color: #ffcccb;
+            border: 2px solid #dc2626;
+        }
+    """
+
+    def _create_form_label(self, text):
+        label = QLabel(text)
+        label.setFixedWidth(self.FORM_LABEL_WIDTH)
+        return label
+
+    def _apply_uniform_field_size(self, widget):
+        widget.setFixedHeight(self.FORM_FIELD_HEIGHT)
+        widget.setFixedWidth(self.FORM_FIELD_WIDTH)
+
+    def _style_default_line_edit(self, widget):
+        widget.setStyleSheet(self.DEFAULT_LINE_EDIT_STYLE)
+
+    def _style_default_date_edit(self, widget):
+        widget.setStyleSheet(self.DEFAULT_DATE_EDIT_STYLE)
+
+    def _set_regex_validator(self, widget, pattern):
+        widget.setValidator(QRegularExpressionValidator(QRegularExpression(pattern), widget))
+
+    def _configure_field_limits(self):
+        self.last_name_edit.setMaxLength(50)
+        self.first_name_edit.setMaxLength(50)
+        self.patient_id_edit.setMaxLength(20)
+        self._set_regex_validator(self.patient_id_edit, r"[A-Za-z0-9]{0,20}")
+
+        self.title_edit.setMaxLength(20)
+        self.street_edit.setMaxLength(100)
+        self.name_suffix_edit.setMaxLength(4)
+        self._set_regex_validator(self.name_suffix_edit, r"[A-Za-z0-9]{0,4}")
+        self.zip_edit.setMaxLength(10)
+        self._set_regex_validator(self.zip_edit, r"[A-Za-z0-9\- ]{0,10}")
+        self.phone_edit.setMaxLength(15)
+        self.fax_edit.setMaxLength(15)
+        self.city_state_edit.setMaxLength(50)
+        self.country_edit.setMaxLength(40)
+
+        self.clinic_edit.setMaxLength(50)
+        self.cost_unit_edit.setMaxLength(10)
+        self._set_regex_validator(self.cost_unit_edit, r"[A-Za-z0-9]{0,10}")
+        self.department_edit.setMaxLength(50)
+        self.ins_no_edit.setMaxLength(20)
+        self._set_regex_validator(self.ins_no_edit, r"[A-Za-z0-9]{0,20}")
+        self.physician_edit.setMaxLength(50)
+        self.policyholder_edit.setMaxLength(50)
+        self.status_edit.setMaxLength(30)
+
+        self.weight_edit.setMaxLength(6)
+        self._set_regex_validator(self.weight_edit, r"\d{0,3}(\.\d{0,2})?")
+        self.bmi_edit.setMaxLength(5)
+        self._set_regex_validator(self.bmi_edit, r"\d{0,2}(\.\d{0,2})?")
+        self.height_edit.setMaxLength(6)
+        self._set_regex_validator(self.height_edit, r"\d{0,3}(\.\d{0,1})?")
+        self.bp_systolic_edit.setMaxLength(3)
+        self._set_regex_validator(self.bp_systolic_edit, r"\d{0,3}")
+        self.bp_diastolic_edit.setMaxLength(3)
+        self._set_regex_validator(self.bp_diastolic_edit, r"\d{0,3}")
+
+        numeric_hint = Qt.ImhFormattedNumbersOnly | Qt.ImhPreferNumbers
+        self.weight_edit.setInputMethodHints(numeric_hint)
+        self.bmi_edit.setInputMethodHints(numeric_hint)
+        self.height_edit.setInputMethodHints(numeric_hint)
+        self.bp_systolic_edit.setInputMethodHints(Qt.ImhDigitsOnly)
+        self.bp_diastolic_edit.setInputMethodHints(Qt.ImhDigitsOnly)
+
+    def _ensure_phone_prefix(self, widget):
+        text = widget.text()
+        if not text.startswith(self.PHONE_PREFIX):
+            suffix = "".join(ch for ch in text if ch.isdigit())
+            widget.blockSignals(True)
+            widget.setText(f"{self.PHONE_PREFIX}{suffix}")
+            widget.setCursorPosition(len(widget.text()))
+            widget.blockSignals(False)
+
+    def _validate_phone_like_field(self, widget):
+        self._ensure_phone_prefix(widget)
+        text = widget.text()
+        if not text:
+            return
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if digits.startswith("91"):
+            digits = digits[2:]
+        limited_digits = digits[:10]
+        widget.blockSignals(True)
+        widget.setText(f"{self.PHONE_PREFIX}{limited_digits}")
+        widget.setCursorPosition(len(widget.text()))
+        widget.blockSignals(False)
+
+    def _validate_bp_values(self):
+        systolic_text = self.bp_systolic_edit.text().strip()
+        diastolic_text = self.bp_diastolic_edit.text().strip()
+
+        if not systolic_text and not diastolic_text:
+            return None
+
+        if not systolic_text or not diastolic_text:
+            return "Both systolic and diastolic blood pressure values are required."
+
+        systolic = int(systolic_text)
+        diastolic = int(diastolic_text)
+
+        if not 60 <= systolic <= 250:
+            return "BP systolic must be between 60 and 250."
+        if not 40 <= diastolic <= 150:
+            return "BP diastolic must be between 40 and 150."
+        if systolic <= diastolic:
+            return "BP systolic must be greater than diastolic."
+
+        return None
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, patient_data=None, edit_mode=None):
         super().__init__(parent)
         self.setModal(True)
         self.setWindowTitle("Patient Record Card")
         self.setFixedSize(750, 650)
         self.db_manager = DatabaseManager()
+        self._base_styles = {}
+        self.patient_db_id = None
+        self.edit_mode = bool(patient_data) if edit_mode is None else edit_mode
+        self.patient_data = patient_data or {}
         self.init_ui()
+        if self.edit_mode and self.patient_data:
+            self.patient_db_id = self.patient_data.get("id")
+            self.setWindowTitle("Edit Patient Record Card")
+            self.populate_form(self.patient_data)
         
     def init_ui(self):
         # Main Layout with reduced margins
@@ -91,7 +328,7 @@ class PatientRecordForm(QDialog):
         main_layout.addWidget(scroll_area)
         
         # Required fields note
-        note_label = QLabel("Required fields are yellow.")
+        note_label = QLabel("Required fields are marked with *.")
         note_label.setAlignment(Qt.AlignRight)
         note_label.setStyleSheet("""
             QLabel {
@@ -101,6 +338,7 @@ class PatientRecordForm(QDialog):
             }
         """)
         main_layout.addWidget(note_label)
+        self._configure_field_limits()
         
         self.setStyleSheet("""
             QMainWindow {
@@ -299,82 +537,62 @@ class PatientRecordForm(QDialog):
         layout = QGridLayout()
         layout.setSpacing(8)
         layout.setContentsMargins(10, 15, 10, 10)
+        layout.setColumnStretch(0, 0)
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(2, 0)
+        layout.setColumnStretch(3, 1)
         
         # Last Name (Required)
         self.last_name_edit = QLineEdit()
         self.last_name_edit.setPlaceholderText("Example")
-        self.last_name_edit.setStyleSheet("""
-            QLineEdit {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #fff9c4,
-                    stop: 1 #ffeb3b
-                );
-                border: 2px solid #ffc107;
-                font-weight: 600;
-            }
-            QLineEdit:focus {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffecb3,
-                    stop: 1 #ffe082
-                );
-                border: 2px solid #ff9800;
-                box-shadow: 0 0 8px rgba(255, 193, 7, 0.4);
-            }
-        """)  # Attractive yellow gradient for required
-        layout.addWidget(QLabel("Last name:"), 0, 0)
+        self.last_name_edit.setStyleSheet(self.REQUIRED_LINE_EDIT_STYLE)
+        self.last_name_edit.textChanged.connect(self._reset_required_field_styles)
+        self._apply_uniform_field_size(self.last_name_edit)
+        layout.addWidget(self._create_form_label("Last name:"), 0, 0)
         layout.addWidget(self.last_name_edit, 0, 1)
         
         # First Name
         self.first_name_edit = QLineEdit()
-        self.first_name_edit.setPlaceholderText("Normal")
-        layout.addWidget(QLabel("First name:"), 0, 2)
+        self._style_default_line_edit(self.first_name_edit)
+        self._apply_uniform_field_size(self.first_name_edit)
+        layout.addWidget(self._create_form_label("First name:"), 0, 2)
         layout.addWidget(self.first_name_edit, 0, 3)
+        self._remember_base_style(self.first_name_edit)
         
         # DOB (Required)
         self.dob_edit = QDateEdit()
-        self.dob_edit.setDate(QDate(2000, 00, 00))
+        self.dob_edit.setDate(QDate(2000, 1, 1))
+        self.dob_edit.setDisplayFormat("dd/MM/yyyy")
         self.dob_edit.setCalendarPopup(True)
-        self.dob_edit.setStyleSheet("""
-            QDateEdit {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #fff9c4,
-                    stop: 1 #ffeb3b
-                );
-                border: 2px solid #ffc107;
-                font-weight: 600;
-            }
-            QDateEdit:focus {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffecb3,
-                    stop: 1 #ffe082
-                );
-                border: 2px solid #ff9800;
-                box-shadow: 0 0 8px rgba(255, 193, 7, 0.4);
-            }
-        """)  # Attractive yellow gradient for required
-        layout.addWidget(QLabel("DOB:"), 1, 0)
+        self.dob_edit.setStyleSheet(self.REQUIRED_DATE_EDIT_STYLE)
+        self.dob_edit.dateChanged.connect(self._reset_required_field_styles)
+        self._apply_uniform_field_size(self.dob_edit)
+        layout.addWidget(self._create_form_label("DOB:"), 1, 0)
         layout.addWidget(self.dob_edit, 1, 1)
+        self._remember_base_style(self.dob_edit)
         
         # Patient ID
         self.patient_id_edit = QLineEdit()
         self.patient_id_edit.setPlaceholderText("14021967")
-        layout.addWidget(QLabel("Patient ID:"), 1, 2)
+        self._style_default_line_edit(self.patient_id_edit)
+        self._apply_uniform_field_size(self.patient_id_edit)
+        layout.addWidget(self._create_form_label("Patient ID:"), 1, 2)
         layout.addWidget(self.patient_id_edit, 1, 3)
+        self._remember_base_style(self.patient_id_edit)
         
         # Gender
         gender_group = QButtonGroup()
-        self.male_radio = QRadioButton("male")
-        self.female_radio = QRadioButton("female")
-        self.female_radio.setChecked(True)
+        gender_group.setExclusive(False)
+        self.male_radio = QRadioButton("Male")
+        self.female_radio = QRadioButton("Female")
         gender_group.addButton(self.male_radio, 0)
         gender_group.addButton(self.female_radio, 1)
+        self.male_radio.setChecked(False)
+        self.female_radio.setChecked(False)
+        gender_group.setExclusive(True)
         
         gender_layout = QHBoxLayout()
-        gender_layout.addWidget(QLabel("Gender:"))
+        gender_layout.addWidget(self._create_form_label("Gender:"))
         gender_layout.addWidget(self.male_radio)
         gender_layout.addWidget(self.female_radio)
         gender_layout.addStretch()
@@ -383,6 +601,32 @@ class PatientRecordForm(QDialog):
         
         group.setLayout(layout)
         return group
+
+    def _make_field_label(self, text, required=False):
+        """Create a consistent field label, with a required marker when needed."""
+        label_text = f"{text} *" if required else text
+        label = QLabel(label_text + ":")
+        if required:
+            label.setStyleSheet("color: #b8860b; font-weight: 700;")
+        return label
+
+    def _remember_base_style(self, widget):
+        """Store the widget's original stylesheet so validation can restore it."""
+        self._base_styles[widget] = widget.styleSheet()
+
+    def _reset_validation_styles(self):
+        """Restore every tracked widget to its original style."""
+        for widget, style in self._base_styles.items():
+            widget.setStyleSheet(style)
+
+    def _mark_field_invalid(self, widget):
+        """Highlight a field in red when validation fails."""
+        base_style = self._base_styles.get(widget, widget.styleSheet())
+        invalid_style = """
+            border: 2px solid #e74c3c;
+            background-color: #fff5f5;
+        """
+        widget.setStyleSheet(f"{base_style}\n{invalid_style}")
     
     def create_contact_information_section(self):
         """Create Contact Information section"""
@@ -393,38 +637,60 @@ class PatientRecordForm(QDialog):
         
         # First row
         self.title_edit = QLineEdit()
-        layout.addWidget(QLabel("Title:"), 0, 0)
+        self._style_default_line_edit(self.title_edit)
+        self._apply_uniform_field_size(self.title_edit)
+        layout.addWidget(self._create_form_label("Title:"), 0, 0)
         layout.addWidget(self.title_edit, 0, 1)
         
         self.street_edit = QLineEdit()
-        layout.addWidget(QLabel("Street:"), 0, 2)
+        self._style_default_line_edit(self.street_edit)
+        self._apply_uniform_field_size(self.street_edit)
+        layout.addWidget(self._create_form_label("Street:"), 0, 2)
         layout.addWidget(self.street_edit, 0, 3)
         
         # Second row
         self.name_suffix_edit = QLineEdit()
-        layout.addWidget(QLabel("Name suffix:"), 1, 0)
+        self._style_default_line_edit(self.name_suffix_edit)
+        self._apply_uniform_field_size(self.name_suffix_edit)
+        layout.addWidget(self._create_form_label("Name suffix:"), 1, 0)
         layout.addWidget(self.name_suffix_edit, 1, 1)
         
         self.zip_edit = QLineEdit()
-        layout.addWidget(QLabel("Zip code:"), 1, 2)
+        self._style_default_line_edit(self.zip_edit)
+        self._apply_uniform_field_size(self.zip_edit)
+        layout.addWidget(self._create_form_label("Zip code:"), 1, 2)
         layout.addWidget(self.zip_edit, 1, 3)
         
         # Third row
         self.phone_edit = QLineEdit()
-        layout.addWidget(QLabel("Phone:"), 2, 0)
+        self._style_default_line_edit(self.phone_edit)
+        self._apply_uniform_field_size(self.phone_edit)
+        self.phone_edit.setPlaceholderText("+91 9876543210")
+        self.phone_edit.setText(self.PHONE_PREFIX)
+        self.phone_edit.textChanged.connect(lambda _=None: self._validate_phone_like_field(self.phone_edit))
+        layout.addWidget(self._create_form_label("Phone:"), 2, 0)
         layout.addWidget(self.phone_edit, 2, 1)
         
         self.city_state_edit = QLineEdit()
-        layout.addWidget(QLabel("City, State:"), 2, 2)
+        self._style_default_line_edit(self.city_state_edit)
+        self._apply_uniform_field_size(self.city_state_edit)
+        layout.addWidget(self._create_form_label("City, State:"), 2, 2)
         layout.addWidget(self.city_state_edit, 2, 3)
         
         # Fourth row
         self.fax_edit = QLineEdit()
-        layout.addWidget(QLabel("Fax:"), 3, 0)
+        self._style_default_line_edit(self.fax_edit)
+        self._apply_uniform_field_size(self.fax_edit)
+        self.fax_edit.setPlaceholderText("+91 9876543210")
+        self.fax_edit.setText(self.PHONE_PREFIX)
+        self.fax_edit.textChanged.connect(lambda _=None: self._validate_phone_like_field(self.fax_edit))
+        layout.addWidget(self._create_form_label("Fax:"), 3, 0)
         layout.addWidget(self.fax_edit, 3, 1)
         
         self.country_edit = QLineEdit()
-        layout.addWidget(QLabel("Country:"), 3, 2)
+        self._style_default_line_edit(self.country_edit)
+        self._apply_uniform_field_size(self.country_edit)
+        layout.addWidget(self._create_form_label("Country:"), 3, 2)
         layout.addWidget(self.country_edit, 3, 3)
         
         group.setLayout(layout)
@@ -439,40 +705,57 @@ class PatientRecordForm(QDialog):
         
         # First row
         self.clinic_edit = QLineEdit()
-        layout.addWidget(QLabel("Clinic:"), 0, 0)
+        self._style_default_line_edit(self.clinic_edit)
+        self._apply_uniform_field_size(self.clinic_edit)
+        layout.addWidget(self._create_form_label("Clinic:"), 0, 0)
         layout.addWidget(self.clinic_edit, 0, 1)
         
         self.cost_unit_edit = QLineEdit()
-        layout.addWidget(QLabel("Cost unit:"), 0, 2)
+        self._style_default_line_edit(self.cost_unit_edit)
+        self._apply_uniform_field_size(self.cost_unit_edit)
+        layout.addWidget(self._create_form_label("Cost unit:"), 0, 2)
         layout.addWidget(self.cost_unit_edit, 0, 3)
         
         # Second row
         self.department_edit = QLineEdit()
-        layout.addWidget(QLabel("Department:"), 1, 0)
+        self._style_default_line_edit(self.department_edit)
+        self._apply_uniform_field_size(self.department_edit)
+        layout.addWidget(self._create_form_label("Department:"), 1, 0)
         layout.addWidget(self.department_edit, 1, 1)
         
         self.ins_no_edit = QLineEdit()
-        layout.addWidget(QLabel("Ins. No.:"), 1, 2)
+        self._style_default_line_edit(self.ins_no_edit)
+        self._apply_uniform_field_size(self.ins_no_edit)
+        layout.addWidget(self._create_form_label("Ins. No.:"), 1, 2)
         layout.addWidget(self.ins_no_edit, 1, 3)
         
         # Third row
         self.physician_edit = QLineEdit()
-        layout.addWidget(QLabel("Physician:"), 2, 0)
+        self._style_default_line_edit(self.physician_edit)
+        self._apply_uniform_field_size(self.physician_edit)
+        layout.addWidget(self._create_form_label("Physician:"), 2, 0)
         layout.addWidget(self.physician_edit, 2, 1)
         
         self.policyholder_edit = QLineEdit()
-        layout.addWidget(QLabel("Policyholder No.:"), 2, 2)
+        self._style_default_line_edit(self.policyholder_edit)
+        self._apply_uniform_field_size(self.policyholder_edit)
+        layout.addWidget(self._create_form_label("Policyholder No.:"), 2, 2)
         layout.addWidget(self.policyholder_edit, 2, 3)
         
         # Fourth row
         self.valid_until_edit = QDateEdit()
         self.valid_until_edit.setDate(QDate.currentDate())
+        self.valid_until_edit.setDisplayFormat("dd/MM/yyyy")
         self.valid_until_edit.setCalendarPopup(True)
-        layout.addWidget(QLabel("Valid until:"), 3, 0)
+        self._style_default_date_edit(self.valid_until_edit)
+        self._apply_uniform_field_size(self.valid_until_edit)
+        layout.addWidget(self._create_form_label("Valid until:"), 3, 0)
         layout.addWidget(self.valid_until_edit, 3, 1)
         
         self.status_edit = QLineEdit()
-        layout.addWidget(QLabel("Status:"), 3, 2)
+        self._style_default_line_edit(self.status_edit)
+        self._apply_uniform_field_size(self.status_edit)
+        layout.addWidget(self._create_form_label("Status:"), 3, 2)
         layout.addWidget(self.status_edit, 3, 3)
         
         group.setLayout(layout)
@@ -487,45 +770,63 @@ class PatientRecordForm(QDialog):
         
         # Weight
         self.weight_edit = QLineEdit()
-        self.weight_edit.setPlaceholderText("58.89")
+        self.weight_edit.setPlaceholderText("120.50")
+        self._style_default_line_edit(self.weight_edit)
+        self._apply_uniform_field_size(self.weight_edit)
         weight_layout = QHBoxLayout()
         weight_layout.addWidget(self.weight_edit)
         weight_layout.addWidget(QLabel("kg"))
         weight_layout.setContentsMargins(0, 0, 0, 0)
         
-        layout.addWidget(QLabel("Weight:"), 0, 0)
+        layout.addWidget(self._create_form_label("Weight:"), 0, 0)
         layout.addLayout(weight_layout, 0, 1)
         
         # BMI
         self.bmi_edit = QLineEdit()
-        self.bmi_edit.setPlaceholderText("22.3")
+        self.bmi_edit.setPlaceholderText("35.50")
+        self._style_default_line_edit(self.bmi_edit)
+        self._apply_uniform_field_size(self.bmi_edit)
         bmi_layout = QHBoxLayout()
         bmi_layout.addWidget(self.bmi_edit)
         bmi_layout.addWidget(QLabel("kg/m²"))
         bmi_layout.setContentsMargins(0, 0, 0, 0)
         
-        layout.addWidget(QLabel("BMI:"), 0, 2)
+        layout.addWidget(self._create_form_label("BMI:"), 0, 2)
         layout.addLayout(bmi_layout, 0, 3)
         
         # Height
         self.height_edit = QLineEdit()
-        self.height_edit.setPlaceholderText("162.56")
+        self.height_edit.setPlaceholderText("175.5")
+        self._style_default_line_edit(self.height_edit)
+        self._apply_uniform_field_size(self.height_edit)
         height_layout = QHBoxLayout()
         height_layout.addWidget(self.height_edit)
         height_layout.addWidget(QLabel("cm"))
         height_layout.setContentsMargins(0, 0, 0, 0)
         
-        layout.addWidget(QLabel("Height:"), 1, 0)
+        layout.addWidget(self._create_form_label("Height:"), 1, 0)
         layout.addLayout(height_layout, 1, 1)
         
         # Blood Pressure
-        self.bp_edit = QLineEdit()
+        self.bp_systolic_edit = QLineEdit()
+        self._style_default_line_edit(self.bp_systolic_edit)
+        self._apply_uniform_field_size(self.bp_systolic_edit)
+        self.bp_systolic_edit.setFixedWidth(60)
+        self.bp_systolic_edit.setPlaceholderText("120")
+
+        self.bp_diastolic_edit = QLineEdit()
+        self._style_default_line_edit(self.bp_diastolic_edit)
+        self._apply_uniform_field_size(self.bp_diastolic_edit)
+        self.bp_diastolic_edit.setFixedWidth(60)
+        self.bp_diastolic_edit.setPlaceholderText("80")
         bp_layout = QHBoxLayout()
-        bp_layout.addWidget(self.bp_edit)
+        bp_layout.addWidget(self.bp_systolic_edit)
+        bp_layout.addWidget(QLabel("/"))
+        bp_layout.addWidget(self.bp_diastolic_edit)
         bp_layout.addWidget(QLabel("mmHg"))
         bp_layout.setContentsMargins(0, 0, 0, 0)
         
-        layout.addWidget(QLabel("Syst./diast:"), 1, 2)
+        layout.addWidget(self._create_form_label("Syst./diast:"), 1, 2)
         layout.addLayout(bp_layout, 1, 3)
         
         group.setLayout(layout)
@@ -669,26 +970,86 @@ class PatientRecordForm(QDialog):
         button_layout.addStretch()
         
         return button_container
+
+    def _reset_required_field_styles(self):
+        """Restore the default required-field styling after validation feedback."""
+        self.last_name_edit.setStyleSheet(self.REQUIRED_LINE_EDIT_STYLE)
+        self.dob_edit.setStyleSheet(self.REQUIRED_DATE_EDIT_STYLE)
     
     def accept_form(self):
         """Handle OK button click"""
+        self._reset_required_field_styles()
+        self._validate_phone_like_field(self.phone_edit)
+        self._validate_phone_like_field(self.fax_edit)
+
         # Validate required fields
+        self._reset_validation_styles()
         if not self.last_name_edit.text().strip():
-            self.last_name_edit.setStyleSheet("background-color: #ffcccb; border: 2px solid red;")
+            self.last_name_edit.setStyleSheet(self.ERROR_LINE_EDIT_STYLE)
+            self.last_name_edit.setFocus()
             QMessageBox.warning(self, "Validation Error", "Last name is required!")
+            return
+
+        if not self.first_name_edit.text().strip():
+            self._mark_field_invalid(self.first_name_edit)
+            QMessageBox.warning(self, "Validation Error", "First name is required!")
+            return
+
+        if not self.patient_id_edit.text().strip():
+            self._mark_field_invalid(self.patient_id_edit)
+            QMessageBox.warning(self, "Validation Error", "Patient ID is required!")
             return
         
         if not self.dob_edit.date().isValid():
-            self.dob_edit.setStyleSheet("background-color: #ffcccb; border: 2px solid red;")
+            self.dob_edit.setStyleSheet(self.ERROR_DATE_EDIT_STYLE)
+            self.dob_edit.setFocus()
             QMessageBox.warning(self, "Validation Error", "Date of birth is required!")
             return
+
+        bp_error = self._validate_bp_values()
+        if bp_error:
+            self.bp_systolic_edit.setFocus()
+            QMessageBox.warning(self, "Validation Error", bp_error)
+            return
         
-        # Get patient data
         patient_data = self.get_patient_data()
-        
-        # Save to database
+        duplicate_patient = self.db_manager.get_patient_by_name_dob(
+            patient_data.get('last_name', '').strip(),
+            patient_data.get('first_name', '').strip(),
+            patient_data.get('dob', '').strip(),
+        )
+        if duplicate_patient and duplicate_patient.get('id') != self.patient_db_id:
+            QMessageBox.warning(
+                self,
+                "Duplicate Patient",
+                "Same patient details already exist.\n"
+                "A duplicate patient record cannot be saved.",
+            )
+            return
+
+        if self.edit_mode:
+            if self.patient_db_id is None:
+                QMessageBox.critical(self, "Error", "Missing patient ID for edit mode!")
+                return
+
+            # EDIT MODE -> UPDATE existing row
+            updated = self.db_manager.update_patient(self.patient_db_id, patient_data)
+            if not updated:
+                QMessageBox.critical(self, "Error", "Failed to update patient record!")
+                return
+
+            patient_data['id'] = self.patient_db_id
+            QMessageBox.information(
+                self, "Updated",
+                f"Patient details updated successfully!\nDatabase ID: {self.patient_db_id}",
+            )
+            print(f"Patient record updated (ID: {self.patient_db_id})")
+            self.accept()
+            return
+
+        # ADD MODE -> INSERT new row
         patient_id = self.db_manager.save_patient(patient_data)
-        
+
         if patient_id:
             patient_data['id'] = patient_id
             QMessageBox.information(self, "Success", f"Patient record saved successfully!\nDatabase ID: {patient_id}")
@@ -698,14 +1059,73 @@ class PatientRecordForm(QDialog):
                     self.parent().load_patient_data(patient_data)
                 except Exception as error:
                     print(f"Warning: Could not sync saved patient to dashboard: {error}")
-            self.close()
+            self.accept()
         else:
             QMessageBox.critical(self, "Error", "Failed to save patient record to database!")
+
+    def populate_form(self, data):
+        """ (edit mode)."""
+        def text_of(key):
+            value = data.get(key)
+            return "" if value is None else str(value)
+
+        self.last_name_edit.setText(text_of('last_name'))
+        self.first_name_edit.setText(text_of('first_name'))
+        self.patient_id_edit.setText(text_of('patient_id'))
+
+        dob = QDate.fromString(text_of('dob'), "dd-MM-yyyy")
+        if dob.isValid():
+            self.dob_edit.setDate(dob)
+
+        valid_until = QDate.fromString(text_of('valid_until'), "dd-MM-yyyy")
+        if valid_until.isValid():
+            self.valid_until_edit.setDate(valid_until)
+
+        if text_of('gender').strip().lower() == 'male':
+            self.male_radio.setChecked(True)
+        else:
+            self.female_radio.setChecked(True)
+
+        line_fields = {
+            'title': self.title_edit,
+            'street': self.street_edit,
+            'name_suffix': self.name_suffix_edit,
+            'zip_code': self.zip_edit,
+            'phone': self.phone_edit,
+            'city_state': self.city_state_edit,
+            'fax': self.fax_edit,
+            'country': self.country_edit,
+            'clinic': self.clinic_edit,
+            'cost_unit': self.cost_unit_edit,
+            'department': self.department_edit,
+            'ins_no': self.ins_no_edit,
+            'physician': self.physician_edit,
+            'policyholder_no': self.policyholder_edit,
+            'status': self.status_edit,
+            'weight': self.weight_edit,
+            'bmi': self.bmi_edit,
+            'height': self.height_edit,
+        }
+        for key, widget in line_fields.items():
+            widget.setText(text_of(key))
+
+        bp_text = text_of('blood_pressure').strip()
+        systolic, _, diastolic = bp_text.partition("/")
+        self.bp_systolic_edit.setText(systolic.strip())
+        self.bp_diastolic_edit.setText(diastolic.strip())
+
+        text_fields = {
+            'referred_by': self.referred_edit,
+            'history': self.history_edit,
+            'comments': self.comments_edit,
+        }
+        for key, widget in text_fields.items():
+            widget.setPlainText(text_of(key))
     
     def reject_form(self):
         """Handle Cancel button click"""
         print("Patient record cancelled")
-        self.close()
+        self.reject()
     
     def get_patient_data(self):
         """Get all patient data as dictionary"""
@@ -734,7 +1154,7 @@ class PatientRecordForm(QDialog):
             'weight': self.weight_edit.text(),
             'bmi': self.bmi_edit.text(),
             'height': self.height_edit.text(),
-            'blood_pressure': self.bp_edit.text(),
+            'blood_pressure': f"{self.bp_systolic_edit.text().strip()}/{self.bp_diastolic_edit.text().strip()}",
             'referred_by': self.referred_edit.toPlainText(),
             'history': self.history_edit.toPlainText(),
             'comments': self.comments_edit.toPlainText()

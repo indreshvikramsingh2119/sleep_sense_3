@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from scipy.signal import medfilt, savgol_filter
 
 
@@ -23,7 +24,9 @@ def enhance_airflow_for_graph_and_detection(
     if not np.any(valid_mask):
         return signal
 
-    cleaned = signal.copy()
+    # Fill temporarily only for filtering, then restore original NaN gaps.
+    working = pd.Series(signal).interpolate(limit_direction="both").to_numpy(dtype=float)
+    cleaned = working.copy()
 
     if len(cleaned) >= kernel_size:
         median_signal = medfilt(cleaned, kernel_size=kernel_size)
@@ -51,4 +54,5 @@ def enhance_airflow_for_graph_and_detection(
     if keep_integer:
         enhanced = np.rint(enhanced)
 
+    enhanced[~valid_mask] = np.nan
     return enhanced.astype(float)

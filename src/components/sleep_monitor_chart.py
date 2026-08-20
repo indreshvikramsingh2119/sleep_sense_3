@@ -13,31 +13,47 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 from scipy.signal import find_peaks
-from db_utils import get_db_path, save_raw_csv_session
+from src.utils.db_utils import (
+    get_db_path,
+    save_raw_csv_session,
+)
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog, QApplication, QDialog
+    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog, QApplication, QDialog, QStyle
 )
-from PyQt5.QtCore import Qt, QTimer, QTime, QThread, pyqtSignal, pyqtSignal as Signal, QPoint, QRect, QMimeData, QPointF
+from PyQt5.QtCore import Qt, QTimer, QTime, QThread, pyqtSignal, QPoint, QRect, QMimeData, QPointF
 import sip
 from PyQt5.QtGui import QPixmap, QScreen
-from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen
+from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen, QColor
 import pyqtgraph as pg
 from .custom_viewbox import CustomViewBox
 from .amplitude_axis_properties_dialog import AmplitudeAxisPropertiesDialog
 from .airflow_display_processing import enhance_airflow_for_graph_and_detection
-from ..utils.report_metrics_calculator import calculate_sleep_metrics, save_sleep_metrics_json
+from ..utils.report_metrics_calculator import (
+    calculate_hypoxic_burden_metrics,
+    calculate_sleep_metrics,
+    save_sleep_metrics_json,
+)
+from ..utils.runtime_config import get_configured_path
+from ..utils.dialog_helpers import show_styled_warning
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-EXTERNAL_ARRAY_SAMPLE_RATE_HZ = 10
+from .plot_psg_data import (  # noqa: E402
+    SAMPLE_RATE_HZ as EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
+    CHART_SIGNAL_MAPPING,
+    BODY_POSITION_TICKS,
+    BODY_POSITION_LABEL_TO_CODE,
+    signal_key_for_chart,
+)
+
 ACTIVE_SIGNAL_CONFIGS = [
-    ("Body Position", "#3b82f6", 0.5, 10, 50, 0, 4),
-    ("Airflow", "#8b5cf6", 0.3, 15, 50, 0, 100),
+    ("Body Position", "#3b82f6", 0.5, 10, 50, 0, 5),
+    ("Airflow", "#8b5cf6", 0.3, 15, 50, 0, 1500),
     ("Snoring", "#ef4444", 1.0, 8, 50, 0, 100),
-    ("Thorax", "#f59e0b", 0.2, 5, 50, 0, 80),
+    ("Thorax", "#f59e0b", 0.2, 5, 50, 0, 4095),
     ("Abdomen", "#10b981", 0.1, 2, 90, 0, 80),
     ("SpO2", "#06b6d4", 1.5, 12, 50, 60, 100),
     ("Pulse", "#f97316", 0.0, 0, 30, 40, 140),
@@ -50,6 +66,7 @@ SIGNAL_Y_RANGES = {
 }
 PLOTTED_SIGNAL_NAMES = set(ACTIVE_SIGNAL_NAMES)
 CHANNEL_COLORS = {name: color for name, color, *_rest in ACTIVE_SIGNAL_CONFIGS}
+AUTO_RANGE_SIGNAL_NAMES = {"Airflow", "Thorax"}
 AIRFLOW_DROP_MIN_DURATION_SEC = 2.0
 AIRFLOW_EVENT_MAX_DURATION_SEC = None
 AIRFLOW_BASELINE_MIN_OCCURRENCE = 30
@@ -57,8 +74,10 @@ AIRFLOW_BASELINE_MIN_OCCURRENCE = 30
 DETECTION_IMPORT_ERROR = None
 try:
     from ai_models.sleep_apnea.detect_apnea_from_airflow import detect_apnea_events_from_csv
+    from ai_models.sleep_apnea import detect_apnea_from_airflow as _apnea_rules
 except Exception as import_error:
     detect_apnea_events_from_csv = None
+    _apnea_rules = None
     DETECTION_IMPORT_ERROR = str(import_error)
 
 CSV_IMPORT_ERROR = None
@@ -69,19 +88,6 @@ except Exception as import_error:
     load_sleep_csv = None
     CSV_IMPORT_ERROR = str(import_error)
 
-CHART_SIGNAL_MAPPING = {
-    "Body Position": "body_position",
-    "Airflow": "airflow",
-    "Snoring": "snoring",
-    "Thorax": "thorax",
-    "Abdomen": "abdomen",
-    "SpO2": "spo2",
-    "Pulse": "pulse",
-    "Body Movement": "body_movement",
-}
-
-
-
 class SleepMonitorChart(QWidget):
     """Sleep Monitoring Chart Widget"""
     raw_data_saved = pyqtSignal(str, str)  # file_path, timestamp_iso
@@ -91,11 +97,10 @@ class SleepMonitorChart(QWidget):
 
     class _SaveWorker(QThread):
         """
-        KYON: save ke time UI freeze na ho
-        isliye background thread mein save hota hai.
+        Keep saving in a background thread so the UI does not freeze.
         """
-        done = Signal(int, str, str)  # session_id, saved_at, copied_csv_path
-        failed = Signal(str)  # error message
+        done = pyqtSignal(int, str, str)  # session_id, saved_at, copied_csv_path
+        failed = pyqtSignal(str)  # error message
 
         def __init__(self, patient_id, source_csv_path, parent=None):
             super().__init__(parent)
@@ -143,6 +148,7 @@ class SleepMonitorChart(QWidget):
         # Time window data management
         self.spo2_full_data = None  # Store full SpO2 data (time, spo2)
         self.psg_full_data = None  # Store full PSG data for all signals
+        self.current_psg_data = None  # Report-friendly full-channel PSG payload
         self.current_time_offset = 0  # Current starting time for window
         self.all_psg_mode = False  # When True, render the entire recording in one view
         self.analysis_results = None
@@ -167,10 +173,14 @@ class SleepMonitorChart(QWidget):
         self.dynamic_selections = {}  # {chart_name: [{'label': 'OSA', 'start_time': 123.5, 'end_time': 125.2, 'color': '#red'}]}
         self.loaded_csv_path = None
         self.auto_rule_ai_result = None
+        self.manual_label_overrides = {}
+        self._pending_label_change = None
         self.auto_focus_applied = False
         self.skip_next_auto_playback = False
         self.last_detection_error = None
         self.last_click_time = 0  # Debounce duplicate clicks
+        self._rendering_selections = False
+        self._selection_render_scheduled = False
         
         # Apnea events storage
         self.apnea_events = []  # Store apnea event data
@@ -190,7 +200,73 @@ class SleepMonitorChart(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_time)
         # Don't start timer initially - wait for user to press play
-        
+
+    def _normalize_body_position_signal(self, values):
+        """Convert body position data into the canonical 0..4 categorical codes."""
+        signal = np.asarray(values, dtype=object).reshape(-1)
+        if len(signal) == 0:
+            return np.asarray([], dtype=float)
+
+        normalized = np.full(len(signal), np.nan, dtype=float)
+        for index, raw_value in enumerate(signal):
+            if raw_value is None:
+                continue
+
+            if isinstance(raw_value, (int, float, np.integer, np.floating)) and np.isfinite(raw_value):
+                normalized[index] = float(np.clip(np.rint(raw_value), 0, 4))
+                continue
+
+            label = str(raw_value).strip().lower()
+            if not label:
+                continue
+
+            if label in BODY_POSITION_LABEL_TO_CODE:
+                normalized[index] = float(BODY_POSITION_LABEL_TO_CODE[label])
+                continue
+
+            try:
+                normalized[index] = float(np.clip(np.rint(float(label)), 0, 4))
+            except ValueError:
+                continue
+
+        series = pd.Series(normalized)
+        series = series.interpolate(limit_direction="both").ffill().bfill().fillna(4.0)
+        return series.to_numpy(dtype=float)
+
+    def _configure_body_position_axis(self, plot_widget):
+        """Apply categorical ticks so body position is readable on the dashboard."""
+        left_axis = plot_widget.getAxis("left")
+        try:
+            left_axis.setTicks([BODY_POSITION_TICKS])
+        except Exception:
+            pass
+        plot_widget.setYRange(0, 4, padding=0)
+
+    def scroll_chart_container_into_view(self, container):
+        """Move the chart scrollbar so the clicked chart comes into view."""
+        if hasattr(self, "scroll_area"):
+            scrollbar = self.scroll_area.verticalScrollBar()
+            target_value = max(0, min(scrollbar.maximum(), int(container.y() - 10)))
+            scrollbar.setValue(target_value)
+
+    def _build_body_position_step_data(self, x_data, y_data):
+        """Build step-ready x coordinates for categorical body position data."""
+        x_data = np.asarray(x_data, dtype=float).reshape(-1)
+        y_data = np.asarray(y_data, dtype=float).reshape(-1)
+        point_count = min(len(x_data), len(y_data))
+        if point_count == 0:
+            return np.asarray([]), np.asarray([])
+
+        x_data = x_data[:point_count]
+        y_data = y_data[:point_count]
+        x_diffs = np.diff(x_data[np.isfinite(x_data)])
+        step = float(np.nanmedian(x_diffs)) if len(x_diffs) > 0 else (1.0 / EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+        if not np.isfinite(step) or step <= 0:
+            step = 1.0 / EXTERNAL_ARRAY_SAMPLE_RATE_HZ
+
+        step_x = np.append(x_data, x_data[-1] + step)
+        return step_x, y_data
+
     def scroll_up(self):
         """Scroll up by a fixed amount"""
         if hasattr(self, 'scroll_area'):
@@ -361,11 +437,68 @@ class SleepMonitorChart(QWidget):
 
     def confirm_and_save_raw_data(self):
         """
-        Raw CSV ko copy karke save karta hai.
+        Copy the raw CSV and save it.
         """
         if not hasattr(self, "patient_id") or self.patient_id in ("", "--------", None):
-            QMessageBox.warning(self, "No Patient Selected",
-                                "Please select a Patient ID before saving.")
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("No Patient Selected")
+            msg_box.setText("Please select a Patient ID before saving.")
+            msg_box.setIconPixmap(self._patient_id_icon_pixmap())
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: #f8fbff;
+                }
+                QMessageBox QLabel {
+                    color: #111827;
+                    font-size: 13px;
+                    font-weight: 500;
+                }
+                QMessageBox QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QMessageBox QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QMessageBox QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+            ok_button = msg_box.button(QMessageBox.Ok)
+            if ok_button is not None:
+                ok_button.setAutoDefault(False)
+                ok_button.setDefault(True)
+                ok_button.setStyleSheet("""
+                    QPushButton {
+                        min-width: 54px;
+                        min-height: 22px;
+                        padding: 4px 12px;
+                        border-radius: 6px;
+                        border: 1px solid #1d4ed8;
+                        background-color: #2563eb;
+                        color: white;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+                    QPushButton:hover {
+                        background-color: #3b82f6;
+                        border: 1px solid #1e40af;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1e40af;
+                        border: 1px solid #1e3a8a;
+                    }
+                """)
+            msg_box.exec_()
             return
 
         if not getattr(self, "loaded_csv_path", None):
@@ -381,14 +514,111 @@ class SleepMonitorChart(QWidget):
                                     "Previous save is still running...")
             return
         
-        reply = QMessageBox.question(
-            self, "Confirm Save",
-            f"Save raw data for patient {self.patient_id}?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Confirm Save")
+        msg_box.setText(f"Save raw data for patient {self.patient_id}?")
+        msg_box.setIconPixmap(self.style().standardIcon(QStyle.SP_DialogSaveButton).pixmap(48, 48))
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #f8fbff;
+            }
+            QMessageBox QLabel {
+                color: #1e3a5f;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QMessageBox QPushButton {
+                min-width: 86px;
+                min-height: 32px;
+                padding: 6px 16px;
+                border-radius: 8px;
+                border: 1px solid #1d4ed8;
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #3b82f6,
+                    stop: 0.5 #2563eb,
+                    stop: 1 #1d4ed8
+                );
+                color: white;
+                font-weight: 700;
+                font-size: 12px;
+            }
+            QMessageBox QPushButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #60a5fa,
+                    stop: 0.5 #3b82f6,
+                    stop: 1 #2563eb
+                );
+            }
+            QMessageBox QPushButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #1d4ed8,
+                    stop: 0.5 #1e40af,
+                    stop: 1 #1e3a8a
+                );
+            }
+        """)
+
+        yes_button = msg_box.button(QMessageBox.Yes)
+        no_button = msg_box.button(QMessageBox.No)
+        if yes_button is not None:
+            yes_button.setText("Yes")
+            yes_button.setMinimumSize(44, 18)
+            yes_button.setAutoDefault(False)
+            yes_button.setDefault(False)
+            yes_button.setStyleSheet("""
+                QPushButton {
+                    min-width: 44px;
+                    min-height: 18px;
+                    padding: 3px 10px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+        if no_button is not None:
+            no_button.setText("No")
+            no_button.setMinimumSize(44, 18)
+            no_button.setAutoDefault(False)
+            no_button.setDefault(True)
+            no_button.setStyleSheet("""
+                QPushButton {
+                    min-width: 44px;
+                    min-height: 18px;
+                    padding: 3px 10px;
+                    border-radius: 6px;
+                    border: 1px solid #cbd5e1;
+                    background-color: #f8fafc;
+                    color: #1e3a5f;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    background-color: #e2e8f0;
+                    border: 1px solid #94a3b8;
+                }
+                QPushButton:pressed {
+                    background-color: #cbd5e1;
+                    border: 1px solid #64748b;
+                }
+            """)
+
+        if msg_box.exec_() == QMessageBox.Yes:
             self._do_save_async()
     
     def take_screenshot(self):
@@ -398,6 +628,17 @@ class SleepMonitorChart(QWidget):
             if parent_window is not None and parent_window is not self and hasattr(parent_window, "take_screenshot"):
                 parent_window.take_screenshot()
                 return
+
+            if not getattr(self, "loaded_csv_path", None):
+                show_styled_warning(
+                    self,
+                    "No Data Uploaded",
+                    "Please upload the data first before taking a screenshot.",
+                )
+                return
+
+            self.repaint()
+            QApplication.processEvents()
 
             from datetime import datetime
             source_pixmap = self.grab()
@@ -437,17 +678,104 @@ class SleepMonitorChart(QWidget):
         label = f"Session #{session_id} - {self.patient_id}"
         self.raw_data_saved.emit(copied_csv_path, saved_at)
         db_path = get_db_path()
-        QMessageBox.information(
-            self, "Saved",
-            f"Data saved successfully!\n\nPatient : {self.patient_id}\n"
-            f"Session : #{session_id}\nTime    : {saved_at}"
-            f"\n\nDatabase:\n{db_path}"
-            f"\nCSV copy:\n{copied_csv_path}"
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Saved")
+        msg_box.setTextFormat(Qt.RichText)
+        msg_box.setIconPixmap(self.style().standardIcon(QStyle.SP_DialogApplyButton).pixmap(48, 48))
+        msg_box.setText(
+            '<span style="color:#16a34a; font-weight:700;">Data saved successfully!</span><br><br>'
+            f'<span style="color:#111827; font-weight:700;">Patient</span>'
+            f'<span style="color:#6b7280;"> : {self.patient_id}</span><br>'
+            f'<span style="color:#111827; font-weight:700;">Session</span>'
+            f'<span style="color:#6b7280;"> : #{session_id}</span><br>'
+            f'<span style="color:#111827; font-weight:700;">Time</span>'
+            f'<span style="color:#6b7280;"> : {saved_at}</span><br><br>'
+            f'<span style="color:#111827; font-weight:700;">Database</span>'
+            f'<span style="color:#6b7280;"> : {db_path}</span><br>'
+            f'<span style="color:#111827; font-weight:700;">CSV copy</span>'
+            f'<span style="color:#6b7280;"> : {copied_csv_path}</span>'
         )
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #f8fbff;
+            }
+            QMessageBox QLabel {
+                color: #111827;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QMessageBox QPushButton {
+                min-width: 44px;
+                min-height: 18px;
+                padding: 3px 10px;
+                border-radius: 6px;
+                border: 1px solid #1d4ed8;
+                background-color: #2563eb;
+                color: white;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #3b82f6;
+                border: 1px solid #1e40af;
+            }
+            QMessageBox QPushButton:pressed {
+                background-color: #1e40af;
+                border: 1px solid #1e3a8a;
+            }
+        """)
+        ok_button = msg_box.button(QMessageBox.Ok)
+        if ok_button is not None:
+            ok_button.setMinimumSize(54, 22)
+            ok_button.setAutoDefault(False)
+            ok_button.setDefault(True)
+            ok_button.setStyleSheet("""
+                QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+        msg_box.exec_()
 
     def _on_save_failed(self, error_msg: str):
         self._save_in_progress = False
         QMessageBox.critical(self, "Save Failed", f"Could not save data:\n{error_msg}")
+
+    def _patient_id_icon_pixmap(self):
+        """Create a blue patient-ID style icon for warning dialogs."""
+        pixmap = QPixmap(48, 48)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#3b82f6"))
+        painter.drawRoundedRect(6, 6, 36, 36, 10, 10)
+
+        painter.setBrush(QColor("white"))
+        painter.drawRoundedRect(13, 11, 22, 26, 4, 4)
+        painter.setBrush(QColor("#3b82f6"))
+        painter.drawEllipse(19, 15, 10, 10)
+        painter.drawRect(17, 27, 14, 2)
+        painter.drawRect(17, 31, 14, 2)
+        painter.end()
+        return pixmap
 
     def on_time_window_changed(self, index):
         """Handle time window dropdown change"""
@@ -701,55 +1029,119 @@ class SleepMonitorChart(QWidget):
                 if not (container and hasattr(container, 'plot_widget')):
                     continue
 
-                plot_widget = container.plot_widget
-                chart_name = plot_widget.chart_name
+                try:
+                    plot_widget = container.plot_widget
+                    chart_name = plot_widget.chart_name
 
-                vb = plot_widget.getViewBox()
-                if hasattr(vb, 'set_time_window_limits'):
-                    vb.set_time_window_limits(0, window_seconds)
-                    print(f"Debug: ViewBox limits set to 0 -> {window_seconds}, offset={self.current_time_offset}")
+                    vb = plot_widget.getViewBox()
+                    if hasattr(vb, 'set_time_window_limits'):
+                        vb.set_time_window_limits(0, window_seconds)
+                        print(f"Debug: ViewBox limits set to 0 -> {window_seconds}, offset={self.current_time_offset}")
 
-                # Store current Y-axis range to preserve zoom settings
-                if not hasattr(plot_widget, 'zoom_y_range'):
-                    plot_widget.zoom_y_range = None
+                    # Store current Y-axis range to preserve zoom settings
+                    if not hasattr(plot_widget, 'zoom_y_range'):
+                        plot_widget.zoom_y_range = None
 
-                self.remove_stale_plot_curves(plot_widget)
+                    self.remove_stale_plot_curves(plot_widget)
 
-                if not self.is_all_psg_mode():
-                    plot_widget.setXRange(0, window_seconds, padding=0)
-                    bottom_axis = plot_widget.getAxis('bottom')
-                    bottom_axis.setRange(0, window_seconds)
+                    if not self.is_all_psg_mode():
+                        plot_widget.setXRange(0, window_seconds, padding=0)
+                        bottom_axis = plot_widget.getAxis('bottom')
+                        bottom_axis.setRange(0, window_seconds)
 
-                    if hasattr(vb, 'setRange'):
-                        try:
-                            # Force the exact range with no padding
-                            vb.setRange(x=[0, window_seconds], padding=0)
-                        except Exception:
-                            plot_widget.setXRange(0, window_seconds, padding=0)
+                        if hasattr(vb, 'setRange'):
+                            try:
+                                # Force the exact range with no padding
+                                vb.setRange(x=[0, window_seconds], padding=0)
+                            except Exception:
+                                plot_widget.setXRange(0, window_seconds, padding=0)
 
-                    plot_widget.fixed_range = [0, window_seconds]
+                        plot_widget.fixed_range = [0, window_seconds]
 
-                if chart_name.strip() == "SpO2":
-                    x, y = self.get_spo2_data_for_window(window_seconds, self.current_time_offset)
-                    if len(x) > 0 and len(y) > 0:
-                        # Update normal line plot
-                        plot_widget.plot_curve.setData(x, y, connect='finite')
-                        plot_widget.plot_curve.opts['fill'] = None
+                    if chart_name.strip() == "SpO2":
+                        x, y = self.get_spo2_data_for_window(window_seconds, self.current_time_offset)
+                        if len(x) > 0 and len(y) > 0:
+                            # Update normal line plot
+                            plot_widget.plot_curve.setData(x, y, connect='finite')
+                            plot_widget.plot_curve.opts['fill'] = None
 
-                        if self.is_all_psg_mode():
-                            finite_x = x[np.isfinite(x)] if len(x) else np.array([])
-                            plot_end = float(finite_x[-1]) if len(finite_x) > 0 else float(window_seconds)
-                            plot_widget.setXRange(0, plot_end, padding=0)
-                            bottom_axis = plot_widget.getAxis('bottom')
-                            bottom_axis.setRange(0, plot_end)
-                            if hasattr(vb, 'set_time_window_limits'):
-                                vb.set_time_window_limits(0, plot_end)
-                            if hasattr(vb, 'setRange'):
+                            if self.is_all_psg_mode():
+                                finite_x = x[np.isfinite(x)] if len(x) else np.array([])
+                                plot_end = float(finite_x[-1]) if len(finite_x) > 0 else float(window_seconds)
+                                plot_widget.setXRange(0, plot_end, padding=0)
+                                bottom_axis = plot_widget.getAxis('bottom')
+                                bottom_axis.setRange(0, plot_end)
+                                if hasattr(vb, 'set_time_window_limits'):
+                                    vb.set_time_window_limits(0, plot_end)
+                                if hasattr(vb, 'setRange'):
+                                    try:
+                                        vb.setRange(x=[0, plot_end], padding=0)
+                                    except Exception:
+                                        plot_widget.setXRange(0, plot_end, padding=0)
+                                plot_widget.fixed_range = [0, plot_end]
+
+                            if hasattr(plot_widget, 'axis_properties'):
+                                properties = plot_widget.axis_properties
+                                low_value = properties.get('low_value', 35.0)
+                                high_value = properties.get('high_value', 100.0)
                                 try:
-                                    vb.setRange(x=[0, plot_end], padding=0)
-                                except Exception:
-                                    plot_widget.setXRange(0, plot_end, padding=0)
-                            plot_widget.fixed_range = [0, plot_end]
+                                    plot_widget.setYRange(low_value, high_value, padding=0)
+                                except TypeError:
+                                    plot_widget.setRange(yRange=[low_value, high_value], padding=0)
+                            else:
+                                if plot_widget.zoom_y_range is not None:
+                                    new_y_min, new_y_max = plot_widget.zoom_y_range
+                                    print(f"Preserving zoom range during playback: {new_y_min} - {new_y_max}")
+                                else:
+                                    new_y_min, new_y_max = 60, 100
+
+                                try:
+                                    plot_widget.setYRange(new_y_min, new_y_max)
+                                except TypeError:
+                                    plot_widget.setRange(yRange=[new_y_min, new_y_max])
+
+                            if 10 <= window_seconds <= 30:
+                                # Always update value labels dynamically for real-time navigation
+                                print(f"Creating/Updating SpO2 value labels for {window_seconds}s time window")
+                                self.create_spo2_markers_and_labels(plot_widget, x, y)
+                                print(f"Updated SpO2 value labels with {len(x)} points for time offset {self.current_time_offset}s")
+                            else:
+                                if hasattr(plot_widget, 'value_labels'):
+                                    for label in plot_widget.value_labels:
+                                        plot_widget.removeItem(label)
+                                    plot_widget.value_labels = []
+                                print(f"Removed SpO2 value labels for {window_seconds}s time window")
+                        else:
+                            plot_widget.plot_curve.setData([], [])
+                    else:
+                        x, y = self.get_signal_data_for_window(chart_name, window_seconds, self.current_time_offset)
+                        
+                        if len(x) > 0 and len(y) > 0:
+                            if self.is_all_psg_mode():
+                                finite_x = x[np.isfinite(x)] if len(x) else np.array([])
+                                plot_end = float(finite_x[-1]) if len(finite_x) > 0 else float(window_seconds)
+                                plot_widget.setXRange(0, plot_end, padding=0)
+                                bottom_axis = plot_widget.getAxis('bottom')
+                                bottom_axis.setRange(0, plot_end)
+                                if hasattr(vb, 'set_time_window_limits'):
+                                    vb.set_time_window_limits(0, plot_end)
+                                if hasattr(vb, 'setRange'):
+                                    try:
+                                        vb.setRange(x=[0, plot_end], padding=0)
+                                    except Exception:
+                                        plot_widget.setXRange(0, plot_end, padding=0)
+                                plot_widget.fixed_range = [0, plot_end]
+                            # Use real data from CSV
+                            if chart_name.strip() == "Body Position":
+                                self._configure_body_position_axis(plot_widget)
+                                x_step, y_step = self._build_body_position_step_data(x, y)
+                                plot_widget.plot_curve.setData(x_step, y_step, connect='finite', stepMode=True)
+                            else:
+                                plot_widget.plot_curve.setData(x, y, connect='finite')
+                            print(f"Updated {chart_name} with real data: {len(x)} points")
+                        else:
+                            plot_widget.plot_curve.setData([], [])
+                            print(f"Left {chart_name} blank because no active signal data is mapped")
 
                         if hasattr(plot_widget, 'axis_properties'):
                             properties = plot_widget.axis_properties
@@ -759,77 +1151,27 @@ class SleepMonitorChart(QWidget):
                                 plot_widget.setYRange(low_value, high_value, padding=0)
                             except TypeError:
                                 plot_widget.setRange(yRange=[low_value, high_value], padding=0)
-                        else:
-                            if plot_widget.zoom_y_range is not None:
-                                new_y_min, new_y_max = plot_widget.zoom_y_range
-                                print(f"Preserving zoom range during playback: {new_y_min} - {new_y_max}")
-                            else:
-                                new_y_min, new_y_max = 60, 100
-
-                            try:
-                                plot_widget.setYRange(new_y_min, new_y_max)
-                            except TypeError:
-                                plot_widget.setRange(yRange=[new_y_min, new_y_max])
-
-                        if 10 <= window_seconds <= 30:
-                            # Always update value labels dynamically for real-time navigation
-                            print(f"Creating/Updating SpO2 value labels for {window_seconds}s time window")
-                            self.create_spo2_markers_and_labels(plot_widget, x, y)
-                            print(f"Updated SpO2 value labels with {len(x)} points for time offset {self.current_time_offset}s")
-                        else:
-                            if hasattr(plot_widget, 'value_labels'):
-                                for label in plot_widget.value_labels:
-                                    plot_widget.removeItem(label)
-                                plot_widget.value_labels = []
-                            print(f"Removed SpO2 value labels for {window_seconds}s time window")
-                    else:
-                        plot_widget.plot_curve.setData([], [])
-                else:
-                    x, y = self.get_signal_data_for_window(chart_name, window_seconds, self.current_time_offset)
-                    
-                    if len(x) > 0 and len(y) > 0:
-                        if self.is_all_psg_mode():
-                            finite_x = x[np.isfinite(x)] if len(x) else np.array([])
-                            plot_end = float(finite_x[-1]) if len(finite_x) > 0 else float(window_seconds)
-                            plot_widget.setXRange(0, plot_end, padding=0)
-                            bottom_axis = plot_widget.getAxis('bottom')
-                            bottom_axis.setRange(0, plot_end)
-                            if hasattr(vb, 'set_time_window_limits'):
-                                vb.set_time_window_limits(0, plot_end)
-                            if hasattr(vb, 'setRange'):
-                                try:
-                                    vb.setRange(x=[0, plot_end], padding=0)
-                                except Exception:
-                                    plot_widget.setXRange(0, plot_end, padding=0)
-                            plot_widget.fixed_range = [0, plot_end]
-                        # Use real data from CSV
-                        plot_widget.plot_curve.setData(x, y, connect='finite')
-                        print(f"Updated {chart_name} with real data: {len(x)} points")
-                    else:
-                        plot_widget.plot_curve.setData([], [])
-                        print(f"Left {chart_name} blank because no active signal data is mapped")
-
-                    if hasattr(plot_widget, 'axis_properties'):
-                        properties = plot_widget.axis_properties
-                        low_value = properties.get('low_value', 35.0)
-                        high_value = properties.get('high_value', 100.0)
-                        try:
-                            plot_widget.setYRange(low_value, high_value, padding=0)
-                        except TypeError:
-                            plot_widget.setRange(yRange=[low_value, high_value], padding=0)
-                    elif chart_name.strip() == "Airflow":
-                        airflow_y_min, airflow_y_max = self.get_signal_auto_axis_range(chart_name)
-                        plot_widget.setYRange(airflow_y_min, airflow_y_max, padding=0)
-                        _event_x, detection_y = self.get_airflow_detection_data_for_window(
-                            self.current_time_window,
-                            self.current_time_offset,
-                        )
-                        self.mark_airflow_drop_events(
-                            plot_widget,
-                            x,
-                            y,
-                            detection_y_data=detection_y,
-                        )
+                        elif chart_name.strip() == "Airflow":
+                            airflow_y_min, airflow_y_max = self.get_signal_auto_axis_range(chart_name)
+                            self._lock_auto_axis(plot_widget, airflow_y_min, airflow_y_max)
+                            _event_x, detection_y = self.get_airflow_detection_data_for_window(
+                                self.current_time_window,
+                                self.current_time_offset,
+                            )
+                            self.mark_airflow_drop_events(
+                                plot_widget,
+                                x,
+                                y,
+                                detection_y_data=detection_y,
+                            )
+                        elif chart_name.strip() in AUTO_RANGE_SIGNAL_NAMES:
+                            # Auto Y-range for all auto-range charts, but event detection
+                            # remains Airflow-only.
+                            auto_y_min, auto_y_max = self.get_signal_auto_axis_range(chart_name)
+                            self._lock_auto_axis(plot_widget, auto_y_min, auto_y_max)
+                except Exception as chart_error:
+                    print(f"⚠️ {chart_name if 'chart_name' in locals() else 'unknown chart'} refresh failed: {chart_error}")
+                    continue
 
             self.render_dynamic_selections()
             self.update_apnea_events_display()
@@ -1139,16 +1481,18 @@ class SleepMonitorChart(QWidget):
         values,
         sample_rate_hz=EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
     ):
-        """Clean samples and preserve the full available duration."""
+        """Clean samples; chhote gaps bharo, bade gaps NaN rehne do."""
         signal = np.asarray(values, dtype=float).reshape(-1)
         if len(signal) == 0:
             return signal
 
-        signal = pd.Series(signal).replace([np.inf, -np.inf], np.nan)
-        signal = signal.interpolate(method="linear", limit_direction="both")
-        signal = signal.ffill().bfill().fillna(0.0)
-        signal = signal.to_numpy(dtype=float)
-        return signal
+        series = pd.Series(signal).replace([np.inf, -np.inf], np.nan)
+        series = series.interpolate(
+            method="linear",
+            limit_direction="both",
+            limit=50,
+        )  # 10 Hz par max ~5 second ka gap bharega
+        return series.to_numpy(dtype=float)
 
     def _load_uploaded_psg_signals(self, csv_path):
         """Load chart signals directly from an uploaded PSG CSV."""
@@ -1212,7 +1556,7 @@ class SleepMonitorChart(QWidget):
     def save_airflow_smoothing_debug_report(self, csv_path, raw_airflow, enhanced_airflow):
         """Write a text report showing how the shared enhanced airflow differs from raw data."""
         try:
-            report_dir = APP_ROOT / "debug_reports"
+            report_dir = get_configured_path("debug_reports_dir")
             report_dir.mkdir(parents=True, exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1427,19 +1771,85 @@ class SleepMonitorChart(QWidget):
         baseline_airflow, _baseline_occurrence = self.get_airflow_event_baseline(finite_airflow)
         return 0.0, float(max(baseline_airflow + 20.0, 20.0))
 
+    def _lock_auto_axis(self, plot_widget, y_min, y_max):
+        """Lock an auto-range chart to a data-driven range with limited headroom.
+
+        The lock should move with the data, not disappear entirely. That keeps
+        zoom/pan bounded while still allowing the visible range to follow the
+        current signal window.
+        """
+        y_min = float(y_min)
+        y_max = float(y_max)
+        span = max(y_max - y_min, 1e-6)
+        headroom = span * 0.5
+
+        # ADC signals (0..4095) cannot go negative, so keep the zoom-out floor
+        # clamped at 0 to prevent the chart from drifting below zero.
+        limit_min = max(y_min - headroom, 0.0)
+        limit_max = y_max + headroom
+
+        try:
+            plot_widget.setYRange(y_min, y_max, padding=0)
+        except TypeError:
+            plot_widget.setRange(yRange=[y_min, y_max], padding=0)
+
+        try:
+            plot_widget.setLimits(yMin=limit_min, yMax=limit_max)
+        except TypeError:
+            plot_widget.setLimits(yMin=limit_min, yMax=limit_max)
+
+        plot_widget.original_y_min = y_min
+        plot_widget.original_y_max = y_max
+        plot_widget.zoom_y_min_limit = limit_min
+        plot_widget.zoom_y_max_limit = limit_max
+        plot_widget.zoom_y_min_span = max(span * 0.1, 1e-3)
+        plot_widget.zoom_y_max_span = limit_max - limit_min
+
+    def _auto_axis_range_from_values(self, values, default_min=0.0, default_max=100.0):
+        """Return a padded percentile range for the provided signal values."""
+        series = np.asarray(values, dtype=float).reshape(-1)
+        series = series[np.isfinite(series)]
+        if series.size == 0 or float(series.min()) == float(series.max()):
+            return float(default_min), float(default_max)
+
+        low, high = np.percentile(series, [0.5, 99.5])
+        if high <= low:
+            low, high = float(series.min()), float(series.max())
+        pad = max((float(high) - float(low)) * 0.15, 1.0)
+        return float(low) - pad, float(high) + pad
+
     def get_signal_auto_axis_range(self, chart_name):
         """Return the data-driven default Y-axis range for a chart."""
-        if str(chart_name).strip() == "Airflow":
+        name = str(chart_name).strip()
+
+        # Before data loads, show the mapping-based range instead of hardcoded
+        # 0-100. That keeps startup charts aligned with the configured scale.
+        if self.psg_full_data is None or "signals" not in self.psg_full_data:
+            return SIGNAL_Y_RANGES.get(name, (0.0, 100.0))
+
+        if name == "Airflow":
             return self.get_airflow_display_axis_range(
                 self._get_airflow_signal_variant("display")
             )
+        if name in AUTO_RANGE_SIGNAL_NAMES:
+            _x_data, y_data = self.get_signal_data_for_window(
+                name,
+                self.get_effective_time_window_seconds(),
+                self.current_time_offset,
+            )
+            fallback_min, fallback_max = SIGNAL_Y_RANGES.get(name, (0.0, 100.0))
+            return self._auto_axis_range_from_values(
+                y_data,
+                fallback_min,
+                fallback_max,
+            )
 
-        return 0.0, 100.0
+        return SIGNAL_Y_RANGES.get(name, (0.0, 100.0))
 
     def apply_auto_signal_axis_range(self, plot_widget):
-        """Apply auto Y-axis range to airflow when no manual override exists."""
+        """Apply auto Y-axis range when no manual override exists."""
         chart_name = getattr(plot_widget, "chart_name", "").strip()
-        if chart_name != "Airflow":
+        if chart_name not in AUTO_RANGE_SIGNAL_NAMES:
             return
 
         if hasattr(plot_widget, "axis_properties"):
@@ -1449,18 +1859,7 @@ class SleepMonitorChart(QWidget):
             return
 
         y_min, y_max = self.get_signal_auto_axis_range(chart_name)
-        try:
-            plot_widget.setYRange(y_min, y_max, padding=0)
-        except TypeError:
-            plot_widget.setRange(yRange=[y_min, y_max], padding=0)
-
-        try:
-            plot_widget.setLimits(yMin=y_min, yMax=y_max)
-        except TypeError:
-            plot_widget.setLimits(yMin=y_min, yMax=y_max)
-
-        plot_widget.original_y_min = y_min
-        plot_widget.original_y_max = y_max
+        self._lock_auto_axis(plot_widget, y_min, y_max)
         print(f"Applied {chart_name} auto axis range: {y_min} - {y_max}")
 
         
@@ -1484,6 +1883,7 @@ class SleepMonitorChart(QWidget):
                 np.asarray(signals.get("spo2", []), dtype=float),
             )
             self.loaded_csv_path = str(csv_path)
+            self._load_manual_label_overrides()
             self.all_psg_mode = False
             self.current_time_window = min(60, int(time_data[-1]) if len(time_data) else 60)
             self.auto_rule_ai_result = None
@@ -1497,6 +1897,11 @@ class SleepMonitorChart(QWidget):
                     delattr(plot_widget, "axis_properties")
                 plot_widget.zoom_y_range = None
             enhanced_airflow = signals.get("airflow_enhanced", signals.get("airflow", []))
+            sleep_mask = None
+            for mask_key in ("sleep_mask", "sleep_staging", "staging_mask", "staging", "sleep_stage_mask"):
+                if mask_key in signals and signals[mask_key] is not None:
+                    sleep_mask = signals[mask_key]
+                    break
             self.save_airflow_smoothing_debug_report(
                 csv_path=csv_path,
                 raw_airflow=signals.get("airflow_raw", signals.get("airflow", [])),
@@ -1506,6 +1911,7 @@ class SleepMonitorChart(QWidget):
                 self.analysis_results = calculate_sleep_metrics(
                     time_data,
                     signals,
+                    sleep_mask=sleep_mask,
                     sample_rate_hz=EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
                 )
                 self.analysis_json_path = save_sleep_metrics_json(
@@ -1544,6 +1950,7 @@ class SleepMonitorChart(QWidget):
             self.spo2_full_data = (np.array([]), np.array([]))
             self.loaded_csv_path = None
             self.auto_rule_ai_result = None
+            self.manual_label_overrides = {}
             self.airflow_detected_events = []
             self.current_window_airflow_events = []
             self.analysis_results = None
@@ -1591,6 +1998,174 @@ class SleepMonitorChart(QWidget):
         """Emit the full detected-event list for the side panel."""
         self.apnea_events_updated.emit(self.get_all_detected_events())
 
+    def _manual_label_overrides_path(self) -> Path | None:
+        if not getattr(self, "loaded_csv_path", None):
+            return None
+        csv_path = Path(self.loaded_csv_path)
+        return csv_path.with_name(f"{csv_path.stem}_manual_labels.json")
+
+    def _selection_time_key(self, start_sec: float, end_sec: float) -> str:
+        return f"{float(start_sec):.2f}_{float(end_sec):.2f}"
+
+    @staticmethod
+    def _first_number(selection: dict, keys: tuple[str, ...]) -> float | None:
+        for key in keys:
+            value = selection.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _selection_time_key_from_selection(self, selection: dict) -> str | None:
+        start_sec = self._first_number(selection, ("start_time", "start", "start_sec"))
+        end_sec = self._first_number(selection, ("end_time", "end", "end_sec"))
+        if start_sec is None or end_sec is None:
+            return None
+        return self._selection_time_key(start_sec, end_sec)
+
+    def _load_manual_label_overrides(self):
+        self.manual_label_overrides = {}
+        overrides_path = self._manual_label_overrides_path()
+        if overrides_path is None or not overrides_path.exists():
+            return
+
+        try:
+            raw_data = json.loads(overrides_path.read_text(encoding="utf-8"))
+        except Exception as error:
+            print(f"⚠️ Could not load manual label overrides: {error}")
+            return
+
+        if not isinstance(raw_data, dict):
+            return
+
+        normalized = {}
+        for key, value in raw_data.items():
+            if isinstance(value, str):
+                normalized[str(key)] = {
+                    "label": value,
+                    "original_label": None,
+                    "edited_at": None,
+                }
+            elif isinstance(value, dict) and value.get("label"):
+                normalized[str(key)] = {
+                    "label": str(value.get("label")),
+                    "original_label": value.get("original_label"),
+                    "edited_at": value.get("edited_at"),
+                }
+
+        self.manual_label_overrides = normalized
+
+    def _save_manual_label_overrides(self):
+        overrides_path = self._manual_label_overrides_path()
+        if overrides_path is None:
+            return
+
+        try:
+            overrides_path.parent.mkdir(parents=True, exist_ok=True)
+            overrides_path.write_text(json.dumps(self.manual_label_overrides, indent=2), encoding="utf-8")
+        except Exception as error:
+            print(f"⚠️ Could not save manual label overrides: {error}")
+
+    def _apply_manual_label_overrides_to_auto_result(self) -> bool:
+        result = getattr(self, "auto_rule_ai_result", None)
+        if not result:
+            return False
+
+        events = result.get("events", [])
+        if not events:
+            return False
+
+        changed = False
+        for event in events:
+            try:
+                start_sec = float(event.get("start_sec", 0.0))
+                end_sec = float(event.get("end_sec", start_sec))
+            except (TypeError, ValueError):
+                continue
+
+            key = self._selection_time_key(start_sec, end_sec)
+            override = self.manual_label_overrides.get(key)
+            if not override:
+                if event.get("is_manually_edited"):
+                    restored = event.get("original_label") or event.get("rule_label")
+                    if restored:
+                        event["final_label"] = restored
+                    event["is_manually_edited"] = False
+                    event.pop("manual_label_override", None)
+                    event.pop("original_label", None)
+                continue
+
+            original_label = override.get("original_label")
+            if not original_label:
+                original_label = event.get("rule_label") or event.get("final_label") or "REVIEW"
+
+            event["original_label"] = original_label
+            event["manual_label_override"] = override.get("label")
+            event["final_label"] = override.get("label")
+            event["is_manually_edited"] = True
+            changed = True
+
+        return changed
+
+    def _set_manual_label_override_for_selection(self, selection: dict, label_type: str) -> bool:
+        key = self._selection_time_key_from_selection(selection)
+        if key is None:
+            return False
+
+        original_label = (
+            selection.get("original_label")
+            or selection.get("final_label")
+            or selection.get("rule_label")
+            or selection.get("label")
+            or "REVIEW"
+        )
+        self.manual_label_overrides[key] = {
+            "label": str(label_type),
+            "original_label": str(original_label),
+            "edited_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self._save_manual_label_overrides()
+        self._apply_manual_label_overrides_to_auto_result()
+        return True
+
+    def set_manual_label_for_event(self, event: dict, label_type: str) -> bool:
+        """Persist a manual label override for a detected auto event."""
+        if not isinstance(event, dict):
+            return False
+        return self._set_manual_label_override_for_selection(event, label_type)
+
+    def reset_manual_label_for_event(self, event: dict) -> bool:
+        """Remove a manual label override for a detected auto event."""
+        if not isinstance(event, dict):
+            return False
+        return self._reset_manual_label_override_for_selection(event)
+
+    def _reset_manual_label_override_for_selection(self, selection: dict) -> bool:
+        key = self._selection_time_key_from_selection(selection)
+        if key is None or key not in self.manual_label_overrides:
+            return False
+
+        self.manual_label_overrides.pop(key, None)
+        self._save_manual_label_overrides()
+        self._apply_manual_label_overrides_to_auto_result()
+        return True
+
+    def clear_all_manual_label_overrides(self):
+        """Clear all manual label overrides before a fresh re-analysis."""
+        self.manual_label_overrides = {}
+        self._save_manual_label_overrides()
+        self._apply_manual_label_overrides_to_auto_result()
+
+    def _refresh_auto_rule_ai_views(self):
+        self._apply_manual_label_overrides_to_auto_result()
+        self._sync_auto_detected_selections_into_overlays()
+        self.render_dynamic_selections()
+        self.emit_detected_events_panel()
+        self.update_detection_summary_label()
+
     def run_rule_ai_apnea_detection(self):
         """Run airflow baseline rule detection on the loaded CSV."""
         if not self.loaded_csv_path:
@@ -1617,6 +2192,7 @@ class SleepMonitorChart(QWidget):
                 output_dir=output_dir,
                 enable_ai=False,
             )
+            self._apply_manual_label_overrides_to_auto_result()
             self.auto_focus_applied = False
             self.last_detection_error = None
             print(
@@ -1625,6 +2201,7 @@ class SleepMonitorChart(QWidget):
             )
             self.refresh_charts()
             self._sync_auto_detected_selections_into_overlays()
+            self.render_dynamic_selections()
             self.emit_detected_events_panel()
             self.update_detection_summary_label()
         except Exception as error:
@@ -1636,6 +2213,7 @@ class SleepMonitorChart(QWidget):
                     output_dir=output_dir,
                     enable_ai=False,
                 )
+                self._apply_manual_label_overrides_to_auto_result()
                 self.auto_focus_applied = False
                 self.last_detection_error = None
                 print(
@@ -1644,6 +2222,7 @@ class SleepMonitorChart(QWidget):
                 )
                 self.refresh_charts()
                 self._sync_auto_detected_selections_into_overlays()
+                self.render_dynamic_selections()
                 self.emit_detected_events_panel()
                 self.update_detection_summary_label()
             except Exception as fallback_error:
@@ -1704,6 +2283,8 @@ class SleepMonitorChart(QWidget):
                     "end_time": end_time,
                     "color": self.get_label_color(final_label),
                     "source": "auto_rule_ai",
+                    "is_manually_edited": bool(event.get("is_manually_edited")),
+                    "original_label": event.get("original_label"),
                 }
                 dynamic_data = {
                     "label": final_label,
@@ -1711,6 +2292,8 @@ class SleepMonitorChart(QWidget):
                     "end_time": end_time,
                     "color": self.get_label_color(final_label),
                     "source": "auto_rule_ai",
+                    "is_manually_edited": bool(event.get("is_manually_edited")),
+                    "original_label": event.get("original_label"),
                 }
                 self.selection_labels[chart_name].append(selection_data)
                 self.dynamic_selections[chart_name].append(dynamic_data)
@@ -1939,12 +2522,11 @@ class SleepMonitorChart(QWidget):
         if str(signal_name).strip() not in PLOTTED_SIGNAL_NAMES:
             return np.array([]), np.array([])
         
-        # Get the actual signal column name (use exact match first, then try stripped)
+        # Resolve the actual signal column name using the shared chart mapping.
         signal_col = CHART_SIGNAL_MAPPING.get(signal_name)
         if signal_col is None:
-            # Try with stripped name as fallback
             clean_name = signal_name.strip().rstrip(')')
-            signal_col = CHART_SIGNAL_MAPPING.get(clean_name, clean_name.lower().replace(' ', '_'))
+            signal_col = signal_key_for_chart(clean_name)
         
         if signal_col not in signals:
             print(f"Warning: Signal {signal_name} (mapped to {signal_col}) not found in loaded data")
@@ -1952,6 +2534,8 @@ class SleepMonitorChart(QWidget):
         
         if signal_col == "airflow":
             full_signal = self._get_airflow_signal_variant("display")
+        elif signal_col == "body_position":
+            full_signal = self._normalize_body_position_signal(signals[signal_col])
         else:
             full_signal = signals[signal_col]
 
@@ -2065,7 +2649,12 @@ class SleepMonitorChart(QWidget):
                 remaining_items.append((item, owner_plot))
                 continue
             try:
-                owner_plot.removeItem(item)
+                if hasattr(owner_plot, "removeItem"):
+                    owner_plot.removeItem(item)
+                else:
+                    item.hide()
+                    item.setParent(None)
+                    item.deleteLater()
             except Exception:
                 pass
 
@@ -2085,25 +2674,25 @@ class SleepMonitorChart(QWidget):
         return max(0.0, drop_ratio)
 
     def classify_airflow_event(self, drop_ratio, duration_sec):
-        """Classify an airflow event using the provided drop-percent formula."""
-        if duration_sec is None or duration_sec < AIRFLOW_DROP_MIN_DURATION_SEC:
+        """Classify an airflow event using the main detector's rules.
+
+        The rules (10s minimum, HSA/OSA/CSA drop ranges, max duration) live in
+        ONE place only: detect_apnea_from_airflow.py. If that module is not
+        available, no events are classified at all - no local rule copies.
+        """
+        if _apnea_rules is None:
             return "NO_EVENT"
-
-        if AIRFLOW_EVENT_MAX_DURATION_SEC is not None and duration_sec > AIRFLOW_EVENT_MAX_DURATION_SEC:
+        try:
+            return _apnea_rules.classify_rule_event(
+                drop_ratio=float(drop_ratio),
+                spo2_drop=0.0,
+                snoring_mean=0.0,
+                movement_mean=0.0,
+                variability_score=0.0,
+                duration_sec=float(duration_sec) if duration_sec is not None else None,
+            )
+        except Exception:
             return "NO_EVENT"
-
-        drop_percent = float(drop_ratio) * 100.0
-
-        if 30.0 <= drop_percent < 70.0:
-            return "HSA"
-
-        if 70.0 <= drop_percent < 80.0:
-            return "OSA"
-
-        if 80.0 <= drop_percent <= 90.0:
-            return "CSA"
-
-        return "NO_EVENT"
 
     def _build_airflow_navigation_events(self, airflow, fs=EXTERNAL_ARRAY_SAMPLE_RATE_HZ):
         """Build a reusable event list from the full airflow signal for navigation."""
@@ -2344,7 +2933,7 @@ class SleepMonitorChart(QWidget):
                     self.current_time_offset + (point_count / float(fs)),
                     self.current_time_offset + ((event_end + 1) / float(fs)),
                 )
-            self.current_window_airflow_events.append({
+            selection_data = {
                 "start_sec": start_time_abs,
                 "end_sec": end_time_abs,
                 "duration_sec": max(0.0, end_time_abs - start_time_abs),
@@ -2353,7 +2942,11 @@ class SleepMonitorChart(QWidget):
                 "source": "airflow_window_threshold",
                 "baseline_airflow": baseline_airflow,
                 "drop_percent": drop_ratio * 100.0,
-            })
+                "label": event_label,
+                "start_time": start_time_abs,
+                "end_time": end_time_abs,
+            }
+            self.current_window_airflow_events.append(selection_data)
 
             x1 = float(x_data[event_start])
             x2 = float(x_data[event_end]) + plot_step
@@ -2361,41 +2954,64 @@ class SleepMonitorChart(QWidget):
             if x2 <= x1:
                 x2 = x1 + plot_step
 
-            event_brush_map = {
-                "HSA": (22, 163, 74, 105),
-                "OSA": (220, 38, 38, 110),
-                "CSA": (37, 99, 235, 110),
-            }
-            region_brush = event_brush_map.get(event_label, (185, 28, 28, 105))
+            # Use a single color source so the same event type is not rendered
+            # with different colors in different places.
+            red, green, blue = self.get_label_rgb(event_label)
+            alpha = 89
 
             region = pg.LinearRegionItem(
                 values=[x1, x2],
                 orientation="vertical",
                 movable=False,
-                brush=region_brush,
+                brush=pg.mkBrush(red, green, blue, alpha),
             )
-            region.setZValue(4)
+            region.setZValue(-10)
             plot_widget.addItem(region)
 
-            duration_text = self.format_duration(duration_sec)
-            start_text = self.format_timestamp(start_time_abs)
-            drop_text = f"{drop_ratio * 100.0:.1f}% drop"
-            label_text = f"{event_label}\n{start_text}\n{duration_text}\n{drop_text}"
-
-            label = pg.TextItem(
-                text=label_text,
-                color=(255, 255, 255),
-                anchor=(0.5, 0.5),
-            )
-            view_range = plot_widget.getViewBox().viewRange()
-            y_min, y_max = view_range[1]
-            label_y = (float(y_min) + float(y_max)) / 2.0
-            label.setPos((x1 + x2) / 2.0, label_y)
-            label.setZValue(6)
-            plot_widget.addItem(label)
-
             self.airflow_event_items.append((region, plot_widget))
-            self.airflow_event_items.append((label, plot_widget))
+
+            view_box = plot_widget.getViewBox()
+            if view_box is None:
+                continue
+
+            start_widget = plot_widget.mapFromScene(view_box.mapViewToScene(QPointF(x1, 0)))
+            end_widget = plot_widget.mapFromScene(view_box.mapViewToScene(QPointF(x2, 0)))
+            x_min = min(start_widget.x(), end_widget.x())
+            width = max(24, abs(end_widget.x() - start_widget.x()))
+
+            block = None
+            for existing in plot_widget.selection_overlays:
+                if existing and not sip.isdeleted(existing) and not existing.isVisible():
+                    block = existing
+                    break
+            if block is None:
+                block = QLabel(plot_widget)
+                plot_widget.selection_overlays.append(block)
+
+            block.setAlignment(Qt.AlignCenter)
+            block.setText(event_label)
+            block.setToolTip(
+                f"{event_label}  |  {self.format_timestamp(start_time_abs)} → "
+                f"{self.format_timestamp(end_time_abs)}  |  {self.format_duration(duration_sec)}"
+            )
+            block.setStyleSheet(f"""
+                background-color: rgba({red}, {green}, {blue}, 0.35);
+                border: none;
+                border-radius: 0px;
+                color: #1a1a1a;
+                font-size: 9px;
+                font-weight: 800;
+                letter-spacing: 0.4px;
+                padding: 0px 2px;
+            """)
+            block.setGeometry(int(x_min), 0, int(width), 15)
+            block.selection_id = self._get_selection_id(selection_data)
+            block.mousePressEvent = lambda event, ov=block, cn=getattr(plot_widget, "chart_name", "Airflow"): self.handle_overlay_click(event, ov, cn)
+            block.mouseDoubleClickEvent = lambda event, ov=block, cn=getattr(plot_widget, "chart_name", "Airflow"): self.handle_overlay_double_click(event, ov, cn)
+            block.raise_()
+            block.show()
+
+            self.airflow_event_items.append((block, plot_widget))
 
         # Keep the side-panel event list tied to the full detected dataset.
         self.emit_detected_events_panel()
@@ -2404,14 +3020,27 @@ class SleepMonitorChart(QWidget):
         """Calculate medical-grade SpO2 statistics"""
         if len(spo2_data) == 0:
             return
-        
+
+        spo2_array = np.asarray(spo2_data, dtype=float).reshape(-1)
+        finite_mask = np.isfinite(spo2_array)
+        if not np.any(finite_mask):
+            self.spo2_statistics = {
+                "mean": np.nan,
+                "min": np.nan,
+                "max": np.nan,
+                "std": np.nan,
+                "desaturation_events": 0,
+                "total_points": len(spo2_array),
+            }
+            return
+
         self.spo2_statistics = {
-            'mean': np.mean(spo2_data),
-            'min': np.min(spo2_data),
-            'max': np.max(spo2_data),
-            'std': np.std(spo2_data),
-            'desaturation_events': np.sum(spo2_data < 95),  # Normal SpO2 threshold
-            'total_points': len(spo2_data)
+            "mean": np.nanmean(spo2_array),
+            "min": np.nanmin(spo2_array),
+            "max": np.nanmax(spo2_array),
+            "std": np.nanstd(spo2_array),
+            "desaturation_events": int(np.sum(np.isfinite(spo2_array) & (spo2_array < 95))),
+            "total_points": len(spo2_array),
         }
     
     def _channel_label_stylesheet(self, name, color, hidden=False):
@@ -2433,7 +3062,6 @@ class SleepMonitorChart(QWidget):
                     stop: 1 {bg_end}
                 );
                 border: 1px solid #cbd5e1;
-                border-left: 4px solid {border_color};
                 border-radius: 6px;
                 padding: 5px 6px 5px 8px;
                 text-align: center;
@@ -2446,7 +3074,6 @@ class SleepMonitorChart(QWidget):
                     stop: 1 #bfdbfe
                 );
                 border: 1px solid #3b82f6;
-                border-left: 4px solid {border_color};
                 color: #1e40af;
             }}
         """
@@ -2456,8 +3083,8 @@ class SleepMonitorChart(QWidget):
         
         container = QWidget()
         container.setObjectName("signalChartContainer")
-        container.setMinimumHeight(124)
-        container.setMaximumHeight(124)
+        container.setMinimumHeight(128)
+        container.setMaximumHeight(128)
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
         # Apply professional double-shaded medical styling to container
@@ -2489,11 +3116,11 @@ class SleepMonitorChart(QWidget):
         """)
         container_layout = QHBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)  # Remove extra outer padding so plots start right under the card
-        container_layout.setSpacing(4)  # Keep rows tight for better axis readability
+        container_layout.setSpacing(0)  # Keep rows tight for better axis readability
         
         # Side Label
         label_frame = QFrame()
-        label_frame.setFixedWidth(130) # Increased width to accommodate longer text
+        label_frame.setFixedWidth(112) # Wider label box so longer names fit fully
         label_frame.setObjectName("labelFrame")
         # Apply professional styling to label frame
         label_frame.setStyleSheet(f"""
@@ -2507,12 +3134,12 @@ class SleepMonitorChart(QWidget):
                 border: 1px solid #e2e8f0;
                 border-radius: 6px;
                 margin: 2px;
-                border-left: 4px solid {CHANNEL_COLORS.get(name, color)};
+                border-left: 2px solid {CHANNEL_COLORS.get(name, color)};
             }}
         """)
-        label_layout = QVBoxLayout(label_frame)
-        label_layout.setContentsMargins(6, 2, 6, 2)
-        label_layout.setAlignment(Qt.AlignCenter)
+        label_h_layout = QHBoxLayout(label_frame)
+        label_h_layout.setContentsMargins(0, 2, 0, 2)
+        label_h_layout.setSpacing(0)
         
         label = QLabel(name)
         label.setObjectName("chartSideLabel")
@@ -2522,15 +3149,61 @@ class SleepMonitorChart(QWidget):
         label.setCursor(Qt.PointingHandCursor)
         label.setStyleSheet(self._channel_label_stylesheet(name, color))
         # COMPLETELY REMOVE click event handler - labels should never hide graphs
-        
-        label_layout.addWidget(label)
-        
+
+        def scroll_to_chart(event=None, c=container):
+            self.scroll_chart_container_into_view(c)
+            if event is not None:
+                event.accept()
+
+        label_frame.mousePressEvent = scroll_to_chart
+        label.mousePressEvent = scroll_to_chart
+
+        label_h_layout.addWidget(label, stretch=1)
+
+        zoom_col = QWidget()
+        zoom_col_layout = QVBoxLayout(zoom_col)
+        zoom_col_layout.setContentsMargins(0, 0, 0, 0)
+        zoom_col_layout.setSpacing(2)
+        zoom_col_layout.setAlignment(Qt.AlignVCenter | Qt.AlignHCenter)
+
+        zoom_in_btn = QPushButton("+")
+        zoom_out_btn = QPushButton("-")
+        reset_btn = QPushButton("R")
+
+        for btn in (zoom_in_btn, zoom_out_btn, reset_btn):
+            btn.setFixedSize(22, 20)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #f1f5f9;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 3px;
+                    color: #475569;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    background: #dbeafe;
+                    border: 1px solid #3b82f6;
+                    color: #1e40af;
+                }
+                QPushButton:pressed {
+                    background: #93c5fd;
+                    border: 1px solid #1d4ed8;
+                    color: #1e3a8a;
+                }
+            """)
+            btn.setCursor(Qt.PointingHandCursor)
+
+        zoom_col_layout.addWidget(zoom_in_btn)
+        zoom_col_layout.addWidget(zoom_out_btn)
+        zoom_col_layout.addWidget(reset_btn)
+        label_h_layout.addWidget(zoom_col, stretch=0)
+
         container_layout.addWidget(label_frame)
-        
-        # Plot Container with Zoom Controls
+
+        # Plot Container
         plot_container = QWidget()
         plot_container.setObjectName("plotContainer")
-        # Apply professional double-shaded styling to plot container
         plot_container.setStyleSheet("""
             QWidget#plotContainer {
                 background: qlineargradient(
@@ -2548,373 +3221,133 @@ class SleepMonitorChart(QWidget):
         plot_container_layout = QVBoxLayout(plot_container)
         plot_container_layout.setContentsMargins(0, 0, 0, 0)
         plot_container_layout.setSpacing(0)
-        
-        # Zoom Controls
-        zoom_frame = QFrame()
-        zoom_frame.setObjectName("zoomControlsFrame")
-        # Apply professional styling to zoom controls frame
-        zoom_frame.setStyleSheet("""
-            QFrame#zoomControlsFrame {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #f8fafc,
-                    stop: 0.5 #ffffff,
-                    stop: 1 #f1f5f9
-                );
-                border: 1px solid #e2e8f0;
-                border-radius: 4px;
-                margin: 1px;
-            }
-        """)
-        zoom_layout = QHBoxLayout(zoom_frame)
-        zoom_layout.setContentsMargins(3, 1, 3, 1)
-        zoom_layout.setSpacing(4)
-        
-        # Store original Y range for zoom calculations
-        self.original_y_min = 0
-        self.original_y_max = 100
-        self.current_y_min = 0
-        self.current_y_max = 100
-        
-        # Zoom In button
-        zoom_in_btn = QPushButton("+")
-        zoom_in_btn.setObjectName("zoomButton")
-        zoom_in_btn.setFixedSize(30, 22)
-        # Apply professional styling to zoom buttons
-        zoom_in_btn.setStyleSheet("""
-            QPushButton#zoomButton {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #f1f5f9,
-                    stop: 1 #e2e8f0
-                );
-                border: 1px solid #cbd5e1;
-                border-radius: 3px;
-                color: #475569;
-                font-size: 10px;
-                font-weight: 700;
-                text-align: center;
-            }
-            QPushButton#zoomButton:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #dbeafe,
-                    stop: 1 #bfdbfe
-                );
-                border: 1px solid #3b82f6;
-                color: #1e40af;
-            }
-            QPushButton#zoomButton:pressed {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #dbeafe,
-                    stop: 0.5 #93c5fd,
-                    stop: 1 #60a5fa
-                );
-                border: 1px solid #1d4ed8;
-                color: #1e3a8a;
-            }
-        """)
-        print(f"DEBUG: Created zoom in button for {name} with objectName 'zoomButton'")
-        
-        def on_zoom_in():
-            print(f"ZOOM IN BUTTON CLICKED for {name}")
-            self.zoom_vertical(plot_widget, 0.8)
-        
-        zoom_in_btn.clicked.connect(on_zoom_in)
-        zoom_layout.addWidget(zoom_in_btn)
-        print(f"DEBUG: Added zoom in button to layout for {name}")
-        
-        # Zoom Out button
-        zoom_out_btn = QPushButton("-")
-        zoom_out_btn.setObjectName("zoomButton")
-        zoom_out_btn.setFixedSize(30, 22)
-        # Apply professional styling to zoom buttons
-        zoom_out_btn.setStyleSheet("""
-            QPushButton#zoomButton {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #f1f5f9,
-                    stop: 1 #e2e8f0
-                );
-                border: 1px solid #cbd5e1;
-                border-radius: 3px;
-                color: #475569;
-                font-size: 10px;
-                font-weight: 700;
-                text-align: center;
-            }
-            QPushButton#zoomButton:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #dbeafe,
-                    stop: 1 #bfdbfe
-                );
-                border: 1px solid #3b82f6;
-                color: #1e40af;
-            }
-            QPushButton#zoomButton:pressed {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #dbeafe,
-                    stop: 0.5 #93c5fd,
-                    stop: 1 #60a5fa
-                );
-                border: 1px solid #1d4ed8;
-                color: #1e3a8a;
-            }
-        """)
-        print(f"DEBUG: Created zoom out button for {name} with objectName 'zoomButton'")
-        
-        def on_zoom_out():
-            print(f"ZOOM OUT BUTTON CLICKED for {name}")
-            self.zoom_vertical(plot_widget, 1.2)
-        
-        zoom_out_btn.clicked.connect(on_zoom_out)
-        zoom_layout.addWidget(zoom_out_btn)
-        print(f"DEBUG: Added zoom out button to layout for {name}")
-        
-        # Reset button
-        reset_btn = QPushButton("R")
-        reset_btn.setObjectName("zoomButton")
-        reset_btn.setFixedSize(30, 22)
-        # Apply professional styling to zoom buttons
-        reset_btn.setStyleSheet("""
-            QPushButton#zoomButton {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #f1f5f9,
-                    stop: 1 #e2e8f0
-                );
-                border: 1px solid #cbd5e1;
-                border-radius: 3px;
-                color: #475569;
-                font-size: 10px;
-                font-weight: 700;
-                text-align: center;
-            }
-            QPushButton#zoomButton:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.5 #dbeafe,
-                    stop: 1 #bfdbfe
-                );
-                border: 1px solid #3b82f6;
-                color: #1e40af;
-            }
-            QPushButton#zoomButton:pressed {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #dbeafe,
-                    stop: 0.5 #93c5fd,
-                    stop: 1 #60a5fa
-                );
-                border: 1px solid #1d4ed8;
-                color: #1e3a8a;
-            }
-        """)
-        print(f"DEBUG: Created reset button for {name} with objectName 'zoomButton'")
-        
-        def on_reset():
-            print(f"RESET BUTTON CLICKED for {name}")
-            self.reset_zoom(plot_widget)
-        
-        reset_btn.clicked.connect(on_reset)
-        zoom_layout.addWidget(reset_btn)
-        print(f"DEBUG: Added reset button to layout for {name}")
-        
-        zoom_layout.addStretch()
-        plot_container_layout.addWidget(zoom_frame)
-        
-        # Create horizontal layout for buttons
-        buttons_container = QFrame()
-        buttons_container.setObjectName("buttonsContainer")
-        # Apply professional styling to buttons container
-        buttons_container.setStyleSheet("""
-            QFrame#buttonsContainer {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #ffffff,
-                    stop: 0.7 #fafbfc,
-                    stop: 1 #f8fafc
-                );
-                border: none;
-                border-radius: 4px;
-                margin: 0px;
-            }
-        """)
-        buttons_layout = QHBoxLayout(buttons_container)
-        buttons_layout.setContentsMargins(0, 0, 0, 0)
-        buttons_layout.setSpacing(4)
-        
-        # Add zoom frame (no expand button)
-        buttons_layout.addWidget(zoom_frame)
-        
-        # Add buttons container to plot layout
-        plot_container_layout.addWidget(buttons_container)
-        print(f"DEBUG: Added zoom frame to buttons container for {name}")
-        print(f"DEBUG: Zoom frame size: {zoom_frame.size()}, visible: {zoom_frame.isVisible()}")
-        
-        # Set up bottom border drag functionality on container
+
+        # Resize grip sits as a direct child of the container, not inside a
+        # layout, so labels and buttons cannot steal its mouse events.
         container.drag_graph_name = name
         container.is_resizing = False
         container.resize_start_height = None
         container.resize_start_y = None
-        container.resize_hover = False  # Track hover state for visual affordance
-        container.hover_mouse_x = 0  # Track mouse X position for localized glow
-        
-        # Enable mouse tracking for container
-        container.setMouseTracking(True)
-        
-        # Override mouse events for container to handle bottom border dragging
-        original_mouse_press = container.mousePressEvent
-        original_mouse_move = container.mouseMoveEvent
-        original_mouse_release = container.mouseReleaseEvent 
-        def container_mouse_press(event):
-            # Check if mouse is near bottom edge (last 15 pixels for full-width resize area)
+
+        GRIP_HEIGHT = 12
+        GRIP_WIDTH = 84
+        MIN_HEIGHT = 82
+        MAX_HEIGHT = 220
+
+        resize_grip = QWidget(container)
+        resize_grip.setObjectName("resizeGrip")
+        resize_grip.setCursor(Qt.SizeVerCursor)
+        resize_grip.setMouseTracking(True)
+        resize_grip.hover_active = False
+        resize_grip.setToolTip("Drag to change height • Double-click to compact/expand")
+        container.resize_grip = resize_grip
+
+        def _position_grip():
+            """Reposition the grip on the container's bottom edge."""
+            grip_width = GRIP_WIDTH if GRIP_WIDTH > 0 else container.width()
+            resize_grip.setGeometry(
+                3,
+                max(0, container.height() - GRIP_HEIGHT - 3),
+                max(40, grip_width),
+                GRIP_HEIGHT,
+            )
+            resize_grip.raise_()
+
+        container._position_resize_grip = _position_grip
+
+        def _apply_container_height(delta_y):
+            """Clamp and apply a new container height."""
+            new_height = container.resize_start_height + delta_y
+            new_height = max(MIN_HEIGHT, min(MAX_HEIGHT, new_height))
+            container.setMinimumHeight(new_height)
+            container.setMaximumHeight(new_height)
+            container.updateGeometry()
+            self.charts_widget.updateGeometry()
+
+        def grip_mouse_press(event):
             if event.button() == Qt.LeftButton:
-                mouse_y = event.pos().y()
-                container_height = container.height()
-                resize_margin = 15
-                bottom_edge = container_height - resize_margin
-                
-                if mouse_y >= bottom_edge:
-                    # Start resizing
-                    container.is_resizing = True
-                    container.resize_start_height = container_height
-                    container.resize_start_y = event.globalY()
-                    container.setCursor(Qt.SizeVerCursor)
-                    return  # Don't call original handler
-                else:
-                    # Call original mouse press if not resizing
-                    if original_mouse_press:
-                        original_mouse_press(event)
-        
-        def container_mouse_move(event):
+                container.is_resizing = True
+                container.resize_start_height = container.height()
+                container.resize_start_y = event.globalY()
+                resize_grip.update()
+                event.accept()
+
+        def grip_mouse_move(event):
             if container.is_resizing and event.buttons() == Qt.LeftButton:
-                # Handle resizing
-                delta_y = event.globalY() - container.resize_start_y
-                new_height = container.resize_start_height + delta_y
-                
-                # Set constraints
-                min_height = 82  # Compact single-page height
-                max_height = 220
-                new_height = max(min_height, min(max_height, new_height))
-                
-                # Apply new height
-                container.setMinimumHeight(new_height)
-                container.setMaximumHeight(new_height)
-                container.updateGeometry()
-                self.charts_widget.updateGeometry()
-            else:
-                # Check if mouse is near bottom edge for cursor change
-                mouse_y = event.pos().y()
-                container_height = container.height()
-                resize_margin = 15
-                bottom_edge = container_height - resize_margin
-                
-                if mouse_y >= bottom_edge:
-                    container.setCursor(Qt.SizeVerCursor)
-                    container.hover_mouse_x = event.pos().x()  # Track mouse X position
-                    if not container.resize_hover:
-                        container.resize_hover = True
-                        container.update()  # Trigger repaint for glow line
-                    else:
-                        container.update()  # Update glow position while hovering
-                else:
-                    container.setCursor(Qt.ArrowCursor)
-                    if container.resize_hover:
-                        container.resize_hover = False
-                        container.update()  # Trigger repaint to remove glow line
-                
-                # Call original mouse move if not resizing
-                if original_mouse_move:
-                    original_mouse_move(event)
-        
-        def container_mouse_release(event):
+                _apply_container_height(event.globalY() - container.resize_start_y)
+                event.accept()
+
+        def grip_mouse_release(event):
             if container.is_resizing:
-                # Finish resizing
                 container.is_resizing = False
-                container.setCursor(Qt.ArrowCursor)
-            else:
-                # Call original mouse release if not resizing
-                if original_mouse_release:
-                    original_mouse_release(event)
-        
-        # Assign the mouse event handlers to container
-        container.mousePressEvent = container_mouse_press
-        container.mouseMoveEvent = container_mouse_move
-        container.mouseReleaseEvent = container_mouse_release
-        
-        # Add paintEvent to draw resize affordance glow line
-        original_paint = container.paintEvent
-        def container_paint_event(event):
-            if original_paint:
-                original_paint(event)
-            
-            # Draw localized glow line when hovering near bottom edge
-            if container.resize_hover:
-                from PyQt5.QtGui import QPainter, QColor, QPen, QLinearGradient
-                try:
-                    painter = QPainter(container)
-                    painter.setRenderHint(QPainter.Antialiasing)
-                    
-                    # Get mouse position and container dimensions
-                    mouse_x = container.hover_mouse_x
-                    container_width = container.width()
-                    y = container.height() - 2
-                    
-                    # Create localized glow effect centered around mouse position
-                    glow_width = 150  # Width of the glow area
-                    glow_start_x = max(0, mouse_x - glow_width // 2)
-                    glow_end_x = min(container_width, mouse_x + glow_width // 2)
-                    
-                    # Draw gradient glow line (professional medical-grade blue)
-                    gradient = QLinearGradient(glow_start_x, y, glow_end_x, y)
-                    gradient.setColorAt(0.0, QColor(59, 130, 246, 0))  # Transparent at edges
-                    gradient.setColorAt(0.3, QColor(59, 130, 246, 100))  # Fading in
-                    gradient.setColorAt(0.5, QColor(59, 130, 246, 220))  # Brightest at center
-                    gradient.setColorAt(0.7, QColor(59, 130, 246, 100))  # Fading out
-                    gradient.setColorAt(1.0, QColor(59, 130, 246, 0))  # Transparent at edges
-                    
-                    pen = QPen(QColor(59, 130, 246, 220))
-                    pen.setWidth(4)
-                    pen.setCapStyle(Qt.RoundCap)
-                    painter.setPen(pen)
-                    painter.drawLine(glow_start_x, y, glow_end_x, y)
-                    
-                    # Add a subtle secondary glow for depth
-                    pen2 = QPen(QColor(147, 197, 253, 80))
-                    pen2.setWidth(8)
-                    pen2.setCapStyle(Qt.RoundCap)
-                    painter.setPen(pen2)
-                    painter.drawLine(glow_start_x, y, glow_end_x, y)
-                    
-                    # Draw a bright center line for precision
-                    center_pen = QPen(QColor(255, 255, 255, 180))
-                    center_pen.setWidth(2)
-                    center_pen.setCapStyle(Qt.RoundCap)
-                    painter.setPen(center_pen)
-                    painter.drawLine(mouse_x - 20, y, mouse_x + 20, y)
-                    
-                    painter.end()
-                except Exception as e:
-                    print(f"Error drawing glow line: {e}")
-        
-        container.paintEvent = container_paint_event
+                resize_grip.update()
+                event.accept()
+
+        def grip_double_click(event):
+            """Double-click toggles between compact and expanded height."""
+            if event.button() != Qt.LeftButton:
+                return
+            midpoint = (MIN_HEIGHT + MAX_HEIGHT) // 2
+            target = MAX_HEIGHT if container.height() < midpoint else MIN_HEIGHT
+            container.setMinimumHeight(target)
+            container.setMaximumHeight(target)
+            container.updateGeometry()
+            self.charts_widget.updateGeometry()
+            event.accept()
+
+        def grip_enter(event):
+            resize_grip.hover_active = True
+            resize_grip.update()
+
+        def grip_leave(event):
+            resize_grip.hover_active = False
+            resize_grip.update()
+
+        def grip_paint(event):
+            painter = QPainter(resize_grip)
+            painter.setRenderHint(QPainter.Antialiasing)
+            grip_w = resize_grip.width()
+            grip_h = resize_grip.height()
+            center_y = grip_h // 2
+            center_x = grip_w // 2
+            is_active = resize_grip.hover_active or container.is_resizing
+
+            if is_active:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(59, 130, 246, 30))
+                painter.drawRoundedRect(0, 0, grip_w, grip_h, 4, 4)
+
+            line_color = QColor(37, 99, 235, 235) if is_active else QColor(100, 116, 139, 120)
+            grip_pen = QPen(line_color)
+            grip_pen.setWidth(2)
+            grip_pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(grip_pen)
+            for offset_y in (-3, 0, 3):
+                painter.drawLine(center_x - 13, center_y + offset_y,
+                                 center_x + 13, center_y + offset_y)
+
+            painter.end()
+
+        resize_grip.mousePressEvent = grip_mouse_press
+        resize_grip.mouseMoveEvent = grip_mouse_move
+        resize_grip.mouseReleaseEvent = grip_mouse_release
+        resize_grip.mouseDoubleClickEvent = grip_double_click
+        resize_grip.enterEvent = grip_enter
+        resize_grip.leaveEvent = grip_leave
+        resize_grip.paintEvent = grip_paint
+        _position_grip()
         
         # Plot Widget with custom ViewBox
         plot_widget = pg.PlotWidget(viewBox=CustomViewBox())
         plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         plot_widget.setAlignment(Qt.AlignCenter)
-        # Remove all grid lines for clean white background
+        # Grid: identical across all charts - only vertical time lines.
+        # No horizontal lines, so every container looks the same.
+        # Time lines matter because apnea/hypopnea rules are >=10 seconds
+        # and the scorer needs an easy visual reference for duration.
         plot_widget.showGrid(x=False, y=False)
+        plot_widget.getAxis('bottom').setGrid(56)     # ~22% - vertical time lines
+        plot_widget.getAxis('left').setGrid(False)    # horizontal lines off
         
         # Disable all auto-range and auto-visibility for stable PSG monitor behavior
         plot_widget.enableAutoRange(False)
@@ -2937,36 +3370,55 @@ class SleepMonitorChart(QWidget):
             }
         """)
         
-        # Use passed medical range parameters if provided, otherwise use defaults
+        signal_name = name.strip()
+        is_auto_range_chart = signal_name in AUTO_RANGE_SIGNAL_NAMES
+
+        # Use passed medical range parameters if provided, otherwise use defaults.
+        # Auto-range charts must not be clamped to these values.
         if y_min is not None and y_max is not None:
             initial_y_min, initial_y_max = y_min, y_max
         else:
-            signal_name = name.strip()
             initial_y_min, initial_y_max = SIGNAL_Y_RANGES.get(signal_name, (0, 100))
 
-        if name.strip() == "Airflow":
-            initial_y_min, initial_y_max = self.get_signal_auto_axis_range(name.strip())
-        
-        # Set fixed Y-axis range based on medical standards
-        try:
-            plot_widget.setYRange(initial_y_min, initial_y_max)
-        except TypeError:
-            # Try alternative method for older pyqtgraph versions
-            plot_widget.setRange(yRange=[initial_y_min, initial_y_max])
+        # Restrict zoom to Y-axis only (amplitude zoom) - disable X-axis to prevent sliding
+        plot_widget.setMouseEnabled(x=False, y=True)
+
+        # Disable auto-range and set fixed limits
+        plot_widget.enableAutoRange(axis='y', enable=False)
+        if is_auto_range_chart:
+            # Start with a lock on the initial range, then relock to data once
+            # the chart's actual signal values are loaded.
+            self._lock_auto_axis(plot_widget, initial_y_min, initial_y_max)
+        else:
+            # Fixed medical range: give the chart a small breathing room so the
+            # top and bottom tick labels do not get clipped at the border.
+            fixed_span = max(float(initial_y_max) - float(initial_y_min), 1e-6)
+            edge_margin = fixed_span * 0.06
+            visible_y_min = float(initial_y_min) - edge_margin
+            visible_y_max = float(initial_y_max) + edge_margin
+            try:
+                plot_widget.setYRange(visible_y_min, visible_y_max, padding=0)
+            except TypeError:
+                plot_widget.setRange(yRange=[visible_y_min, visible_y_max], padding=0)
+            try:
+                plot_widget.setLimits(yMin=visible_y_min, yMax=visible_y_max)
+            except TypeError:
+                # Try alternative method for older pyqtgraph versions
+                plot_widget.setLimits(yMin=visible_y_min, yMax=visible_y_max)
 
         plot_widget.original_y_min = initial_y_min
         plot_widget.original_y_max = initial_y_max
-        
-        # Restrict zoom to Y-axis only (amplitude zoom) - disable X-axis to prevent sliding
-        plot_widget.setMouseEnabled(x=False, y=True)
-        
-        # Disable auto-range and set fixed limits
-        plot_widget.enableAutoRange(axis='y', enable=False)
-        try:
-            plot_widget.setLimits(yMin=initial_y_min, yMax=initial_y_max)
-        except TypeError:
-            # Try alternative method for older pyqtgraph versions
-            plot_widget.setLimits(yMin=initial_y_min, yMax=initial_y_max)
+        if is_auto_range_chart:
+            plot_widget.zoom_y_min_limit = initial_y_min
+            plot_widget.zoom_y_max_limit = initial_y_max
+            plot_widget.zoom_y_min_span = max(float(initial_y_max) - float(initial_y_min), 1e-6) * 0.1
+            plot_widget.zoom_y_max_span = max(float(initial_y_max) - float(initial_y_min), 1e-6) * 2.0
+        else:
+            plot_widget.zoom_y_min_limit = initial_y_min
+            plot_widget.zoom_y_max_limit = initial_y_max
+            base_y_span = max(float(initial_y_max) - float(initial_y_min), 1e-6)
+            plot_widget.zoom_y_min_span = max(base_y_span * 0.5, 1.0)
+            plot_widget.zoom_y_max_span = base_y_span
             
         # Set X-axis to show time values based on current time window
         bottom_axis = plot_widget.getAxis('bottom')
@@ -2983,7 +3435,7 @@ class SleepMonitorChart(QWidget):
         bottom_axis.setTickFont(small_font)  # X-axis numbers
         left_axis.setTickFont(small_font)    # Y-axis numbers
         
-        axis_width = 46 if initial_y_max < 100 else 52 if initial_y_max < 1000 else 60
+        axis_width = 28
         left_axis.setWidth(axis_width)
         
         # Ensure axis ticks are visible
@@ -3016,11 +3468,15 @@ class SleepMonitorChart(QWidget):
         
         plot_widget.setMouseEnabled(x=False, y=True)
         plot_widget.hideButtons()  # Hide the 'A' button
+        zoom_in_btn.clicked.connect(lambda: self.zoom_vertical(plot_widget, 0.8))
+        zoom_out_btn.clicked.connect(lambda: self.zoom_vertical(plot_widget, 1.2))
+        reset_btn.clicked.connect(lambda: self.reset_zoom(plot_widget))
+
         container.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
         label_frame.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
         label.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
+        zoom_col.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
         plot_container.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
-        zoom_frame.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
         
         # Keep the plot anchored to the top so the signal begins immediately under the card
         plot_container_layout.setAlignment(plot_widget, Qt.AlignTop)
@@ -3044,19 +3500,17 @@ class SleepMonitorChart(QWidget):
         
         # Plot all graphs as normal line plots (no step ladder, no fill)
         # Use connect='finite' so NaN gaps do not draw as vertical connector lines.
-        plot_curve = plot_widget.plot(x, y, pen=pen, fill=None, connect='finite')
-        try:
-            plot_curve.setClipToView(True)
-        except Exception:
-            pass
-        try:
-            plot_curve.setDownsampling(auto=True, method="peak")
-        except Exception:
-            pass
+        if name.strip() == "Body Position":
+            self._configure_body_position_axis(plot_widget)
+            x_step, y_step = self._build_body_position_step_data(x, y)
+            plot_curve = plot_widget.plot(x_step, y_step, pen=pen, fill=None, connect='finite', stepMode=True)
+        else:
+            plot_curve = plot_widget.plot(x, y, pen=pen, fill=None, connect='finite')
 
+        if name.strip() in AUTO_RANGE_SIGNAL_NAMES:
+            auto_y_min, auto_y_max = self.get_signal_auto_axis_range(name.strip())
+            self._lock_auto_axis(plot_widget, auto_y_min, auto_y_max)
         if name.strip() == "Airflow":
-            airflow_y_min, airflow_y_max = self.get_signal_auto_axis_range(name.strip())
-            plot_widget.setYRange(airflow_y_min, airflow_y_max, padding=0)
             _event_x, detection_y = self.get_airflow_detection_data_for_window(
                 self.current_time_window,
                 self.current_time_offset,
@@ -3101,6 +3555,7 @@ class SleepMonitorChart(QWidget):
         plot_widget.scene().sigMouseMoved.connect(lambda pos, pw=plot_widget: self.on_mouse_moved(pos, pw))
         plot_widget.mousePressEvent = lambda event, pw=plot_widget: self.custom_mouse_press(event, pw)
         plot_widget.mouseReleaseEvent = lambda event, pw=plot_widget: self.custom_mouse_release(event, pw)
+        plot_widget.mouseDoubleClickEvent = lambda event, pw=plot_widget: self.custom_mouse_double_click(event, pw)
         
         # Connect resize event to update overlay positions
         vb = plot_widget.getViewBox()
@@ -3125,6 +3580,8 @@ class SleepMonitorChart(QWidget):
 
             if original_resize:
                 original_resize(event)
+            if hasattr(container, '_position_resize_grip'):
+                container._position_resize_grip()
             # Update overlays when container resizes
             self.on_container_resized(container)
         container.resizeEvent = container_resize_event
@@ -3149,10 +3606,11 @@ class SleepMonitorChart(QWidget):
             }
         """)
         selection_overlay.setVisible(False)
+        # This is only a visual preview; it must not intercept mouse events.
+        selection_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         
         # Store temporary overlay reference for preview only
         plot_widget.selection_overlay = selection_overlay
-        selection_overlay.mousePressEvent = lambda event, pw=plot_widget: self.reopen_pending_selection_menu(event, pw)
         
         plot_container_layout.addWidget(plot_widget)
         container_layout.addWidget(plot_container)
@@ -3379,6 +3837,9 @@ class SleepMonitorChart(QWidget):
             if x_data is not None and y_data is not None:
                 x_values = np.asarray(x_data, dtype=float)
                 y_values = np.asarray(y_data, dtype=float)
+                min_len = min(len(x_values), len(y_values))
+                x_values = x_values[:min_len]
+                y_values = y_values[:min_len]
                 x_min, x_max = current_range[0]
                 visible_mask = (
                     np.isfinite(x_values)
@@ -3402,13 +3863,13 @@ class SleepMonitorChart(QWidget):
         chart_name = getattr(plot_widget, 'chart_name', '')
         y_min_limit, y_max_limit = SIGNAL_Y_RANGES.get(chart_name.strip(), (0, 100))
         
-        # Apply chart-specific limits
-        if new_y_min < y_min_limit:
-            new_y_min = y_min_limit
-            new_y_max = new_y_min + new_range_size
-        elif new_y_max > y_max_limit:
-            new_y_max = y_max_limit
-            new_y_min = y_max_limit - new_range_size
+        new_y_min, new_y_max = self._clamp_y_zoom_range(
+            plot_widget,
+            new_y_min,
+            new_y_max,
+            y_min_limit,
+            y_max_limit,
+        )
             
         try:
             plot_widget.setYRange(new_y_min, new_y_max)
@@ -3438,14 +3899,13 @@ class SleepMonitorChart(QWidget):
         chart_name = getattr(plot_widget, 'chart_name', '')
         y_min_limit, y_max_limit = SIGNAL_Y_RANGES.get(chart_name.strip(), (0, 100))
 
-        if new_y_min < y_min_limit:
-            shift = y_min_limit - new_y_min
-            new_y_min += shift
-            new_y_max += shift
-        if new_y_max > y_max_limit:
-            shift = new_y_max - y_max_limit
-            new_y_min -= shift
-            new_y_max -= shift
+        new_y_min, new_y_max = self._clamp_y_zoom_range(
+            plot_widget,
+            new_y_min,
+            new_y_max,
+            y_min_limit,
+            y_max_limit,
+        )
 
         try:
             plot_widget.setYRange(new_y_min, new_y_max)
@@ -3458,15 +3918,54 @@ class SleepMonitorChart(QWidget):
     def handle_container_wheel_zoom(self, event, plot_widget):
         """Route wheel zoom from non-plot container areas into centered graph zoom."""
         delta = event.angleDelta().y() if hasattr(event, "angleDelta") else event.delta()
-        zoom_factor = 0.9 if delta > 0 else 1.1
+        zoom_factor = 0.96 if delta > 0 else 1.04
         self.zoom_vertical_at_ratio(plot_widget, zoom_factor, 0.5)
         event.accept()
+
+    def _clamp_y_zoom_range(self, plot_widget, new_y_min, new_y_max, fallback_min, fallback_max):
+        """Keep Y zoom within the graph's intended medical display bounds."""
+        y_min_limit = getattr(plot_widget, "zoom_y_min_limit", fallback_min)
+        y_max_limit = getattr(plot_widget, "zoom_y_max_limit", fallback_max)
+        if y_max_limit <= y_min_limit:
+            return new_y_min, new_y_max
+
+        base_span = max(float(y_max_limit) - float(y_min_limit), 1e-6)
+        min_span = float(getattr(plot_widget, "zoom_y_min_span", base_span * 0.5))
+        max_span = float(getattr(plot_widget, "zoom_y_max_span", base_span))
+        min_span = max(1e-6, min(min_span, base_span))
+        max_span = max(min_span, min(max_span, base_span))
+
+        current_span = max(float(new_y_max) - float(new_y_min), 1e-6)
+        target_span = min(max(current_span, min_span), max_span)
+        center = (float(new_y_min) + float(new_y_max)) / 2.0
+        new_y_min = center - target_span / 2.0
+        new_y_max = center + target_span / 2.0
+
+        if new_y_min < y_min_limit:
+            shift = y_min_limit - new_y_min
+            new_y_min += shift
+            new_y_max += shift
+        if new_y_max > y_max_limit:
+            shift = new_y_max - y_max_limit
+            new_y_min -= shift
+            new_y_max -= shift
+
+        if new_y_min < y_min_limit:
+            new_y_min = y_min_limit
+        if new_y_max > y_max_limit:
+            new_y_max = y_max_limit
+
+        if new_y_max - new_y_min < min_span:
+            new_y_max = min(y_max_limit, new_y_min + min_span)
+            new_y_min = max(y_min_limit, new_y_max - min_span)
+
+        return new_y_min, new_y_max
     
     def reset_zoom(self, plot_widget):
         """Reset zoom to original medical standard range"""
         # Get the chart name from the plot widget
         chart_name = getattr(plot_widget, 'chart_name', '')
-        if chart_name.strip() == "Airflow":
+        if chart_name.strip() in AUTO_RANGE_SIGNAL_NAMES:
             y_min, y_max = self.get_signal_auto_axis_range(chart_name)
         else:
             y_min, y_max = SIGNAL_Y_RANGES.get(chart_name.strip(), (0, 100))
@@ -3483,15 +3982,6 @@ class SleepMonitorChart(QWidget):
             plot_widget.zoom_y_range = None
             print(f"Reset zoom range for {chart_name}")
     
-    def toggle_playback(self):
-        """Toggle between play and pause"""
-        print(f"Toggle playback - Current state: {self.is_playing}")
-        if self.is_playing:
-            self.pause_playback()
-        else:
-            self.start_playback()
-    
-        
     def forward_playback(self):
         """Fast forward playback"""
         print(f"Forward button clicked - Playing: {self.is_playing}")
@@ -3680,10 +4170,18 @@ class SleepMonitorChart(QWidget):
     
     def on_mouse_clicked(self, event, plot_widget):
         """Handle mouse click for area selection and label removal"""
+        self.clear_viewbox_rubber_band(plot_widget)
+        chart_name = plot_widget.chart_name.strip() if hasattr(plot_widget, "chart_name") else ""
+        if not self._selection_allowed_for_chart(chart_name):
+            if hasattr(event, "accept"):
+                event.accept()
+            return
         if event.button() == Qt.LeftButton:
             widget_pos = event.pos()
             widget_rect = plot_widget.rect()
             if not widget_rect.contains(widget_pos):
+                if hasattr(event, "accept"):
+                    event.accept()
                 return
             scene_pos = plot_widget.mapToScene(widget_pos)
             
@@ -3709,26 +4207,51 @@ class SleepMonitorChart(QWidget):
             if self.selection_start and self.selection_end:
                 print("Right click detected -> opening menu")
                 self.show_selection_menu()
+        if hasattr(event, "accept"):
+            event.accept()
     
     def custom_mouse_press(self, event, plot_widget):
         """Custom mouse press handler for better selection handling"""
-        # Handle right mouse button for y-axis context menu
+        self.clear_viewbox_rubber_band(plot_widget)
+        # Handle right mouse button for y-axis context menu on all charts
         if event.button() == Qt.RightButton:
             self.handle_right_click(event, plot_widget)
+            if hasattr(event, "accept"):
+                event.accept()
+            return
+
+        chart_name = plot_widget.chart_name.strip() if hasattr(plot_widget, "chart_name") else ""
+        if not self._selection_allowed_for_chart(chart_name):
+            if hasattr(event, "accept"):
+                event.accept()
             return
             
         # Only handle left mouse button for area selection
         if event.button() != Qt.LeftButton:
+            if hasattr(event, "accept"):
+                event.accept()
             return
             
-        # Prevent new selection if context menu is active
-        if hasattr(self, 'active_context_menu') and self.active_context_menu is not None:
-            return
+        # Prevent new selection only if a menu is genuinely open.
+        # A stale reference used to block LEFT clicks forever while RIGHT clicks
+        # still worked because they were handled before this guard.
+        open_menu = getattr(self, "active_context_menu", None)
+        if open_menu is not None:
+            try:
+                if open_menu.isVisible():
+                    if hasattr(event, "accept"):
+                        event.accept()
+                    return
+            except RuntimeError:
+                pass
+            self.active_context_menu = None
             
         # Handle left click directly
         widget_pos = event.pos()
         widget_rect = plot_widget.rect()
         if not widget_rect.contains(widget_pos):
+            if hasattr(event, "accept"):
+                event.accept()
             return
         
         # Debounce - prevent duplicate clicks
@@ -3756,6 +4279,14 @@ class SleepMonitorChart(QWidget):
         self.selection_end_scene = None
         # Keep preview overlay hidden, don't touch persistent overlays
         print(f"Started selection on {plot_widget.chart_name}")
+        if hasattr(event, "accept"):
+            event.accept()
+
+    def custom_mouse_double_click(self, event, plot_widget):
+        """Suppress double-click behavior so pyqtgraph does not leave a rubber band behind."""
+        self.clear_viewbox_rubber_band(plot_widget)
+        if hasattr(event, "accept"):
+            event.accept()
     
     def handle_right_click(self, event, plot_widget):
         """Handle right-click events on y-axis to show image options context menu"""
@@ -3775,303 +4306,192 @@ class SleepMonitorChart(QWidget):
         """Show context menu with image options for the specific graph"""
         menu = QMenu(self)
         menu.setTitle(f"Image Options - {plot_widget.chart_name}")
-        
-        # Save as PNG action
-        save_png_action = QAction("Save as PNG", self)
-        save_png_action.triggered.connect(lambda: self.save_graph_as_image(plot_widget, "PNG"))
-        menu.addAction(save_png_action)
-        
-        # Save as JPG action
-        save_jpg_action = QAction("Save as JPG", self)
-        save_jpg_action.triggered.connect(lambda: self.save_graph_as_image(plot_widget, "JPG"))
-        menu.addAction(save_jpg_action)
-        
-        # Copy to clipboard action
-        copy_clipboard_action = QAction("Copy to Clipboard", self)
-        copy_clipboard_action.triggered.connect(lambda: self.copy_graph_to_clipboard(plot_widget))
-        menu.addAction(copy_clipboard_action)
-        
-        menu.addSeparator()
-        
-        # Export with high resolution action
-        export_hd_action = QAction("Export High Resolution", self)
-        export_hd_action.triggered.connect(lambda: self.export_graph_hd(plot_widget))
-        menu.addAction(export_hd_action)
-        
-        menu.addSeparator()
-        
-        # Amplitude Axis Properties action
-        amplitude_properties_action = QAction("Amplitude Axis Properties", self)
-        amplitude_properties_action.triggered.connect(lambda: self.show_amplitude_axis_properties(plot_widget))
-        menu.addAction(amplitude_properties_action)
+
+        # Amplitude Axis Properties action removed
+        # amplitude_properties_action = QAction("Amplitude Axis Properties", self)
+        # amplitude_properties_action.triggered.connect(lambda: self.show_amplitude_axis_properties(plot_widget))
+        # menu.addAction(amplitude_properties_action)
         
         # Show the menu at the cursor position
         self.active_context_menu = menu
         menu.exec_(global_pos)
         self.active_context_menu = None
     
-    def save_graph_as_image(self, plot_widget, format_type):
-        """Save individual graph as image"""
-        try:
-            
-            vb = plot_widget.getViewBox()
-            
-            
-            exporter = pg.exporters.ImageExporter(vb)
-            
-            # Generate filename with timestamp and graph name
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_graph_name = plot_widget.chart_name.strip().replace(" ", "_").replace("/", "_")
-            filename = f"{safe_graph_name}_{timestamp}.{format_type.lower()}"
-            
-            # Show save dialog
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                f"Save {plot_widget.chart_name} as {format_type}",
-                filename,
-                f"{format_type} Files (*.{format_type.lower()});;All Files (*)"
-            )
-            
-            if file_path:
-                exporter.export(file_path)
-                QMessageBox.information(self, "Image Saved", 
-                                   f"{plot_widget.chart_name} saved as:\n{file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", 
-                               f"Failed to save {plot_widget.chart_name}:\n{str(e)}")
-    
-    def copy_graph_to_clipboard(self, plot_widget):
-        """Copy graph to clipboard"""
-        try:
-            # Get the plot widget's view box
-            vb = plot_widget.getViewBox()
-            
-            # Export the plot to an image in memory
-            exporter = pg.exporters.ImageExporter(vb)
-            
-            # Get the image as QPixmap
-            pixmap = exporter.export(toBytes=True)
-            
-            # Copy to clipboard
-            clipboard = QApplication.clipboard()
-            clipboard.setPixmap(QPixmap(pixmap))
-            
-            QMessageBox.information(self, "Copied to Clipboard", 
-                               f"{plot_widget.chart_name} copied to clipboard!")
-        except Exception as e:
-            QMessageBox.critical(self, "Copy Error", 
-                               f"Failed to copy {plot_widget.chart_name}:\n{str(e)}")
-    
-    def export_graph_hd(self, plot_widget):
-        """Export graph in high resolution"""
-        try:
-            
-            vb = plot_widget.getViewBox()
-            
-            exporter = pg.exporters.ImageExporter(vb)
-            
-            exporter.parameters()['width'] = 1920  
-            exporter.parameters()['height'] = 1080  
-            
-            # Generate filename
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_graph_name = plot_widget.chart_name.strip().replace(" ", "_").replace("/", "_")
-            filename = f"{safe_graph_name}_HD_{timestamp}.png"
-            
-            # Show save dialog
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                f"Export {plot_widget.chart_name} in High Resolution",
-                filename,
-                "PNG Files (*.png);;All Files (*)"
-            )
-            
-            if file_path:
-                exporter.export(file_path)
-                QMessageBox.information(self, "HD Image Exported", 
-                                   f"{plot_widget.chart_name} exported in HD:\n{file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", 
-                               f"Failed to export {plot_widget.chart_name} in HD:\n{str(e)}")
-    
-    def show_amplitude_axis_properties(self, plot_widget):
-        """Show amplitude axis properties dialog for the specific graph"""
-        try:
-            # Get current axis properties from the plot widget
-            current_properties = self.get_current_axis_properties(plot_widget)
-            
-            # Create and show the dialog
-            dialog = AmplitudeAxisPropertiesDialog(self, current_properties)
-            dialog.properties_changed.connect(lambda props: self.apply_axis_properties(plot_widget, props))
-            
-            result = dialog.exec_()
-            if result == QDialog.Accepted:
-                print(f"Amplitude axis properties applied for {plot_widget.chart_name}")
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Properties Error", 
-                               f"Failed to open amplitude axis properties:\n{str(e)}")
-    
-    def get_current_axis_properties(self, plot_widget):
-        """Get current axis properties from the plot widget"""
-        try:
-            # Get the current Y-axis range
-            view_range = plot_widget.getViewBox().viewRange()
-            y_min, y_max = view_range[1]
-            
-            # Get the original Y-axis range if stored
-            original_y_min = getattr(plot_widget, 'original_y_min', y_min)
-            original_y_max = getattr(plot_widget, 'original_y_max', y_max)
-            
-            properties = {
-                'low_value': float(y_min),
-                'high_value': float(y_max),
-                'limit_axis_range': False,  
-                'limit_low_value': float(original_y_min),
-                'limit_high_value': float(original_y_max),
-                'auto_adjust': 'scale_to_fit'  
-            }
-            
-            return properties
-            
-        except Exception as e:
-            print(f"Error getting current axis properties: {e}")
-            # Return default properties
-            return {
-                'low_value': 35.0,
-                'high_value': 100.0,
-                'limit_axis_range': False,
-                'limit_low_value': 85.0,
-                'limit_high_value': 100.0,
-                'auto_adjust': 'scale_to_fit'
-            }
-    
-    def apply_axis_properties(self, plot_widget, properties):
-        """Apply the axis properties to the plot widget"""
-        try:
-            # Get the view box
-            vb = plot_widget.getViewBox()
-            
-            # Apply new Y-axis range
-            low_value = properties.get('low_value', 35.0)
-            high_value = properties.get('high_value', 100.0)
-            
-            # Force the Y-axis range to exactly match the specified values without
-            # modifying the plotted signal values.
-            try:
-                plot_widget.setYRange(low_value, high_value, padding=0)
-            except TypeError:
-                # Try alternative method for older pyqtgraph versions
-                plot_widget.setRange(yRange=[low_value, high_value], padding=0)
-            
-            # Apply manual range setting to override any auto-scaling
-            vb.setRange(yRange=[low_value, high_value], padding=0)
-            
-            # Handle limit axis range
-            if properties.get('limit_axis_range', False):
-                limit_low = properties.get('limit_low_value', low_value)
-                limit_high = properties.get('limit_high_value', high_value)
-                
-                # Set strict limits on the view box to prevent zooming beyond range
-                try:
-                    vb.setLimits(yMin=limit_low, yMax=limit_high)
-                except TypeError:
-                    # Try alternative method
-                    vb.setLimits(yMin=limit_low, yMax=limit_high)
-            else:
-                # Set limits to match the current range to prevent unwanted scaling
-                try:
-                    vb.setLimits(yMin=low_value, yMax=high_value)
-                except TypeError:
-                    vb.setLimits(yMin=low_value, yMax=high_value)
-            
-            # Disable auto-range completely to maintain manual control
-            auto_adjust = properties.get('auto_adjust', 'scale_to_fit')
-            if auto_adjust == 'disabled':
-              
-                plot_widget.enableAutoRange(axis='y', enable=False)
-                vb.enableAutoRange(axis='y', enable=False)
-            elif auto_adjust == 'center':
-              
-                plot_widget.enableAutoRange(axis='y', enable=False)
-                vb.enableAutoRange(axis='y', enable=False)
-            else:  
-               
-                plot_widget.enableAutoRange(axis='y', enable=False)
-                vb.enableAutoRange(axis='y', enable=False)
-            
-            # Store the properties in the plot widget for future reference
-            plot_widget.axis_properties = properties
-            
-            # Force immediate update of the display
-            plot_widget.update()
-            vb.updateAutoRange()
-            vb.updateViewRange()
-            
-            print(f"Applied axis properties to {plot_widget.chart_name}:")
-            print(f"  Range: {low_value} - {high_value}")
-            print(f"  Limit: {properties.get('limit_axis_range', False)}")
-            print(f"  Auto-adjust: {auto_adjust}")
-            
-            # Update SpO2 value labels to match the new scaled data
-            if plot_widget.chart_name.strip() == "SpO2" and hasattr(plot_widget, 'plot_curve'):
-                current_data = plot_widget.plot_curve.getData()
-                if current_data[0] is not None and len(current_data[0]) > 0:
-                    x_data, y_data = current_data
-                    # Recreate value labels with the scaled data positions
-                    self.create_spo2_markers_and_labels(plot_widget, x_data, y_data)
-                    print(f"Updated SpO2 value labels for new axis range: {low_value} - {high_value}")
-            
-            
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(100, lambda: self.force_range_update(plot_widget, low_value, high_value))
-            
-        except Exception as e:
-            print(f"Error applying axis properties: {e}")
-            QMessageBox.critical(self, "Apply Error", 
-                               f"Failed to apply axis properties:\n{str(e)}")
-    
-    def force_range_update(self, plot_widget, low_value, high_value):
-        """Force the range update to ensure it sticks"""
-        try:
-            vb = plot_widget.getViewBox()
-            vb.setRange(yRange=[low_value, high_value], padding=0)
-            plot_widget.setYRange(low_value, high_value, padding=0)
-            plot_widget.update()
-            
-            
-            if plot_widget.chart_name.strip() == "SpO2" and hasattr(plot_widget, 'plot_curve'):
-                current_data = plot_widget.plot_curve.getData()
-                if current_data[0] is not None and len(current_data[0]) > 0:
-                    x_data, y_data = current_data
-                 
-                    self.create_spo2_markers_and_labels(plot_widget, x_data, y_data)
-                    print(f"Force updated SpO2 value labels for range: {low_value} - {high_value}")
-            
-            print(f"Force updated range for {plot_widget.chart_name}: {low_value} - {high_value}")
-        except Exception as e:
-            print(f"Error in force range update: {e}")
+    # def show_amplitude_axis_properties(self, plot_widget):
+    #     """Show amplitude axis properties dialog for the specific graph"""
+    #     try:
+    #         # Get current axis properties from the plot widget
+    #         current_properties = self.get_current_axis_properties(plot_widget)
+    #
+    #         # Create and show the dialog
+    #         dialog = AmplitudeAxisPropertiesDialog(self, current_properties)
+    #         dialog.properties_changed.connect(lambda props: self.apply_axis_properties(plot_widget, props))
+    #
+    #         result = dialog.exec_()
+    #         if result == QDialog.Accepted:
+    #             print(f"Amplitude axis properties applied for {plot_widget.chart_name}")
+    #
+    #     except Exception as e:
+    #         QMessageBox.critical(self, "Properties Error",
+    #                            f"Failed to open amplitude axis properties:\n{str(e)}")
+    #
+    # def get_current_axis_properties(self, plot_widget):
+    #     """Get current axis properties from the plot widget"""
+    #     try:
+    #         # Get the current Y-axis range
+    #         view_range = plot_widget.getViewBox().viewRange()
+    #         y_min, y_max = view_range[1]
+    #
+    #         # Get the original Y-axis range if stored
+    #         original_y_min = getattr(plot_widget, 'original_y_min', y_min)
+    #         original_y_max = getattr(plot_widget, 'original_y_max', y_max)
+    #
+    #         properties = {
+    #             'low_value': float(y_min),
+    #             'high_value': float(y_max),
+    #             'limit_axis_range': False,
+    #             'limit_low_value': float(original_y_min),
+    #             'limit_high_value': float(original_y_max),
+    #             'auto_adjust': 'scale_to_fit'
+    #         }
+    #
+    #         return properties
+    #
+    #     except Exception as e:
+    #         print(f"Error getting current axis properties: {e}")
+    #         # Return default properties
+    #         return {
+    #             'low_value': 35.0,
+    #             'high_value': 100.0,
+    #             'limit_axis_range': False,
+    #             'limit_low_value': 85.0,
+    #             'limit_high_value': 100.0,
+    #             'auto_adjust': 'scale_to_fit'
+    #         }
+    #
+    # def apply_axis_properties(self, plot_widget, properties):
+    #     """Apply the axis properties to the plot widget"""
+    #     try:
+    #         # Get the view box
+    #         vb = plot_widget.getViewBox()
+    #
+    #         # Apply new Y-axis range
+    #         low_value = properties.get('low_value', 35.0)
+    #         high_value = properties.get('high_value', 100.0)
+    #
+    #         # Force the Y-axis range to exactly match the specified values without
+    #         # modifying the plotted signal values.
+    #         try:
+    #             plot_widget.setYRange(low_value, high_value, padding=0)
+    #         except TypeError:
+    #             # Try alternative method for older pyqtgraph versions
+    #             plot_widget.setRange(yRange=[low_value, high_value], padding=0)
+    #
+    #         # Apply manual range setting to override any auto-scaling
+    #         vb.setRange(yRange=[low_value, high_value], padding=0)
+    #
+    #         # Handle limit axis range
+    #         if properties.get('limit_axis_range', False):
+    #             limit_low = properties.get('limit_low_value', low_value)
+    #             limit_high = properties.get('limit_high_value', high_value)
+    #
+    #             # Set strict limits on the view box to prevent zooming beyond range
+    #             try:
+    #                 vb.setLimits(yMin=limit_low, yMax=limit_high)
+    #             except TypeError:
+    #                 # Try alternative method
+    #                 vb.setLimits(yMin=limit_low, yMax=limit_high)
+    #         else:
+    #             # Set limits to match the current range to prevent unwanted scaling
+    #             try:
+    #                 vb.setLimits(yMin=low_value, yMax=high_value)
+    #             except TypeError:
+    #                 vb.setLimits(yMin=low_value, yMax=high_value)
+    #
+    #         # Disable auto-range completely to maintain manual control
+    #         auto_adjust = properties.get('auto_adjust', 'scale_to_fit')
+    #         if auto_adjust == 'disabled':
+    #             plot_widget.enableAutoRange(axis='y', enable=False)
+    #             vb.enableAutoRange(axis='y', enable=False)
+    #         elif auto_adjust == 'center':
+    #             plot_widget.enableAutoRange(axis='y', enable=False)
+    #             vb.enableAutoRange(axis='y', enable=False)
+    #         else:
+    #             plot_widget.enableAutoRange(axis='y', enable=False)
+    #             vb.enableAutoRange(axis='y', enable=False)
+    #
+    #         # Store the properties in the plot widget for future reference
+    #         plot_widget.axis_properties = properties
+    #
+    #         # Force immediate update of the display
+    #         plot_widget.update()
+    #         vb.updateAutoRange()
+    #         vb.updateViewRange()
+    #
+    #         print(f"Applied axis properties to {plot_widget.chart_name}:")
+    #         print(f"  Range: {low_value} - {high_value}")
+    #         print(f"  Limit: {properties.get('limit_axis_range', False)}")
+    #         print(f"  Auto-adjust: {auto_adjust}")
+    #
+    #         # Update SpO2 value labels to match the new scaled data
+    #         if plot_widget.chart_name.strip() == "SpO2" and hasattr(plot_widget, 'plot_curve'):
+    #             current_data = plot_widget.plot_curve.getData()
+    #             if current_data[0] is not None and len(current_data[0]) > 0:
+    #                 x_data, y_data = current_data
+    #                 # Recreate value labels with the scaled data positions
+    #                 self.create_spo2_markers_and_labels(plot_widget, x_data, y_data)
+    #                 print(f"Updated SpO2 value labels for new axis range: {low_value} - {high_value}")
+    #
+    #         from PyQt5.QtCore import QTimer
+    #         QTimer.singleShot(100, lambda: self.force_range_update(plot_widget, low_value, high_value))
+    #
+    #     except Exception as e:
+    #         print(f"Error applying axis properties: {e}")
+    #         QMessageBox.critical(self, "Apply Error",
+    #                            f"Failed to apply axis properties:\n{str(e)}")
+    #
+    # def force_range_update(self, plot_widget, low_value, high_value):
+    #     """Force the range update to ensure it sticks"""
+    #     try:
+    #         vb = plot_widget.getViewBox()
+    #         vb.setRange(yRange=[low_value, high_value], padding=0)
+    #         plot_widget.setYRange(low_value, high_value, padding=0)
+    #         plot_widget.update()
+    #
+    #         if plot_widget.chart_name.strip() == "SpO2" and hasattr(plot_widget, 'plot_curve'):
+    #             current_data = plot_widget.plot_curve.getData()
+    #             if current_data[0] is not None and len(current_data[0]) > 0:
+    #                 x_data, y_data = current_data
+    #                 self.create_spo2_markers_and_labels(plot_widget, x_data, y_data)
+    #                 print(f"Force updated SpO2 value labels for range: {low_value} - {high_value}")
+    #
+    #         print(f"Force updated range for {plot_widget.chart_name}: {low_value} - {high_value}")
+    #     except Exception as e:
+    #         print(f"Error in force range update: {e}")
     
     def custom_mouse_release(self, event, plot_widget):
         """Custom mouse release handler for reliable selection completion"""
+        self.clear_viewbox_rubber_band(plot_widget)
         if event.button() == Qt.LeftButton:
             self.on_mouse_released(event, plot_widget)
+        if hasattr(event, "accept"):
+            event.accept()
     
     def on_container_resized(self, container):
-        """Handle container resize to update overlay positions"""
+        """Handle container resize to update overlay positions."""
         if hasattr(container, 'plot_widget'):
-            # Simply re-render all overlays from absolute time data
-            self.render_dynamic_selections()
+            self.schedule_selection_render()
     
     def on_plot_resized(self, plot_widget):
-        """Handle plot widget resize/pan/zoom to update overlay positions"""
-        # Simply re-render all overlays from absolute time data
-        self.render_dynamic_selections()
+        """Handle plot widget resize/pan/zoom to update overlay positions."""
+        self.schedule_selection_render()
     
     def on_mouse_released(self, event, plot_widget):
         """Finish selection on mouse release"""
+        chart_name = plot_widget.chart_name.strip() if hasattr(plot_widget, "chart_name") else ""
+        if not self._selection_allowed_for_chart(chart_name):
+            self.clear_selection()
+            return
         if not self.is_selecting or plot_widget != self.current_selection_chart:
             return
 
@@ -4117,6 +4537,10 @@ class SleepMonitorChart(QWidget):
     def finish_selection(self):
         """Finish selection and show dropdown menu (timer-based mouse release detection)"""
         if self.is_selecting and self.current_selection_chart and self.selection_start:
+            chart_name = self.current_selection_chart.chart_name.strip()
+            if not self._selection_allowed_for_chart(chart_name):
+                self.clear_selection()
+                return
             self.is_selecting = False
             
             if self.selection_start_scene and self.selection_end_scene:
@@ -4250,12 +4674,52 @@ class SleepMonitorChart(QWidget):
         # Get the last (most recent) label
         recent_selection = self.selection_labels[chart_name][-1]
         return recent_selection.get('label', None)
-    
+
+    def _selection_allowed_for_chart(self, chart_name):
+        """Allow manual selection only on supported charts after data upload."""
+        return chart_name in {"Airflow", "SpO2"} and bool(getattr(self, "loaded_csv_path", None))
+
+    def clear_viewbox_rubber_band(self, plot_widget):
+        """Hide any stuck pyqtgraph rubber-band zoom box and reset drag state."""
+        if not plot_widget or not hasattr(plot_widget, "getViewBox"):
+            return
+
+        vb = plot_widget.getViewBox()
+        if vb is None:
+            return
+
+        if hasattr(vb, "clear_rubber_band_state"):
+            vb.clear_rubber_band_state()
+            return
+
+        box = getattr(vb, "_rbScaleBox", None)
+        if box is None:
+            box = getattr(vb, "rbScaleBox", None)
+        if box is not None:
+            try:
+                box.hide()
+            except Exception:
+                pass
+
+        if hasattr(vb, "clickEvents") and isinstance(vb.clickEvents, list):
+            vb.clickEvents.clear()
+        for attr_name, value in (("dragButtons", []), ("dragItem", None), ("lastDrag", None)):
+            if hasattr(vb, attr_name):
+                try:
+                    setattr(vb, attr_name, value)
+                except Exception:
+                    pass
+
     def show_selection_menu(self):
         """Show dropdown menu with different options based on chart type"""
         print("show_selection_menu called!")
         if not self.current_selection_chart:
             print("No current_selection_chart, returning")
+            return
+        chart_name = self.current_selection_chart.chart_name.strip()
+        if not self._selection_allowed_for_chart(chart_name):
+            print(f"Selection menu blocked for chart: {chart_name}")
+            self.clear_selection()
             return
         print(f"Current selection chart: {self.current_selection_chart.chart_name}")
             
@@ -4283,7 +4747,6 @@ class SleepMonitorChart(QWidget):
         menu.setTitle("Select Sleep Event Type")
         
         # Check if this is SpO2 chart
-        chart_name = self.current_selection_chart.chart_name.strip()
         if "SpO2" in chart_name:
             menu.setTitle("Select Event")
             
@@ -4304,8 +4767,8 @@ class SleepMonitorChart(QWidget):
             saturation_action = QAction("Desaturation", self)
             saturation_action.triggered.connect(lambda: self.apply_selection_label("DE-SATURATION"))
             menu.addAction(saturation_action)
-        else:
-            # For other charts, show sleep apnea options
+        elif chart_name == "Airflow":
+            # For Airflow chart ONLY, show sleep apnea options
             menu.setTitle("Select Sleep Event Type")
             
             # Add actions for each sleep event type
@@ -4324,6 +4787,10 @@ class SleepMonitorChart(QWidget):
             hsa_action = QAction("HSA - Hypopnea Sleep Apnea", self)
             hsa_action.triggered.connect(lambda: self.apply_selection_label("HSA"))
             menu.addAction(hsa_action)
+        else:
+            # Other charts - no event selection, clear and return
+            self.clear_selection()
+            return
         
         # Add separator and clear option
         menu.addSeparator()
@@ -4352,10 +4819,11 @@ class SleepMonitorChart(QWidget):
         # Clear menu reference after it's closed
         self.active_context_menu = None
         
-        # Clear selection if no label was applied (menu cancelled)
+        # Menu closed without choosing a label (X / Esc / outside click) ->
+        # clear the dragged area instead of preserving a stale preview overlay.
         if self.selection_active:
-            print("Menu dismissed - preserving pending selection")
-            self.preserve_pending_selection()
+            print("Menu dismissed - clearing pending selection")
+            self.clear_selection()
     
     def apply_selection_label(self, label_type):
         """Apply the selected label to the area"""
@@ -4372,6 +4840,12 @@ class SleepMonitorChart(QWidget):
 
         plot_widget = self.current_selection_chart
         chart_name = plot_widget.chart_name
+        pending_change = getattr(self, "_pending_label_change", None)
+        pending_selection = None
+        pending_source = None
+        if pending_change and pending_change.get("chart_name") == chart_name:
+            pending_selection = pending_change.get("selection")
+            pending_source = pending_change.get("source")
 
         if chart_name not in self.selection_labels:
             self.selection_labels[chart_name] = []
@@ -4393,6 +4867,37 @@ class SleepMonitorChart(QWidget):
             'color': self.get_label_color(label_type),
             'source': 'manual',
         }
+
+        if pending_change and pending_change.get("chart_name") == chart_name:
+            p = pending_change.get("selection") or {}
+            try:
+                p_start = float(p.get("start", p.get("start_time", 0.0)))
+                p_end = float(p.get("end", p.get("end_time", 0.0)))
+            except (TypeError, ValueError):
+                p_start = p_end = None
+            if p_start is not None and p_end is not None:
+                if abs(p_start - start_time_abs) < 0.5 and abs(p_end - end_time_abs) < 0.5:
+                    pending_selection = p
+                    pending_source = pending_change.get("source")
+                else:
+                    self._pending_label_change = None
+                    pending_selection = None
+                    pending_source = None
+            else:
+                self._pending_label_change = None
+                pending_selection = None
+                pending_source = None
+
+        if pending_selection and pending_source == "auto_rule_ai":
+            self._pending_label_change = None
+            self._set_manual_label_override_for_selection(pending_selection, label_type)
+            self.clear_selection()
+            self._refresh_auto_rule_ai_views()
+            print(f"Label '{label_type}' applied to auto-detected event (manual override saved)")
+            return
+
+        if pending_selection and pending_source != "auto_rule_ai":
+            self._pending_label_change = None
 
         # Calculate SpO2 info for SpO2 chart only
         spo2_info = ""
@@ -4481,6 +4986,13 @@ class SleepMonitorChart(QWidget):
         label_index = self._find_label_index_for_overlay(overlay, chart_name)
         print(f"Found label_index: {label_index} for overlay")
         if label_index is not None:
+            selection_data = self.selection_labels[chart_name][label_index]
+            if selection_data.get("is_manually_edited"):
+                menu.addSeparator()
+                reset_action = QAction("Reset to auto label", self)
+                reset_action.triggered.connect(lambda: self.reset_overlay_label_to_auto(chart_name, label_index))
+                menu.addAction(reset_action)
+
             # Add Change Label option
             print("Adding Change Label option to menu")
             menu.addSeparator()
@@ -4492,6 +5004,18 @@ class SleepMonitorChart(QWidget):
 
         print(f"Showing menu with {len(menu.actions())} actions")
         menu.exec_(global_pos)
+
+    def reset_overlay_label_to_auto(self, chart_name, label_index):
+        """Remove a manual override and restore the detector label."""
+        if chart_name not in self.selection_labels or not (0 <= label_index < len(self.selection_labels[chart_name])):
+            return
+
+        selection = self.selection_labels[chart_name][label_index]
+        if not self.reset_manual_label_for_event(selection):
+            return
+
+        self._refresh_auto_rule_ai_views()
+        print(f"Reset auto label for {chart_name} selection at index {label_index}")
     
     def _find_label_index_for_overlay(self, overlay, chart_name):
         """Find the label index for a given overlay"""
@@ -4606,26 +5130,41 @@ class SleepMonitorChart(QWidget):
                     try:
                         current_range = plot_widget.getViewBox().viewRange()
                         # Only print if range is not what we want 
-                        if current_range[0][0] != plot_widget.fixed_range[0] or current_range[0][1] != plot_widget.fixed_range[1]:
+                        if (
+                            abs(current_range[0][0] - plot_widget.fixed_range[0]) > 1e-3
+                            or abs(current_range[0][1] - plot_widget.fixed_range[1]) > 1e-3
+                        ):
                             print(f"🔧 FIXING ViewBox {plot_widget.chart_name}: {current_range[0]} → {plot_widget.fixed_range}")
                         plot_widget.setXRange(plot_widget.fixed_range[0], plot_widget.fixed_range[1], padding=0)
                     except:
                         pass  
     
     def get_label_color(self, label_type):
-        """Get color for label type"""
+        """Fill color used by selection overlays and event labels."""
+        red, green, blue = self.get_label_rgb(label_type)
+        return f'rgba({red}, {green}, {blue}, 0.35)'
+
+    def get_label_rgb(self, label_type):
+        """Get a single RGB palette for event shading and blocks.
+
+        strip().upper() is required so values like 'osa' or 'OSA ' resolve
+        correctly. Unknown labels stay neutral grey instead of looking like
+        apnea events.
+        """
+        normalized_label = str(label_type).strip().upper()
         colors = {
-            'OSA': 'rgba(239, 68, 68, 0.2)',    
-            'CSA': 'rgba(59, 130, 246, 0.2)', 
-            'MSA': 'rgba(245, 158, 11, 0.2)',  
-            'HSA': 'rgba(16, 185, 129, 0.2)',   
-            'POSSIBLE_OSA': 'rgba(239, 68, 68, 0.2)',
-            'POSSIBLE_CSA': 'rgba(59, 130, 246, 0.2)',
-            'POSSIBLE_MSA': 'rgba(245, 158, 11, 0.2)',
-            'APNEA_REVIEW': 'rgba(107, 114, 128, 0.2)',
-            'SATURATION': 'rgba(239, 68, 68, 0.2)'  
+            'OSA': (190, 52, 68),
+            'CSA': (30, 110, 140),
+            'MSA': (92, 78, 158),
+            'HSA': (176, 124, 42),
+            'POSSIBLE_OSA': (190, 52, 68),
+            'POSSIBLE_CSA': (30, 110, 140),
+            'POSSIBLE_MSA': (92, 78, 158),
+            'DE-SATURATION': (0, 131, 143),
+            'SATURATION': (0, 131, 143),
+            'APNEA_REVIEW': (107, 114, 128),
         }
-        return colors.get(label_type, 'rgba(107, 114, 128, 0.2)')
+        return colors.get(normalized_label, (107, 114, 128))
     
     def check_label_click(self, plot_widget, scene_pos):
         """Check if click is on an existing label and show remove option"""
@@ -4720,25 +5259,26 @@ class SleepMonitorChart(QWidget):
     def change_label(self, chart_name, label_index):
         """Change an existing label by opening the event selection menu"""
         if chart_name in self.selection_labels and 0 <= label_index < len(self.selection_labels[chart_name]):
-            # Store the selection data for re-application
             old_selection = self.selection_labels[chart_name][label_index]
-            
-            # Convert float coordinates back to QPointF objects
-            from PyQt5.QtCore import QPointF
-            start_point = QPointF(old_selection['start'], 0)  # y=0 for time coordinate
-            end_point = QPointF(old_selection['end'], 0)
-            
-            # Preserve selection data BEFORE removing the old label
-            self.selection_start = start_point
-            self.selection_end = end_point
-            
-            # Remove the old label
+            selection_source = old_selection.get("source", "manual")
             self.remove_label(chart_name, label_index)
             
-            # Restore selection for new label
+            # Keep the original absolute time range and let the label menu reuse it.
+            from PyQt5.QtCore import QPointF
+            start_point = QPointF(float(old_selection.get('start', old_selection.get('start_time', 0.0))) - float(self.current_time_offset), 0)
+            end_point = QPointF(float(old_selection.get('end', old_selection.get('end_time', 0.0))) - float(self.current_time_offset), 0)
+
+            self.selection_start = start_point
+            self.selection_end = end_point
             self.current_selection = {
                 "start": start_point,
                 "end": end_point
+            }
+            self._pending_label_change = {
+                "chart_name": chart_name,
+                "label_index": label_index,
+                "selection": dict(old_selection),
+                "source": selection_source,
             }
             
             # Find the plot widget
@@ -4752,6 +5292,21 @@ class SleepMonitorChart(QWidget):
                         self.show_selection_menu()
                         break
     
+    def hide_all_preview_overlays(self):
+        """Hide every chart's temporary preview overlay."""
+        for index in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(index).widget()
+            if not container or not hasattr(container, 'findChildren'):
+                continue
+            for plot_widget in container.findChildren(pg.PlotWidget):
+                overlay = getattr(plot_widget, 'selection_overlay', None)
+                if overlay is None:
+                    continue
+                try:
+                    overlay.setVisible(False)
+                except RuntimeError:
+                    continue
+
     def clear_selection(self):
         """Clear the current selection but keep persistent overlays"""
         # Clear selection active flag since selection is cleared
@@ -4761,6 +5316,8 @@ class SleepMonitorChart(QWidget):
         if hasattr(self, 'active_context_menu') and self.active_context_menu is not None:
             self.active_context_menu.close()
             self.active_context_menu = None
+
+        self.hide_all_preview_overlays()
         
         if self.current_selection_chart and hasattr(self.current_selection_chart, 'selection_overlay'):
             self.current_selection_chart.selection_overlay.setVisible(False)
@@ -4783,44 +5340,11 @@ class SleepMonitorChart(QWidget):
         self.selection_start_scene = None
         self.selection_end_scene = None
         self.current_selection_chart = None
+        self._pending_label_change = None
         self.is_selecting = False
         print("Selection cleared")
     
 
-    def preserve_pending_selection(self):
-        """Keep the released selection visible so it does not disappear on menu dismiss."""
-        self.selection_active = False
-        self.is_selecting = False
-
-        if not self.current_selection_chart or not hasattr(self.current_selection_chart, "selection_overlay"):
-            return
-
-        overlay = self.current_selection_chart.selection_overlay
-        if self.selection_start and self.selection_end:
-            self.update_selection_overlay(self.selection_start, self.selection_end)
-        overlay.setText("Selection pending\nClick to label")
-        overlay.setStyleSheet("""
-            QLabel#selectionOverlay {
-                background-color: rgba(251, 146, 60, 0.35);
-                border: 2px solid #f97316;
-                border-radius: 6px;
-                color: white;
-                font-size: 10px;
-                font-weight: bold;
-                padding: 6px 8px;
-                text-align: center;
-            }
-        """)
-        overlay.setVisible(True)
-        print("Pending selection preserved")
-
-    def reopen_pending_selection_menu(self, _event=None, plot_widget=None):
-        """Reopen the label menu for a preserved selection overlay."""
-        if plot_widget is not None:
-            self.current_selection_chart = plot_widget
-        if not self.current_selection_chart or not self.selection_start or not self.selection_end:
-            return
-        self.show_selection_menu()
     def restore_all_selections(self):
         """Restore all selection overlays when charts are recreated"""
         # Simply call render_dynamic_selections which handles everything
@@ -4842,44 +5366,6 @@ class SleepMonitorChart(QWidget):
             seconds = int(duration_seconds % 60)
             return f"{minutes}m {seconds}s"
     
-    def update_overlay_position(self, plot_widget, overlay, start_pos, end_pos):
-        """Update overlay position based on current view"""
-        if not self._is_valid_overlay(overlay):
-            return False
-
-        try:
-            vb = plot_widget.getViewBox()
-            from PyQt5.QtCore import QPointF
-            # Convert float time values to QPointF for mapping
-            start_point = QPointF(start_pos, 0)
-            end_point = QPointF(end_pos, 0)
-            p1 = vb.mapViewToScene(start_point)
-            p2 = vb.mapViewToScene(end_point)
-            w1 = plot_widget.mapFromScene(p1)
-            w2 = plot_widget.mapFromScene(p2)
-
-            # Ensure x_min and x_max are within the visible bounds of the plot_widget
-            # This prevents the overlay from being drawn outside the chart area
-            plot_width = plot_widget.width()
-            x_min = max(0, min(w1.x(), w2.x()))
-            x_max = min(plot_width, max(w1.x(), w2.x()))
-            
-            # Use large overlay height for persistent selections
-            plot_height = plot_widget.height()
-            overlay_height = max(60, plot_height)
-            y_position = 0  
-
-            # Only set geometry and make visible if the overlay has a valid width
-            if x_max > x_min:
-                overlay.setGeometry(int(x_min), int(y_position), int(x_max - x_min), int(overlay_height))
-                overlay.setVisible(True)
-            else:
-                overlay.setVisible(False)  # Hide if width is invalid
-            return True
-        except RuntimeError as e:
-            print(f"Warning: Skipped deleted overlay during resize - {e}")
-            return False
-
     def _is_valid_overlay(self, overlay):
         """Return True when a Qt overlay wrapper still points to a live widget."""
         try:
@@ -4901,181 +5387,169 @@ class SleepMonitorChart(QWidget):
                     ]
     
     def render_dynamic_selections(self):
-        """Render selection overlays based on current time window and offset"""
+        """Render selection overlays based on current time window and offset.
+
+        RE-ENTRANCY GUARD is necessary: overlay.setGeometry() / show() can
+        trigger layout changes, which fire resizeEvent again and re-enter this
+        function. The outer pass would then hide overlays drawn by the inner
+        pass, which is why events disappeared during resize.
+        """
+        if getattr(self, "_rendering_selections", False):
+            return
+        self._rendering_selections = True
         try:
             for i in range(self.charts_layout.count()):
                 container = self.charts_layout.itemAt(i).widget()
-                if container and hasattr(container, 'findChildren'):
-                    plots = container.findChildren(pg.PlotWidget)
-                    if plots:
-                        plot_widget = plots[0]
-                        if not hasattr(plot_widget, 'chart_name'):
+                if not (container and hasattr(container, 'findChildren')):
+                    continue
+
+                plots = container.findChildren(pg.PlotWidget)
+                if not plots:
+                    continue
+
+                plot_widget = plots[0]
+                if not hasattr(plot_widget, 'chart_name'):
+                    continue
+                chart_name = plot_widget.chart_name
+
+                # Clear existing overlays safely - REUSE INSTEAD OF DELETE
+                if hasattr(plot_widget, 'selection_overlays'):
+                    for overlay in plot_widget.selection_overlays:
+                        try:
+                            if overlay and hasattr(overlay, 'hide') and not sip.isdeleted(overlay):
+                                overlay.hide()
+                                overlay.setGeometry(-1000, -1000, 1, 1)
+                        except Exception as e:
+                            print(f"Warning: Could not hide overlay: {e}")
                             continue
-                        chart_name = plot_widget.chart_name
-                        
-                        # Clear existing overlays safely - REUSE INSTEAD OF DELETE
+
+                if chart_name not in self.dynamic_selections:
+                    continue
+
+                for selection_data in self.dynamic_selections[chart_name]:
+                    try:
+                        start_time_abs = selection_data['start_time']
+                        end_time_abs = selection_data['end_time']
+                        if self.is_all_psg_mode():
+                            start_time_rel = start_time_abs
+                            end_time_rel = end_time_abs
+                            visible_start = 0.0
+                            visible_end = self._get_playback_max_duration()
+                        else:
+                            start_time_rel = start_time_abs - self.current_time_offset
+                            end_time_rel = end_time_abs - self.current_time_offset
+                            visible_start = 0.0
+                            visible_end = self.current_time_window
+
+                        if not (end_time_rel >= visible_start and start_time_rel <= visible_end):
+                            continue
+
+                        start_time_clamped = max(visible_start, start_time_rel)
+                        end_time_clamped = min(visible_end, end_time_rel)
+
+                        overlay = None
                         if hasattr(plot_widget, 'selection_overlays'):
-                            # Hide all existing overlays instead of deleting them
-                            for overlay in plot_widget.selection_overlays:
-                                try:
-                                    if overlay and hasattr(overlay, 'hide') and not sip.isdeleted(overlay):
-                                        overlay.hide()
-                                        # Move overlay off-screen instead of deleting
-                                        overlay.setGeometry(-1000, -1000, 1, 1)
-                                except Exception as e:
-                                    print(f"Warning: Could not hide overlay: {e}")
-                                    continue
+                            for existing_overlay in plot_widget.selection_overlays:
+                                if (
+                                    existing_overlay
+                                    and not sip.isdeleted(existing_overlay)
+                                    and hasattr(existing_overlay, 'isVisible')
+                                    and not existing_overlay.isVisible()
+                                ):
+                                    overlay = existing_overlay
+                                    break
 
-                    # Check if this chart has dynamic selections
-                    if chart_name in self.dynamic_selections:
-                        for selection_data in self.dynamic_selections[chart_name]:
-                            try:
-                                # Calculate relative position within current time window
-                                start_time_abs = selection_data['start_time']
-                                end_time_abs = selection_data['end_time']
-                                if self.is_all_psg_mode():
-                                    start_time_rel = start_time_abs
-                                    end_time_rel = end_time_abs
-                                    visible_start = 0.0
-                                    visible_end = self._get_playback_max_duration()
-                                else:
-                                    start_time_rel = start_time_abs - self.current_time_offset
-                                    end_time_rel = end_time_abs - self.current_time_offset
-                                    visible_start = 0.0
-                                    visible_end = self.current_time_window
+                        if overlay is None:
+                            overlay = QLabel(plot_widget)
+                            overlay.setAlignment(Qt.AlignCenter)
+                            if not hasattr(plot_widget, 'selection_overlays'):
+                                plot_widget.selection_overlays = []
+                            plot_widget.selection_overlays.append(overlay)
+                        else:
+                            overlay.setAlignment(Qt.AlignCenter)
 
-                                # Only render if selection is within current time window
-                                if (end_time_rel >= visible_start and start_time_rel <= visible_end):
-                                    # Clamp to window bounds
-                                    start_time_clamped = max(visible_start, start_time_rel)
-                                    end_time_clamped = min(visible_end, end_time_rel)
-                                    
-                                    # Try to reuse existing overlay or create new one
-                                    overlay = None
-                                    if hasattr(plot_widget, 'selection_overlays'):
-                                        # Try to find an existing hidden overlay to reuse
-                                        for existing_overlay in plot_widget.selection_overlays:
-                                            if (existing_overlay and 
-                                                not sip.isdeleted(existing_overlay) and
-                                                hasattr(existing_overlay, 'isVisible') and
-                                                not existing_overlay.isVisible()):
-                                                overlay = existing_overlay
-                                                break
-                                    
-                                    # Create new overlay only if no reusable one found
-                                    if overlay is None:
-                                        overlay = QLabel(plot_widget)
-                                        overlay.setAlignment(Qt.AlignCenter)
-                                        # Add to overlays list
-                                        if not hasattr(plot_widget, 'selection_overlays'):
-                                            plot_widget.selection_overlays = []
-                                        plot_widget.selection_overlays.append(overlay)
-                                    else:
-                                        # Reuse existing overlay - just update content
-                                        overlay.setAlignment(Qt.AlignCenter)
-                                    
-                                    # Calculate duration and format display
-                                    duration = end_time_abs - start_time_abs
-                                    start_str = self.format_timestamp(start_time_abs)
-                                    duration_str = self.format_duration(duration)
-                                    
-                                    # Prepare full text with SpO2 info if available
-                                    full_text = f"{selection_data['label']}\n{start_str}\n{duration_str}"
-                                    
-                                    # Add SpO2 info if available (only for SpO2 chart)
-                                    if 'spo2_info' in selection_data and selection_data['spo2_info']:
-                                        full_text = f"""
-{selection_data['label']}
+                        duration = end_time_abs - start_time_abs
+                        start_str = self.format_timestamp(start_time_abs)
+                        duration_str = self.format_duration(duration)
+
+                        display_label = str(selection_data['label'])
+                        if selection_data.get("is_manually_edited"):
+                            display_label = f"{display_label} *"
+                        full_text = f"{display_label}\n{start_str}\n{duration_str}"
+
+                        if 'spo2_info' in selection_data and selection_data['spo2_info']:
+                            full_text = f"""
+{display_label}
 
 {start_str}
 {duration_str}
 
 {selection_data['spo2_info']}
 """
-                                    overlay.setText(full_text)
-                                    overlay.setStyleSheet(f"""
-                                        background-color: {selection_data['color']};
-                                        border: 2px solid {selection_data['color'].replace('0.2', '0.8')};
-                                        border-radius: 6px;
-                                        color: white;
-                                        font-size: 10px;
-                                        font-weight: bold;
-                                        padding: 2px;
-                                    """)
-                                    
-                                    # Make overlay clickable
-                                    overlay.mousePressEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_click(event, ov, cn)
-                                    overlay.mouseDoubleClickEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_double_click(event, ov, cn)
-                                    
-                                    # Position overlay using direct absolute time mapping
-                                    vb = plot_widget.getViewBox()
-                                    if vb:
-                                        # Convert relative time → scene → widget directly
-                                        start_scene = vb.mapViewToScene(QPointF(start_time_rel, 0))
-                                        end_scene = vb.mapViewToScene(QPointF(end_time_rel, 0))
-                                        
-                                        start_widget = plot_widget.mapFromScene(start_scene)
-                                        end_widget = plot_widget.mapFromScene(end_scene)
-                                        
-                                        x_min = min(start_widget.x(), end_widget.x())
-                                        x_max = max(start_widget.x(), end_widget.x())
-                                        width = x_max - x_min
-                                        
-                                        if width < 30:
-                                            width = 30
-                                        
-                                        # Use full plot height for overlay
-                                        plot_height = plot_widget.height()
-                                        overlay_height = max(60, plot_height)
-                                        y_position = 0
-                                        
-                                        overlay.setGeometry(int(x_min), y_position, int(width), int(overlay_height))
-                                        
-                                        # Store unique identifier in overlay for deletion tracking
-                                        overlay.selection_id = self._get_selection_id(selection_data)
-                                        
-                                        overlay.show()
-                                        
-                                        # Overlay already stored in reuse mechanism above
-                                        print(f"Rendered selection '{selection_data['label']}' on {chart_name} at {start_time_clamped:.1f}s-{end_time_clamped:.1f}s")
-                            except Exception as e:
-                                print(f"Error rendering selection overlay: {e}")
-                                continue
+                        overlay.setText(full_text)
+                        overlay.setStyleSheet(f"""
+                            background-color: {selection_data['color']};
+                            border: 1px solid rgba(0, 0, 0, 0.25);
+                            border-radius: 6px;
+                            color: #1a1a1a;
+                            font-size: 10px;
+                            font-weight: bold;
+                            padding: 2px;
+                        """)
+
+                        overlay.mousePressEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_click(event, ov, cn)
+                        overlay.mouseDoubleClickEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_double_click(event, ov, cn)
+
+                        vb = plot_widget.getViewBox()
+                        if vb:
+                            start_scene = vb.mapViewToScene(QPointF(start_time_rel, 0))
+                            end_scene = vb.mapViewToScene(QPointF(end_time_rel, 0))
+
+                            start_widget = plot_widget.mapFromScene(start_scene)
+                            end_widget = plot_widget.mapFromScene(end_scene)
+
+                            x_min = min(start_widget.x(), end_widget.x())
+                            x_max = max(start_widget.x(), end_widget.x())
+                            width = x_max - x_min
+                            if width < 30:
+                                width = 30
+
+                            plot_height = plot_widget.height()
+                            overlay_height = max(60, plot_height)
+                            overlay.setGeometry(int(x_min), 0, int(width), int(overlay_height))
+                            overlay.selection_id = self._get_selection_id(selection_data)
+                            overlay.show()
+
+                            print(
+                                f"Rendered selection '{selection_data['label']}' on {chart_name} "
+                                f"at {start_time_clamped:.1f}s-{end_time_clamped:.1f}s"
+                            )
+                    except Exception as e:
+                        print(f"Error rendering selection overlay: {e}")
+                        continue
         except Exception as e:
             print(f"Error in render_dynamic_selections: {e}")
+        finally:
+            self._rendering_selections = False
+
+    def schedule_selection_render(self):
+        """Render on the next event-loop turn, once per burst of resize events."""
+        if getattr(self, "_selection_render_scheduled", False):
+            return
+        self._selection_render_scheduled = True
+        QTimer.singleShot(0, self._run_scheduled_selection_render)
+
+    def _run_scheduled_selection_render(self):
+        self._selection_render_scheduled = False
+        self.render_dynamic_selections()
 
     def update_apnea_events_display(self):
         """Refresh only the event summary; overlays are rendered elsewhere."""
         self.update_detection_summary_label()
     
     def update_all_overlays_on_resize(self):
-        """Update all overlay positions when window is resized"""
-        for i in range(self.charts_layout.count()):
-            container = self.charts_layout.itemAt(i).widget()
-            if hasattr(container, 'findChildren'):
-                plots = container.findChildren(pg.PlotWidget)
-                if plots and hasattr(plots[0], 'selection_overlays'):
-                    plot_widget = plots[0]
-                    chart_name = plot_widget.chart_name
-                    
-                    # Use dynamic_selections which stores absolute time coordinates
-                    if chart_name in self.dynamic_selections:
-                        plot_widget.selection_overlays = [
-                            overlay for overlay in plot_widget.selection_overlays
-                            if self._is_valid_overlay(overlay)
-                        ]
-                        for j, overlay in enumerate(plot_widget.selection_overlays):
-                            if j < len(self.dynamic_selections[chart_name]):
-                                selection_data = self.dynamic_selections[chart_name][j]
-                                if self.is_all_psg_mode():
-                                    start_time_rel = selection_data['start_time']
-                                    end_time_rel = selection_data['end_time']
-                                else:
-                                    # Convert absolute time to relative time within current window
-                                    start_time_rel = selection_data['start_time'] - self.current_time_offset
-                                    end_time_rel = selection_data['end_time'] - self.current_time_offset
-                                if not self.update_overlay_position(plot_widget, overlay, start_time_rel, end_time_rel):
-                                    self._remove_overlay_reference(overlay)
+        """Refresh selection overlays on resize using the existing render path."""
+        self.schedule_selection_render()
     
         
     def add_spo2_statistics_overlay(self, plot_widget, container):
@@ -5089,7 +5563,9 @@ SpO2 Statistics:
 Mean: {self.spo2_statistics['mean']:.1f}%
 Min: {self.spo2_statistics['min']:.1f}%
 Max: {self.spo2_statistics['max']:.1f}%
-Desaturations: {self.spo2_statistics['desaturation_events']}
+HB: {self.spo2_statistics['hypoxic_burden']:.2f} %-min
+Longest <95: {self.spo2_statistics['longest_duration_sec']:.1f}s
+Events <=92: {self.spo2_statistics['desaturation_events']}
         """.strip()
         
         stats_label = QLabel(container)

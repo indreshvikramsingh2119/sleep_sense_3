@@ -51,26 +51,23 @@ except ImportError:
 SKIP_MINUTES = 20.0
 BASELINE_MINUTES = 45.0
 BASELINE_HOURLY_WINDOW_SEC = 3600.0
-HSA_MIN_SEC = 10.0
-OSA_MIN_SEC = 10.0
-CSA_MIN_SEC = 9.0
+MIN_EVENT_SEC = 10.0
 MAX_EVENT_SEC = 120.0
 MIN_STABLE_OCCURRENCE = 30
 BASELINE_TARGET_OCCURRENCE = 500
 BASELINE_OCCURRENCE_TOLERANCE = 50
 CANDIDATE_WINDOW_SEC = 1.0
-CSA_DURATION_EDGE_TOLERANCE_SEC = 1.0
 CANDIDATE_MIN_FRACTION = 0.60
 BAND_MAX_GAP_SAMPLES = 3
+CORE_MIN_SEC = 3.0
+# AASM: event continues as long as airflow stays below the hypopnea floor (30%).
+EVENT_BOUNDARY_DROP_PERCENT = 30.0
 MIN_HSA_AIRFLOW_AMPLITUDE = 3.0
 MIN_HSA_AIRFLOW_AMPLITUDE_RATIO = 0.08
 
 APNEA_DROP = 0.70
 HYPOPNEA_DROP = 0.30
 CSA_DROP = 0.80
-HSA_DROP_PERCENT_RANGE = (25.0, 70.0)
-OSA_DROP_PERCENT_RANGE = (70.0, 80.0)
-CSA_DROP_PERCENT_RANGE = (80.0, 90.0)
 MERGE_GAP_SEC = 0.0
 
 SPO2_APNEA_DROP = 3.0
@@ -80,6 +77,57 @@ SNORING_HIGH = 10.0
 MOVEMENT_HIGH = 2.5
 SNORING_LOW = 10.0
 MOVEMENT_LOW = 2.5
+
+# ---------------------------------------------------------------------------
+# AASM scoring rules
+# ---------------------------------------------------------------------------
+# Hypopnea: airflow reduced >=30%, AND SpO2 desaturation >=3% (AASM
+# "recommended" rule). The alternative AASM rule allows arousal instead of
+# desaturation, but this device has no EEG/arousal signal, so only the
+# desaturation path is usable here.
+AASM_HYPOPNEA_DROP_PERCENT = 30.0
+AASM_HYPOPNEA_SPO2_DESAT_MIN = 3.0
+# Apnea (Obstructive/Central/Mixed): airflow reduced >=90%.
+AASM_APNEA_DROP_PERCENT = 90.0
+# Obstructive vs Central is decided by breathing effort (Thorax/Abdomen), not
+# by how deep the airflow drop is. If effort amplitude during the event falls
+# below this fraction of the patient's normal baseline effort, effort is
+# considered "absent" for that portion of the event.
+EFFORT_ABSENT_RATIO = 0.25
+
+# ---------------------------------------------------------------------------
+# Adjustable analysis parameters (Settings -> Analysis parameters bridge)
+# ---------------------------------------------------------------------------
+_ADJUSTABLE_DEFAULTS = {
+    "AASM_HYPOPNEA_DROP_PERCENT": AASM_HYPOPNEA_DROP_PERCENT,
+    "AASM_APNEA_DROP_PERCENT": AASM_APNEA_DROP_PERCENT,
+    "AASM_HYPOPNEA_SPO2_DESAT_MIN": AASM_HYPOPNEA_SPO2_DESAT_MIN,
+    "EFFORT_ABSENT_RATIO": EFFORT_ABSENT_RATIO,
+    "MIN_EVENT_SEC": MIN_EVENT_SEC,
+    "MAX_EVENT_SEC": MAX_EVENT_SEC,
+}
+
+
+def get_analysis_parameters() -> dict[str, Any]:
+    """Return the currently active adjustable detection parameters."""
+    return {key: globals()[key] for key in _ADJUSTABLE_DEFAULTS}
+
+
+def get_default_analysis_parameters() -> dict[str, Any]:
+    """Return the built-in default parameters without changing live settings."""
+    return dict(_ADJUSTABLE_DEFAULTS)
+
+
+def apply_analysis_parameters(values: dict[str, Any]) -> None:
+    """Override adjustable detection parameters at runtime."""
+    for key, value in values.items():
+        if key in _ADJUSTABLE_DEFAULTS:
+            globals()[key] = value
+
+
+def reset_analysis_parameters() -> None:
+    """Restore all adjustable detection parameters to their built-in defaults."""
+    apply_analysis_parameters(_ADJUSTABLE_DEFAULTS)
 
 
 @dataclass
@@ -124,7 +172,7 @@ def stable_max(values: pd.Series | np.ndarray, min_occurrence: int = MIN_STABLE_
         return candidates[0]
     fallback_value = float(counts.idxmax())
     fallback_count = int(counts.max())
-    return fallback_value, fallback_count3
+    return fallback_value, fallback_count
 
 
 def stable_peak_max(
@@ -309,6 +357,37 @@ def _segment_mask(mask: np.ndarray, time_sec: np.ndarray, min_event_sec: float) 
     return segments
 
 
+def _expand_segment_to_drop_extent(
+    start_index: int,
+    end_index: int,
+    drop_percent: np.ndarray,
+    time_sec: np.ndarray,
+    boundary_drop_percent: float = EVENT_BOUNDARY_DROP_PERCENT,
+    max_event_sec: float = MAX_EVENT_SEC,
+) -> tuple[int, int]:
+    """Expand a core segment outward until the airflow drop no longer holds.
+
+    The band mask captures only the core of the event. The ramp down and ramp
+    up belong to the event too, so we expand the boundaries while the drop
+    remains above the boundary threshold.
+    """
+    total = len(drop_percent)
+    new_start = int(start_index)
+    new_end = int(end_index)
+
+    while new_start - 1 >= 0 and drop_percent[new_start - 1] >= boundary_drop_percent:
+        if float(time_sec[new_end] - time_sec[new_start - 1]) > max_event_sec:
+            break
+        new_start -= 1
+
+    while new_end + 1 < total and drop_percent[new_end + 1] >= boundary_drop_percent:
+        if float(time_sec[new_end + 1] - time_sec[new_start]) > max_event_sec:
+            break
+        new_end += 1
+
+    return new_start, new_end
+
+
 def _rolling_fraction_mask(mask: np.ndarray, window_size: int, min_fraction: float) -> np.ndarray:
     if window_size <= 1:
         return mask.astype(bool)
@@ -325,21 +404,71 @@ def _robust_signal_amplitude(values: pd.Series | np.ndarray) -> float:
     return float(np.nanpercentile(series, 95) - np.nanpercentile(series, 5))
 
 
-def _label_min_duration_sec(label: str) -> float:
-    if label == "HSA":
-        return HSA_MIN_SEC
-    if label == "OSA":
-        return OSA_MIN_SEC
-    if label == "CSA":
-        return CSA_MIN_SEC
-    return min(HSA_MIN_SEC, OSA_MIN_SEC, CSA_MIN_SEC)
+def _effort_amplitude(values: np.ndarray) -> float:
+    """Measure breathing-effort amplitude (peak-to-trough spread) for a Thorax/Abdomen segment."""
+    return _robust_signal_amplitude(values)
 
 
-def _effective_label_min_duration_sec(label: str) -> float:
-    min_duration_sec = _label_min_duration_sec(label)
-    if label == "CSA":
-        return max(0.0, min_duration_sec - CSA_DURATION_EDGE_TOLERANCE_SEC)
-    return min_duration_sec
+def _compute_effort_baseline(
+    thorax: np.ndarray | None,
+    abdomen: np.ndarray | None,
+    baseline_mask: np.ndarray,
+) -> tuple[float, float] | None:
+    """Return (thorax_baseline_amplitude, abdomen_baseline_amplitude), or None
+    if Thorax/Abdomen signals are missing or unusable for this recording."""
+    if thorax is None or abdomen is None:
+        return None
+    thorax_baseline_window = thorax[baseline_mask]
+    abdomen_baseline_window = abdomen[baseline_mask]
+    if len(thorax_baseline_window) == 0 or len(abdomen_baseline_window) == 0:
+        return None
+    thorax_baseline_amp = _effort_amplitude(thorax_baseline_window)
+    abdomen_baseline_amp = _effort_amplitude(abdomen_baseline_window)
+    if thorax_baseline_amp <= 0 or abdomen_baseline_amp <= 0:
+        return None
+    return thorax_baseline_amp, abdomen_baseline_amp
+
+
+def _effort_present(
+    thorax_segment: np.ndarray,
+    abdomen_segment: np.ndarray,
+    thorax_baseline_amp: float,
+    abdomen_baseline_amp: float,
+    absent_ratio: float = EFFORT_ABSENT_RATIO,
+) -> bool:
+    """True if breathing effort is still meaningfully present in this segment
+    relative to baseline (points to an obstructive component, not central)."""
+    thorax_ratio = _effort_amplitude(thorax_segment) / thorax_baseline_amp if thorax_baseline_amp else 0.0
+    abdomen_ratio = _effort_amplitude(abdomen_segment) / abdomen_baseline_amp if abdomen_baseline_amp else 0.0
+    return thorax_ratio >= absent_ratio or abdomen_ratio >= absent_ratio
+
+
+def classify_apnea_effort_type(
+    thorax_event: np.ndarray,
+    abdomen_event: np.ndarray,
+    thorax_baseline_amp: float,
+    abdomen_baseline_amp: float,
+) -> str:
+    """Classify an apnea-tier event (>=90% airflow drop) as Obstructive (OSA),
+    Central (CSA), or Mixed (MSA) based on whether breathing effort
+    (Thorax/Abdomen movement) continues during the event - the real AASM
+    signal for this distinction (not how deep the airflow drop is).
+    """
+    sample_count = len(thorax_event)
+    if sample_count < 2:
+        return "OSA"
+    midpoint = sample_count // 2
+    first_half_present = _effort_present(
+        thorax_event[:midpoint], abdomen_event[:midpoint], thorax_baseline_amp, abdomen_baseline_amp
+    )
+    second_half_present = _effort_present(
+        thorax_event[midpoint:], abdomen_event[midpoint:], thorax_baseline_amp, abdomen_baseline_amp
+    )
+    if not first_half_present and not second_half_present:
+        return "CSA"
+    if not first_half_present and second_half_present:
+        return "MSA"
+    return "OSA"
 
 
 def _build_debug_summary(
@@ -430,7 +559,7 @@ def _write_text_report(result: dict[str, Any], csv_path: str | Path, output_dir:
     lines: list[str] = [
         f"report_type=rule_based_apnea_detection | source_csv={csv_path} | generated_date={generated_dt.strftime('%Y-%m-%d')} | generated_time={generated_dt.strftime('%H:%M:%S')}",
         "formula=drop_percent=((window_baseline-analysis_peak_envelope)/window_baseline)*100",
-        f"label_rules=HSA:{HSA_DROP_PERCENT_RANGE[0]:.0f}-<{HSA_DROP_PERCENT_RANGE[1]:.0f} | OSA:70-80 | CSA:>80-90 | hsa_min_sec={HSA_MIN_SEC:.1f} | osa_min_sec={OSA_MIN_SEC:.1f} | csa_min_sec={CSA_MIN_SEC:.1f}",
+        f"label_rules=AASM | Hypopnea:>={AASM_HYPOPNEA_DROP_PERCENT:.0f}%+spo2_desat>={AASM_HYPOPNEA_SPO2_DESAT_MIN:.0f}% | Apnea:>={AASM_APNEA_DROP_PERCENT:.0f}%(OSA/CSA/MSA by effort) | min_event_sec={MIN_EVENT_SEC:.1f}",
         "baseline_note=detection_uses_hourly_or_remainder_window_peak_baselines_not_one_combined_average",
         f"baseline_source={result.get('baseline_source', '--')}",
         "hourly_peak_baselines:",
@@ -485,19 +614,18 @@ def classify_rule_event(
     if duration_sec is not None and duration_sec > MAX_EVENT_SEC:
         return "NO_EVENT"
 
-    if duration_sec is None:
+    if duration_sec is None or duration_sec < MIN_EVENT_SEC:
         return "NO_EVENT"
 
     drop_percent = drop_ratio * 100.0
 
-    if HSA_DROP_PERCENT_RANGE[0] <= drop_percent < HSA_DROP_PERCENT_RANGE[1]:
-        return "HSA" if duration_sec >= _effective_label_min_duration_sec("HSA") else "NO_EVENT"
+    if drop_percent >= AASM_APNEA_DROP_PERCENT:
+        return "APNEA_CANDIDATE"
 
-    if OSA_DROP_PERCENT_RANGE[0] <= drop_percent <= OSA_DROP_PERCENT_RANGE[1]:
-        return "OSA" if duration_sec >= _effective_label_min_duration_sec("OSA") else "NO_EVENT"
-
-    if CSA_DROP_PERCENT_RANGE[0] < drop_percent <= CSA_DROP_PERCENT_RANGE[1]:
-        return "CSA" if duration_sec >= _effective_label_min_duration_sec("CSA") else "NO_EVENT"
+    if drop_percent >= AASM_HYPOPNEA_DROP_PERCENT:
+        if spo2_drop >= AASM_HYPOPNEA_SPO2_DESAT_MIN:
+            return "HYPOPNEA"
+        return "NO_EVENT"
 
     return "NO_EVENT"
 
@@ -507,7 +635,7 @@ def _finalize_label(rule_label: str, ai_label: str | None, ai_confidence: float 
         return rule_label
     if rule_label == "NO_EVENT":
         return rule_label
-    if rule_label in {"HSA", "OSA", "CSA"}:
+    if rule_label in {"OSA", "CSA", "MSA", "APNEA", "HYPOPNEA"}:
         return rule_label
     if ai_label == rule_label and ai_confidence >= 0.40:
         return ai_label
@@ -546,6 +674,8 @@ def detect_apnea_events_from_dataframe(
     spo2 = signal_df["spo2"].to_numpy(dtype=float)
     snoring = signal_df["snoring"].to_numpy(dtype=float)
     body_movement = signal_df["body_movement"].to_numpy(dtype=float)
+    thorax = signal_df["thorax"].to_numpy(dtype=float) if "thorax" in signal_df.columns else None
+    abdomen = signal_df["abdomen"].to_numpy(dtype=float) if "abdomen" in signal_df.columns else None
 
     estimated_fs = estimate_sample_rate_hz(signal_df)
     sample_dt = 1.0 / estimated_fs if estimated_fs else 0.1
@@ -595,6 +725,7 @@ def detect_apnea_events_from_dataframe(
     baseline_airflow_amplitude = _robust_signal_amplitude(baseline_airflow_window)
     if baseline_airflow_amplitude <= 0:
         baseline_airflow_amplitude = airflow_reduction_range
+    effort_baseline = _compute_effort_baseline(thorax, abdomen, baseline_mask)
 
     apnea_threshold = baseline_airflow_reference * (1.0 - APNEA_DROP)
     hypopnea_threshold = baseline_airflow_reference * (1.0 - HYPOPNEA_DROP)
@@ -621,19 +752,14 @@ def detect_apnea_events_from_dataframe(
 
     label_specs = [
         (
-            "HSA",
-            lambda x: (x >= HSA_DROP_PERCENT_RANGE[0]) & (x < HSA_DROP_PERCENT_RANGE[1]),
-            HSA_MIN_SEC,
+            "APNEA_CANDIDATE",
+            lambda x: x >= AASM_APNEA_DROP_PERCENT,
+            MIN_EVENT_SEC,
         ),
         (
-            "OSA",
-            lambda x: (x >= OSA_DROP_PERCENT_RANGE[0]) & (x <= OSA_DROP_PERCENT_RANGE[1]),
-            OSA_MIN_SEC,
-        ),
-        (
-            "CSA",
-            lambda x: (x > CSA_DROP_PERCENT_RANGE[0]) & (x <= CSA_DROP_PERCENT_RANGE[1]),
-            _effective_label_min_duration_sec("CSA"),
+            "HYPOPNEA",
+            lambda x: (x >= AASM_HYPOPNEA_DROP_PERCENT) & (x < AASM_APNEA_DROP_PERCENT),
+            MIN_EVENT_SEC,
         ),
     ]
 
@@ -654,30 +780,53 @@ def detect_apnea_events_from_dataframe(
     preliminary_events: list[dict[str, Any]] = []
     raw_segment_count = 0
 
-    for expected_label, label_mask_fn, label_min_sec in label_specs:
+    for expected_label, label_mask_fn, _label_min_sec in label_specs:
         label_mask = label_mask_fn(analysis_drop_percent)
-        label_segments = _segment_mask(label_mask, analysis_time, label_min_sec)
+        # The band mask only captures the core. The 10 second rule is applied
+        # after expanding the core to the full drop extent.
+        label_segments = _segment_mask(label_mask, analysis_time, CORE_MIN_SEC)
         raw_segment_count += len(label_segments)
 
-        for local_start, local_end, duration_sec in label_segments:
+        for core_start, core_end, _core_duration_sec in label_segments:
+            # Expand boundaries to the full drop extent before measuring duration.
+            local_start, local_end = _expand_segment_to_drop_extent(
+                core_start,
+                core_end,
+                analysis_drop_percent,
+                analysis_time,
+            )
+
+            duration_sec = float(
+                analysis_time[local_end] - analysis_time[local_start] + sample_dt
+            )
+            if duration_sec < MIN_EVENT_SEC:
+                continue
+
             start_index = int(global_indices[local_start])
             end_index = int(global_indices[local_end])
+            core_start_index = int(global_indices[core_start])
+            core_end_index = int(global_indices[core_end])
 
             event_airflow = airflow[start_index:end_index + 1]
             event_spo2 = spo2[start_index:end_index + 1]
             event_snoring = snoring[start_index:end_index + 1]
             event_movement = body_movement[start_index:end_index + 1]
-            event_window_baseline = analysis_window_baseline[local_start:local_end + 1]
+
+            # Severity is measured from the core, not the expanded window.
+            # Expanded ramps can include higher values that reduce the drop
+            # percentage and cause CSA to drift into HSA incorrectly.
+            core_airflow = airflow[core_start_index:core_end_index + 1]
+            event_window_baseline = analysis_window_baseline[core_start:core_end + 1]
             event_baseline_airflow = (
                 float(np.nanmean(event_window_baseline))
                 if len(event_window_baseline) > 0
                 else float(baseline_airflow_reference)
             )
 
-            event_min_airflow = float(np.nanmin(event_airflow))
-            event_mean_airflow = float(np.nanmean(event_airflow))
-            event_peak_airflow = float(np.nanmax(event_airflow))
-            event_airflow_amplitude = _robust_signal_amplitude(event_airflow)
+            event_min_airflow = float(np.nanmin(core_airflow))
+            event_mean_airflow = float(np.nanmean(core_airflow))
+            event_peak_airflow = float(np.nanmax(core_airflow))
+            event_airflow_amplitude = _robust_signal_amplitude(core_airflow)
             airflow_amplitude_ratio = (
                 event_airflow_amplitude / baseline_airflow_amplitude
                 if baseline_airflow_amplitude
@@ -703,10 +852,10 @@ def detect_apnea_events_from_dataframe(
 
             snoring_mean = float(np.nanmean(event_snoring))
             movement_mean = float(np.nanmean(event_movement))
-            airflow_std = float(np.nanstd(event_airflow))
+            airflow_std = float(np.nanstd(core_airflow))
             variability_score = airflow_std / event_baseline_airflow if event_baseline_airflow else 0.0
 
-            rule_label = classify_rule_event(
+            detected_rule_label = classify_rule_event(
                 drop_ratio=drop_ratio,
                 spo2_drop=spo2_drop,
                 snoring_mean=snoring_mean,
@@ -716,11 +865,25 @@ def detect_apnea_events_from_dataframe(
                 airflow_amplitude=float(event_airflow_amplitude),
                 airflow_amplitude_ratio=float(airflow_amplitude_ratio),
             )
-            if rule_label == "NO_EVENT":
+            if detected_rule_label == "NO_EVENT":
                 continue
 
-            if rule_label != expected_label:
+            if detected_rule_label != expected_label:
                 continue
+
+            rule_label = detected_rule_label
+
+            if rule_label == "APNEA_CANDIDATE":
+                if thorax is not None and abdomen is not None and effort_baseline is not None:
+                    thorax_baseline_amp, abdomen_baseline_amp = effort_baseline
+                    rule_label = classify_apnea_effort_type(
+                        thorax_event=thorax[start_index:end_index + 1],
+                        abdomen_event=abdomen[start_index:end_index + 1],
+                        thorax_baseline_amp=thorax_baseline_amp,
+                        abdomen_baseline_amp=abdomen_baseline_amp,
+                    )
+                else:
+                    rule_label = "OSA"
 
             preliminary_events.append(
                 {
@@ -782,6 +945,13 @@ def detect_apnea_events_from_dataframe(
             previous["variability_score"] = max(previous["variability_score"], event["variability_score"])
             continue
 
+        # For overlapping events with different labels, keep the one with the
+        # deeper airflow drop.
+        if event["start_sec"] < previous["end_sec"]:
+            if float(event["airflow_drop_percent"]) > float(previous["airflow_drop_percent"]):
+                merged_events[-1] = dict(event)
+            continue
+
         merged_events.append(dict(event))
 
     events: list[DetectedApneaEvent] = []
@@ -795,7 +965,7 @@ def detect_apnea_events_from_dataframe(
         ai_confidence = None
         image_path = None
 
-        if model is not None and str(event["rule_label"]) in {"OSA", "CSA", "HSA"}:
+        if model is not None and str(event["rule_label"]) in {"OSA", "CSA", "MSA", "APNEA", "HYPOPNEA"}:
             try:
                 ai_candidates_processed += 1
                 image_file = event_output_dir / f"event_{event_id:03d}.png"

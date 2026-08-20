@@ -10,12 +10,16 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QFileDialog, QListWidget, QListWidgetItem, QScrollArea,
-    QMessageBox, QSizePolicy, QComboBox
+    QMessageBox, QSizePolicy, QComboBox, QStyle
 )
 from PyQt5.QtCore import Qt, QUrl
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtGui import QDesktopServices, QPainter, QPixmap, QColor
 from PyQt5.QtGui import QFont
-from db_utils import get_db_path
+from src.utils.db_utils import get_db_path
+try:
+    from src.utils.db_utils import get_visible_raw_csv_dir
+except ImportError:
+    get_visible_raw_csv_dir = None
 
 
 class PatientInfoWidget(QWidget):
@@ -98,11 +102,6 @@ class PatientInfoWidget(QWidget):
         details_layout.setContentsMargins(8, 8, 8, 8)
         details_layout.setSpacing(10) # Adjusted spacing between info cards
         
-        # Age/Gender Card
-        age_card = self.create_info_card("", "Age / Gender", "-- / ---", "light blue")
-        self.age_gender_value_label = age_card.findChild(QLabel, "ageGenderValue")
-        details_layout.addWidget(age_card)
-        
         # Action Buttons (Save and Upload)
         action_buttons = self.create_action_buttons()
         details_layout.addWidget(action_buttons)
@@ -174,17 +173,13 @@ class PatientInfoWidget(QWidget):
         """Create save and upload action buttons"""
         frame = QFrame()
         frame.setObjectName("actionButtonsSection")
-        frame.setMinimumHeight(100)  # Increased container height
+        frame.setMinimumHeight(110)  # Increased container height
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(8, 8, 8, 8)  # Added margins for clear visibility
-        frame_layout.setSpacing(12)  # Increased spacing
+        frame_layout.setSpacing(14)  # Increased spacing
 
-        # Save Button
-        save_btn = QPushButton(" Save Data")
-        save_btn.setObjectName("actionButton")
-        save_btn.setMinimumHeight(42)  # Increased button height
-        save_btn.setStyleSheet("""
+        action_button_style = """
             QPushButton#actionButton {
                 background: qlineargradient(
                     x1: 0, y1: 0, x2: 0, y2: 1,
@@ -195,7 +190,7 @@ class PatientInfoWidget(QWidget):
                 border: 1px solid #1e40af;
                 border-radius: 8px;
                 color: white;
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 600;
                 padding: 8px 16px;
             }
@@ -216,14 +211,26 @@ class PatientInfoWidget(QWidget):
                     stop: 1 #1e3a8a
                 );
             }
-        """)
+            QPushButton#actionButton:disabled {
+                background: #cbd5e1;
+                border: 1px solid #94a3b8;
+                color: #64748b;
+            }
+        """
+
+        # Save Button
+        save_btn = QPushButton(" Save Data")
+        save_btn.setObjectName("actionButton")
+        save_btn.setMinimumHeight(46)  # Increased button height
+        save_btn.setStyleSheet(action_button_style)
         save_btn.clicked.connect(self.save_data)
         frame_layout.addWidget(save_btn)
 
         # Upload Button 
         upload_btn = QPushButton(" Upload Data")
         upload_btn.setObjectName("actionButton")
-        upload_btn.setMinimumHeight(42)  # Increased button height
+        upload_btn.setMinimumHeight(46)  # Increased button height
+        upload_btn.setStyleSheet(action_button_style)
         upload_btn.clicked.connect(self.upload_data)
         frame_layout.addWidget(upload_btn)
 
@@ -238,6 +245,68 @@ class PatientInfoWidget(QWidget):
 
     def upload_data(self):
         """Handle upload data action"""
+        if not self.monitor_chart or not getattr(self.monitor_chart, "patient_id", None) or self.monitor_chart.patient_id in ("", "--------", None):
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("No Patient Selected")
+            msg_box.setText("Please select a patient from the database before uploading data.")
+            msg_box.setIconPixmap(self._database_icon_pixmap())
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: #f8fbff;
+                }
+                QMessageBox QLabel {
+                    color: #111827;
+                    font-size: 13px;
+                    font-weight: 500;
+                }
+                QMessageBox QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QMessageBox QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QMessageBox QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+            ok_button = msg_box.button(QMessageBox.Ok)
+            if ok_button is not None:
+                ok_button.setAutoDefault(False)
+                ok_button.setDefault(True)
+                ok_button.setStyleSheet("""
+                    QPushButton {
+                        min-width: 54px;
+                        min-height: 22px;
+                        padding: 4px 12px;
+                        border-radius: 6px;
+                        border: 1px solid #1d4ed8;
+                        background-color: #2563eb;
+                        color: white;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+                    QPushButton:hover {
+                        background-color: #3b82f6;
+                        border: 1px solid #1e40af;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1e40af;
+                        border: 1px solid #1e3a8a;
+                    }
+                """)
+            msg_box.exec_()
+            return
+
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "Select Data Files to Upload",
@@ -275,19 +344,84 @@ class PatientInfoWidget(QWidget):
             detected_events = []
             if getattr(self.monitor_chart, "auto_rule_ai_result", None):
                 detected_events = list(self.monitor_chart.auto_rule_ai_result.get("events", []))
-            QMessageBox.information(
-                self,
-                "Upload Complete",
-                (
-                    f"Data loaded and graphs updated:\n{os.path.basename(selected_file)}"
-                    + (
-                        f"\nAuto-detection complete: {len(detected_events)} events found."
-                        if detected_events
-                        else "\nNo auto-detected events found."
-                    )
-                    + ("\nJumped to the first detected event." if jumped else "")
-                ),
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Upload Complete")
+            msg_box.setTextFormat(Qt.RichText)
+            msg_box.setIconPixmap(self.style().standardIcon(QStyle.SP_DialogApplyButton).pixmap(48, 48))
+            msg_box.setText(
+                '<span style="color:#16a34a; font-weight:700;">Data loaded and graphs updated!</span><br><br>'
+                f'<span style="color:#111827; font-weight:700;">File</span>'
+                f'<span style="color:#6b7280;"> : {os.path.basename(selected_file)}</span><br>'
+                + (
+                    f'<span style="color:#111827; font-weight:700;">Auto-detection</span>'
+                    f'<span style="color:#6b7280;"> : {len(detected_events)} events found.</span><br>'
+                    if detected_events
+                    else '<span style="color:#111827; font-weight:700;">Auto-detection</span>'
+                    '<span style="color:#6b7280;"> : No auto-detected events found.</span><br>'
+                )
+                + (
+                    '<span style="color:#111827; font-weight:700;">Jump</span>'
+                    '<span style="color:#6b7280;"> : Jumped to the first detected event.</span>'
+                    if jumped
+                    else ''
+                )
             )
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: #f8fbff;
+                }
+                QMessageBox QLabel {
+                    color: #111827;
+                    font-size: 13px;
+                    font-weight: 500;
+                }
+                QMessageBox QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QMessageBox QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QMessageBox QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+            ok_button = msg_box.button(QMessageBox.Ok)
+            if ok_button is not None:
+                ok_button.setAutoDefault(False)
+                ok_button.setDefault(True)
+                ok_button.setStyleSheet("""
+                    QPushButton {
+                        min-width: 54px;
+                        min-height: 22px;
+                        padding: 4px 12px;
+                        border-radius: 6px;
+                        border: 1px solid #1d4ed8;
+                        background-color: #2563eb;
+                        color: white;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+                    QPushButton:hover {
+                        background-color: #3b82f6;
+                        border: 1px solid #1e40af;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1e40af;
+                        border: 1px solid #1e3a8a;
+                    }
+                """)
+            msg_box.exec_()
 
     def create_raw_data_section(self):
         """Inline raw-data file list shown under patient details."""
@@ -301,18 +435,18 @@ class PatientInfoWidget(QWidget):
 
         header = QHBoxLayout()
         title = QLabel("Save file List")
-        title.setStyleSheet("font-weight: 700; color: #111827;")
+        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #111827;")
         header.addWidget(title)
         header.addStretch()
 
         self.raw_count_label = QLabel("0")
         self.raw_count_label.setVisible(False)
-        self.raw_count_label.setStyleSheet("font-weight: 700; color: #2563eb;")
+        self.raw_count_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #2563eb;")
         header.addWidget(self.raw_count_label)
         frame_layout.addLayout(header)
 
         self.raw_hint_label = QLabel("Press Save -> Yes to copy the loaded raw CSV and store patient/time in DB.")
-        self.raw_hint_label.setStyleSheet("font-size: 11px; color: #6b7280;")
+        self.raw_hint_label.setStyleSheet("font-size: 12px; color: #6b7280;")
         self.raw_hint_label.setWordWrap(True)
         frame_layout.addWidget(self.raw_hint_label)
 
@@ -334,8 +468,7 @@ class PatientInfoWidget(QWidget):
             QListWidget#Saved file List::item {
                 background-color: white;
                 border: 1px solid #e5e7eb;
-                bord
-                er-radius: 4px;
+                border-radius: 4px;
                 padding: 6px 8px;
                 margin: 1px;
                 min-height: 24px;
@@ -350,11 +483,45 @@ class PatientInfoWidget(QWidget):
                 border: 1px solid #cbd5e1;
             }
         """)
+        self.raw_file_list.itemClicked.connect(self.load_saved_raw_file)
         frame_layout.addWidget(self.raw_file_list)
 
         open_folder_btn = QPushButton(" Open Data Folder")
         open_folder_btn.setObjectName("actionButton")
-        open_folder_btn.setMinimumHeight(38)
+        open_folder_btn.setMinimumHeight(42)
+        open_folder_btn.setStyleSheet("""
+            QPushButton#actionButton {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #3b82f6,
+                    stop: 0.5 #2563eb,
+                    stop: 1 #1d4ed8
+                );
+                border: 1px solid #1d4ed8;
+                border-radius: 8px;
+                color: #ffffff;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 8px 16px;
+            }
+            QPushButton#actionButton:hover {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #60a5fa,
+                    stop: 0.5 #3b82f6,
+                    stop: 1 #2563eb
+                );
+                border: 1px solid #1d4ed8;
+            }
+            QPushButton#actionButton:pressed {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #1d4ed8,
+                    stop: 0.5 #1e40af,
+                    stop: 1 #1e3a8a
+                );
+            }
+        """)
         open_folder_btn.clicked.connect(self.open_data_folder)
         frame_layout.addWidget(open_folder_btn)
 
@@ -370,18 +537,18 @@ class PatientInfoWidget(QWidget):
 
         header = QHBoxLayout()
         title = QLabel("Detected Events")
-        title.setStyleSheet("font-weight: 700; color: #111827;")
+        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #111827;")
         header.addWidget(title)
         header.addStretch()
 
         self.detected_count_label = QLabel("0")
         self.detected_count_label.setVisible(False)
-        self.detected_count_label.setStyleSheet("font-weight: 700; color: #dc2626;")
+        self.detected_count_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #dc2626;")
         header.addWidget(self.detected_count_label)
         frame_layout.addLayout(header)
 
         self.detected_hint_label = QLabel("Upload data to populate automatic apnea events.")
-        self.detected_hint_label.setStyleSheet("font-size: 11px; color: #6b7280;")
+        self.detected_hint_label.setStyleSheet("font-size: 12px; color: #6b7280;")
         self.detected_hint_label.setWordWrap(True)
         frame_layout.addWidget(self.detected_hint_label)
 
@@ -394,8 +561,9 @@ class PatientInfoWidget(QWidget):
                 background-color: white;
                 border: 1px solid #d1d5db;
                 border-radius: 6px;
-                padding: 6px 10px;
+                padding: 7px 10px;
                 color: #111827;
+                font-size: 12px;
             }
             QComboBox:hover {
                 border: 1px solid #93c5fd;
@@ -463,26 +631,125 @@ class PatientInfoWidget(QWidget):
         # Render newest on top
         item_text = f"{filename}\n{timestamp_iso}"
         item = QListWidgetItem(item_text)
+        item.setData(Qt.UserRole, file_path)
         item.setToolTip(file_path)
         self.raw_file_list.insertItem(0, item)
 
+    def _get_raw_data_dir(self):
+        """Raw CSV folder dhundo: helper -> last saved file -> DB folder."""
+        if get_visible_raw_csv_dir is not None:
+            try:
+                folder = get_visible_raw_csv_dir()
+                if folder and os.path.isdir(folder):
+                    return folder
+            except Exception:
+                pass
+
+        if self.saved_raw_files:
+            folder = os.path.dirname(self.saved_raw_files[0]["path"])
+            if os.path.isdir(folder):
+                return folder
+
+        return os.path.dirname(get_db_path())
+
     def open_data_folder(self):
-        """Open the local folder that contains the SQLite database."""
-        folder = os.path.dirname(get_db_path())
+        """
+        Open the visible raw-data folder in a picker and load the selected file.
 
-        if sys.platform == "win32":
-            os.startfile(folder)
+        Explorer/Finder me file click karne se graph auto-plot nahi hota, isliye
+        yahan app-level picker se file choose karke direct plot kiya jata hai.
+        """
+        folder = self._get_raw_data_dir()
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Saved Raw Data to Plot",
+            folder,
+            "Data Files (*.csv *.txt);;All Files (*)"
+        )
+        if not selected_file:
             return
 
-        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
-        if opened:
+        lower_name = selected_file.lower()
+        if not lower_name.endswith((".csv", ".txt")):
+            QMessageBox.information(
+                self,
+                "Unsupported File",
+                "Only CSV/TXT saved raw data can be plotted.",
+            )
             return
 
-        # Fallback for environments where Qt URL opening is blocked.
-        if sys.platform == "darwin":
-            subprocess.Popen(["open", folder])
-        else:
-            subprocess.Popen(["xdg-open", folder])
+        temp_item = QListWidgetItem(os.path.basename(selected_file))
+        temp_item.setData(Qt.UserRole, selected_file)
+        self.load_saved_raw_file(temp_item)
+
+    def load_saved_raw_file(self, item):
+        """Reload a saved raw CSV/TXT directly from the visible mirror folder."""
+        if not self.monitor_chart:
+            QMessageBox.warning(self, "Chart Not Available", "Monitor chart not connected.")
+            return
+
+        selected_file = item.data(Qt.UserRole) or item.toolTip()
+        if not selected_file or not os.path.exists(selected_file):
+            QMessageBox.warning(
+                self,
+                "File Missing",
+                "The selected saved raw file could not be found.",
+            )
+            return
+
+        if getattr(self.monitor_chart, "is_playing", False):
+            self.monitor_chart.pause_playback()
+        self.monitor_chart.skip_next_auto_playback = True
+
+        time_data, signals, jumped = self.monitor_chart.load_psg_data_and_detect(selected_file)
+        if len(time_data) == 0 or not signals:
+            QMessageBox.warning(
+                self,
+                "Load Failed",
+                f"The selected saved file could not be loaded:\n{selected_file}",
+            )
+            return
+
+        detected_events = []
+        if getattr(self.monitor_chart, "auto_rule_ai_result", None):
+            detected_events = list(self.monitor_chart.auto_rule_ai_result.get("events", []))
+
+        QMessageBox.information(
+            self,
+            "Saved Data Loaded",
+            (
+                f"Data loaded and graphs updated:\n{os.path.basename(selected_file)}"
+                + (
+                    f"\nAuto-detection complete: {len(detected_events)} events found."
+                    if detected_events
+                    else "\nNo auto-detected events found."
+                )
+                + ("\nJumped to the first detected event." if jumped else "")
+            ),
+        )
+
+    def _database_icon_pixmap(self):
+        """Create a blue database-style icon for warning dialogs."""
+        pixmap = QPixmap(48, 48)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#3b82f6"))
+        painter.drawEllipse(6, 6, 36, 36)
+
+        painter.setBrush(QColor("white"))
+        painter.drawEllipse(14, 12, 20, 8)
+        painter.drawRect(14, 16, 20, 16)
+        painter.drawEllipse(14, 28, 20, 8)
+
+        painter.setBrush(QColor("#3b82f6"))
+        painter.drawEllipse(18, 15, 12, 3)
+        painter.drawEllipse(18, 23, 12, 3)
+        painter.drawEllipse(18, 31, 12, 3)
+        painter.end()
+        return pixmap
 
     def update_detected_events_list(self, events):
         """Render automatic detected events and make them clickable."""
@@ -630,14 +897,14 @@ class PatientInfoWidget(QWidget):
         self.patient_name_label = QLabel("No Patient Loaded")
         self.patient_name_label.setObjectName("patientName")
         self.patient_name_label.setAlignment(Qt.AlignCenter)
-        self.patient_name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #9ca3af; font-style: italic;")
+        self.patient_name_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #9ca3af;")
         layout.addWidget(self.patient_name_label)
         
         # Patient ID
         self.patient_id_label = QLabel("ID: --")
         self.patient_id_label.setObjectName("patientId")
         self.patient_id_label.setAlignment(Qt.AlignCenter)
-        self.patient_id_label.setStyleSheet("font-size: 12px; color: #9ca3af; background: transparent; border: none; font-style: italic;")
+        self.patient_id_label.setStyleSheet("font-size: 13px; color: #9ca3af; background: transparent; border: none;")
         layout.addWidget(self.patient_id_label)
         
         # Separator
@@ -679,12 +946,12 @@ class PatientInfoWidget(QWidget):
         
         label = QLabel(label_text)
         label.setObjectName("infoLabel")
-        label.setStyleSheet("font-size: 11px; color: #6b7280; font-weight: 500;")
+        label.setStyleSheet("font-size: 12px; color: #6b7280; font-weight: 500;")
         text_layout.addWidget(label)
         
         value = QLabel(value_text)
-        value.setObjectName("ageGenderValue" if label_text.strip().lower() == "age / gender" else "infoValue")
-        value.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
+        value.setObjectName("infoValue")
+        value.setStyleSheet("font-size: 15px; font-weight: bold; color: #111827;")
         text_layout.addWidget(value)
         
         layout.addLayout(text_layout)
@@ -704,22 +971,15 @@ class PatientInfoWidget(QWidget):
             full_name = f"{patient_data.get('first_name', '')} {patient_data.get('last_name', '')}"
             full_name = full_name.strip() or "No Patient Loaded"
             name_label.setText(full_name)
-            name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #111827;")
+            name_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #111827;")
         
         # Update patient ID
         id_label = self.findChild(QLabel, "patientId")
         if id_label:
             id_text = patient_data.get('patient_id', '--')
             id_label.setText(f"ID: {id_text}")
-            id_label.setStyleSheet("font-size: 12px; color: #6b7280; background: transparent; border: none;")
+            id_label.setStyleSheet("font-size: 13px; color: #6b7280; background: transparent; border: none;")
 
-        age_value = self.findChild(QLabel, "ageGenderValue")
-        if age_value:
-            age = patient_data.get('age', '--')
-            gender = patient_data.get('gender', '---')
-            age_value.setText(f"{age} / {gender}")
-            age_value.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
-        
         print(f"Updated patient info: {patient_data}")
 
     def apply_empty_patient_state(self):
@@ -727,14 +987,9 @@ class PatientInfoWidget(QWidget):
         name_label = self.findChild(QLabel, "patientName")
         if name_label:
             name_label.setText("No Patient Loaded")
-            name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #9ca3af; font-style: italic;")
+            name_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #9ca3af;")
 
         id_label = self.findChild(QLabel, "patientId")
         if id_label:
             id_label.setText("ID: --")
-            id_label.setStyleSheet("font-size: 12px; color: #9ca3af; background: transparent; border: none; font-style: italic;")
-
-        age_value = self.findChild(QLabel, "ageGenderValue")
-        if age_value:
-            age_value.setText("-- / ---")
-            age_value.setStyleSheet("font-size: 14px; font-weight: bold; color: #9ca3af; font-style: italic;")
+            id_label.setStyleSheet("font-size: 13px; color: #9ca3af; background: transparent; border: none;")

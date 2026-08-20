@@ -1,7 +1,6 @@
-"""
+'''
 Archive Window - Sleep Sense Application
 Replicates the archive interface shown in the reference image
-"""
 
 import os
 from PyQt5.QtWidgets import (
@@ -691,3 +690,4 @@ class ArchiveWindow(QDialog):
             
             # Optionally close the window
             # self.close()
+'''
