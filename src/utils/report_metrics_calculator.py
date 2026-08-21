@@ -324,6 +324,7 @@ def _snoring_segments(snoring: np.ndarray, threshold: float = DEFAULT_SNORING_TH
 def calculate_sleep_metrics(
     time_data: Any,
     signals: Dict[str, Any],
+    sleep_mask: Any = None,
     sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
     snoring_threshold: float = DEFAULT_SNORING_THRESHOLD,
 ) -> Dict[str, Any]:
@@ -595,6 +596,9 @@ def calculate_report_context(
         "CSA": "Central Apneas",
         "OSA": "Obstructive Apneas",
         "HSA": "Hypopneas",
+        "HYPOPNEA": "Hypopneas",
+        "MSA": "Mixed Apneas",
+        "APNEA": "Obstructive Apneas",
     }
     for event in detected_events:
         label = str(event.get("final_label") or event.get("rule_label") or "").upper()

@@ -20,8 +20,8 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QListWidget, QLabel, QComboBox, QCheckBox, QGroupBox, QGridLayout, QSpacerItem, QSizePolicy,
     QRadioButton, QButtonGroup, QSpinBox, QTextEdit, QSlider, QTabWidget, QFormLayout, QFrame
 )
-from PyQt5.QtCore import Qt, QUrl
-from PyQt5.QtGui import QTextDocument, QPixmap, QPainter, QColor, QPen
+from PyQt5.QtCore import Qt, QUrl, QRegExp
+from PyQt5.QtGui import QTextDocument, QPixmap, QPainter, QColor, QPen, QRegExpValidator
 from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
 from .app_paths import get_resource_path as get_asset_path
 
@@ -719,6 +719,70 @@ class ButtonFunctions:
 
     def tools_settings_analysis_parameters(self):
         """Open the Analysis parameters dialog and apply changes to the detector."""
+        monitor_chart = getattr(self.parent, "monitor_chart", None)
+        if monitor_chart is None or not getattr(monitor_chart, "loaded_csv_path", None):
+            msg_box = QMessageBox(self.parent)
+            msg_box.setWindowTitle("No Data Loaded")
+            msg_box.setText("Please upload PSG data before changing analysis parameters.")
+            msg_box.setIconPixmap(self._upload_psg_icon_pixmap())
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: #f8fbff;
+                }
+                QMessageBox QLabel {
+                    color: #111827;
+                    font-size: 13px;
+                    font-weight: 500;
+                }
+                QMessageBox QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QMessageBox QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QMessageBox QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            ok_button = msg_box.button(QMessageBox.Ok)
+            if ok_button is not None:
+                ok_button.setAutoDefault(False)
+                ok_button.setDefault(True)
+                ok_button.setStyleSheet("""
+                    QPushButton {
+                        min-width: 54px;
+                        min-height: 22px;
+                        padding: 4px 12px;
+                        border-radius: 6px;
+                        border: 1px solid #1d4ed8;
+                        background-color: #2563eb;
+                        color: white;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+                    QPushButton:hover {
+                        background-color: #3b82f6;
+                        border: 1px solid #1e40af;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1e40af;
+                        border: 1px solid #1e3a8a;
+                    }
+                """)
+            msg_box.exec_()
+            return
+
         dialog = AnalysisParametersDialog(self.parent)
         if dialog.exec_() != QDialog.Accepted:
             print("Tools -> Analysis parameters cancelled")
@@ -726,11 +790,66 @@ class ButtonFunctions:
 
         parameters = dialog.get_parameters()
         if parameters is None:
-            QMessageBox.warning(
-                self.parent,
-                "Invalid Values",
-                "Please enter valid numbers for all fields.",
-            )
+            msg_box = QMessageBox(self.parent)
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("Invalid Values")
+            msg_box.setText("Please enter valid numbers for all fields.")
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: #f8fbff;
+                }
+                QMessageBox QLabel {
+                    color: #111827;
+                    font-size: 13px;
+                    font-weight: 500;
+                }
+                QMessageBox QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QMessageBox QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QMessageBox QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            ok_button = msg_box.button(QMessageBox.Ok)
+            if ok_button is not None:
+                ok_button.setAutoDefault(False)
+                ok_button.setDefault(True)
+                ok_button.setStyleSheet("""
+                    QPushButton {
+                        min-width: 54px;
+                        min-height: 22px;
+                        padding: 4px 12px;
+                        border-radius: 6px;
+                        border: 1px solid #1d4ed8;
+                        background-color: #2563eb;
+                        color: white;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+                    QPushButton:hover {
+                        background-color: #3b82f6;
+                        border: 1px solid #1e40af;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1e40af;
+                        border: 1px solid #1e3a8a;
+                    }
+                """)
+            msg_box.exec_()
             return
 
         if apnea_detector is None:
@@ -1656,7 +1775,7 @@ class AnalysisParametersDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Analysis parameters")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(640)
         self.setMinimumHeight(420)
         self.init_ui()
     
@@ -1671,9 +1790,10 @@ class AnalysisParametersDialog(QDialog):
                 font-size: 12px;
             }
             QLabel#sectionTitle {
-                color: #111827;
-                font-size: 11px;
+                color: #2563eb;
+                font-size: 13px;
                 font-weight: 700;
+                letter-spacing: 0.5px;
             }
             QLabel#rowLabel {
                 color: #111827;
@@ -1803,7 +1923,9 @@ class AnalysisParametersDialog(QDialog):
 
         hypopnea_percent = current.get("AASM_HYPOPNEA_DROP_PERCENT", 30.0)
         apnea_percent = current.get("AASM_APNEA_DROP_PERCENT", 90.0)
-        effort_ratio_percent = float(current.get("EFFORT_ABSENT_RATIO", 0.25)) * 100.0
+        obstructive_effort_percent = float(current.get("OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD", 0.20)) * 100.0
+        central_effort_percent = float(current.get("CENTRAL_APNEA_EFFORT_THRESHOLD", 0.60)) * 100.0
+        central_amplitude_percent = float(current.get("CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO", 0.08)) * 100.0
         min_sec = current.get("MIN_EVENT_SEC", 10.0)
         max_sec = current.get("MAX_EVENT_SEC", 120.0)
 
@@ -1818,13 +1940,19 @@ class AnalysisParametersDialog(QDialog):
             row.addWidget(_severity_dot(severity))
             label = QLabel(title)
             label.setObjectName("rowLabel")
-            label.setFixedWidth(150)
+            label.setFixedWidth(230)
+            label.setWordWrap(True)
             row.addWidget(label)
             edit = QLineEdit(str(default_value))
             edit.setFixedWidth(56)
+            edit.setValidator(_numeric_validator(edit))
             row.addWidget(edit)
             row.addStretch()
             return row, edit
+
+        def _numeric_validator(parent_widget):
+            # Only digits and a single decimal point are allowed while typing.
+            return QRegExpValidator(QRegExp(r"^\d{0,6}(\.\d{0,3})?$"), parent_widget)
 
         classification_frame = QFrame()
         classification_frame.setObjectName("sectionFrame")
@@ -1838,10 +1966,23 @@ class AnalysisParametersDialog(QDialog):
 
         hypopnea_row, self.hypopnea_threshold = _row("Hypopnea threshold (%)", "hypopnea", hypopnea_percent)
         apnea_row, self.apnea_threshold = _row("Apnea threshold (%)", "apnea", apnea_percent)
-        effort_row, self.effort_absent_ratio = _row("Effort absent ratio (%)", "apnea", effort_ratio_percent)
+        apnea_flow_note = QLabel("= flow reduction of airflow from baseline")
+        apnea_flow_note.setObjectName("unitLabel")
+        apnea_row.addWidget(apnea_flow_note)
+        obstructive_effort_row, self.obstructive_effort_threshold = _row(
+            "Threshold for obstructive apnea (%)", "apnea", obstructive_effort_percent
+        )
+        central_effort_row, self.central_effort_threshold = _row(
+            "Threshold for central apnea (%)", "apnea", central_effort_percent
+        )
+        central_amplitude_row, self.central_amplitude_threshold = _row(
+            "Amplitude threshold for central apnea (%)", "apnea", central_amplitude_percent
+        )
         classification_layout.addLayout(hypopnea_row)
         classification_layout.addLayout(apnea_row)
-        classification_layout.addLayout(effort_row)
+        classification_layout.addLayout(obstructive_effort_row)
+        classification_layout.addLayout(central_effort_row)
+        classification_layout.addLayout(central_amplitude_row)
 
         layout.addWidget(classification_frame)
 
@@ -1858,10 +1999,11 @@ class AnalysisParametersDialog(QDialog):
         duration_row1 = QHBoxLayout()
         min_label = QLabel("Min. event duration")
         min_label.setObjectName("rowLabel")
-        min_label.setFixedWidth(150)
+        min_label.setFixedWidth(230)
         duration_row1.addWidget(min_label)
         self.min_duration = QLineEdit(str(min_sec))
         self.min_duration.setFixedWidth(56)
+        self.min_duration.setValidator(_numeric_validator(self.min_duration))
         duration_row1.addWidget(self.min_duration)
         min_unit = QLabel("seconds")
         min_unit.setObjectName("unitLabel")
@@ -1872,10 +2014,11 @@ class AnalysisParametersDialog(QDialog):
         duration_row2 = QHBoxLayout()
         max_label = QLabel("Max. event duration")
         max_label.setObjectName("rowLabel")
-        max_label.setFixedWidth(150)
+        max_label.setFixedWidth(230)
         duration_row2.addWidget(max_label)
         self.max_duration = QLineEdit(str(max_sec))
         self.max_duration.setFixedWidth(56)
+        self.max_duration.setValidator(_numeric_validator(self.max_duration))
         duration_row2.addWidget(self.max_duration)
         max_unit = QLabel("seconds")
         max_unit.setObjectName("unitLabel")
@@ -2140,17 +2283,80 @@ class AnalysisParametersDialog(QDialog):
 
         hypopnea_percent = defaults.get("AASM_HYPOPNEA_DROP_PERCENT", 30.0)
         apnea_percent = defaults.get("AASM_APNEA_DROP_PERCENT", 90.0)
-        effort_ratio_percent = float(defaults.get("EFFORT_ABSENT_RATIO", 0.25)) * 100.0
+        obstructive_effort_percent = float(defaults.get("OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD", 0.20)) * 100.0
+        central_effort_percent = float(defaults.get("CENTRAL_APNEA_EFFORT_THRESHOLD", 0.60)) * 100.0
+        central_amplitude_percent = float(defaults.get("CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO", 0.08)) * 100.0
         min_sec = defaults.get("MIN_EVENT_SEC", 10.0)
         max_sec = defaults.get("MAX_EVENT_SEC", 120.0)
 
         self.hypopnea_threshold.setText(str(hypopnea_percent))
         self.apnea_threshold.setText(str(apnea_percent))
-        self.effort_absent_ratio.setText(str(round(effort_ratio_percent, 1)))
+        self.obstructive_effort_threshold.setText(str(round(obstructive_effort_percent, 1)))
+        self.central_effort_threshold.setText(str(round(central_effort_percent, 1)))
+        self.central_amplitude_threshold.setText(str(round(central_amplitude_percent, 1)))
         self.min_duration.setText(str(min_sec))
         self.max_duration.setText(str(max_sec))
 
-        QMessageBox.information(self, "Standard Parameters", "Default apnea detection parameters loaded.")
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle("Standard Parameters")
+        msg_box.setText("Default apnea detection parameters loaded.")
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #f8fbff;
+            }
+            QMessageBox QLabel {
+                color: #111827;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QMessageBox QPushButton {
+                min-width: 54px;
+                min-height: 22px;
+                padding: 4px 12px;
+                border-radius: 6px;
+                border: 1px solid #1d4ed8;
+                background-color: #2563eb;
+                color: white;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #3b82f6;
+                border: 1px solid #1e40af;
+            }
+            QMessageBox QPushButton:pressed {
+                background-color: #1e40af;
+                border: 1px solid #1e3a8a;
+            }
+        """)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        ok_button = msg_box.button(QMessageBox.Ok)
+        if ok_button is not None:
+            ok_button.setAutoDefault(False)
+            ok_button.setDefault(True)
+            ok_button.setStyleSheet("""
+                QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+        msg_box.exec_()
 
     def get_parameters(self):
         """Get current Apnea field values, mapped to the detector's real AASM constant names."""
@@ -2158,7 +2364,9 @@ class AnalysisParametersDialog(QDialog):
             return {
                 "AASM_HYPOPNEA_DROP_PERCENT": float(self.hypopnea_threshold.text()),
                 "AASM_APNEA_DROP_PERCENT": float(self.apnea_threshold.text()),
-                "EFFORT_ABSENT_RATIO": float(self.effort_absent_ratio.text()) / 100.0,
+                "OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD": float(self.obstructive_effort_threshold.text()) / 100.0,
+                "CENTRAL_APNEA_EFFORT_THRESHOLD": float(self.central_effort_threshold.text()) / 100.0,
+                "CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO": float(self.central_amplitude_threshold.text()) / 100.0,
                 "MIN_EVENT_SEC": float(self.min_duration.text()),
                 "MAX_EVENT_SEC": float(self.max_duration.text()),
             }

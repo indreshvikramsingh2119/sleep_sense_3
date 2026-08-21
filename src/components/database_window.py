@@ -573,6 +573,77 @@ class DatabaseWindow(QDialog):
 
         return self.db_manager.get_patient_by_id(patient_db_id)
 
+    def show_patient_selected_success(self, patient):
+        """Show a green confirmation popup after the user selects a patient."""
+        if not patient:
+            return
+
+        first_name = str(patient.get("first_name") or "").strip()
+        last_name = str(patient.get("last_name") or "").strip()
+        display_name = " ".join(part for part in (first_name, last_name) if part).strip() or "Patient"
+        patient_code = patient.get("patient_id") or patient.get("id") or "Unknown"
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Patient Selected")
+        msg_box.setText(f"{display_name} with ID {patient_code} was selected successfully.")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #f0fdf4;
+            }
+            QMessageBox QLabel {
+                color: #166534;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QMessageBox QPushButton {
+                min-width: 54px;
+                min-height: 22px;
+                padding: 4px 12px;
+                border-radius: 6px;
+                border: 1px solid #15803d;
+                background-color: #22c55e;
+                color: white;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #4ade80;
+                border: 1px solid #166534;
+            }
+            QMessageBox QPushButton:pressed {
+                background-color: #16a34a;
+                border: 1px solid #14532d;
+            }
+        """)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        ok_button = msg_box.button(QMessageBox.Ok)
+        if ok_button is not None:
+            ok_button.setAutoDefault(False)
+            ok_button.setDefault(True)
+            ok_button.setStyleSheet("""
+                QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #15803d;
+                    background-color: #22c55e;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    background-color: #4ade80;
+                    border: 1px solid #166534;
+                }
+                QPushButton:pressed {
+                    background-color: #16a34a;
+                    border: 1px solid #14532d;
+                }
+            """)
+        msg_box.exec_()
+
     def load_records_for_patient(self, patient):
         """Populate the Records table with the selected patient's saved sessions."""
         self.records_table.setRowCount(0)
@@ -806,13 +877,73 @@ class DatabaseWindow(QDialog):
                                 'dob': dob,
                                 'patient_id': patient_id_str
                             })
-                
+
+                self.show_patient_selected_success(full_patient_data)
                 # Close the dialog
                 self.accept()
             else:
                 print("Error: Could not fetch patient data from the database")
         else:
-            QMessageBox.information(self, "No Selection", "Pehle ek patient select karein.")
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("No Selection")
+            msg_box.setText("Please select a patient first.")
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: #f8fbff;
+                }
+                QMessageBox QLabel {
+                    color: #111827;
+                    font-size: 13px;
+                    font-weight: 500;
+                }
+                QMessageBox QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QMessageBox QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QMessageBox QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            ok_button = msg_box.button(QMessageBox.Ok)
+            if ok_button is not None:
+                ok_button.setAutoDefault(False)
+                ok_button.setDefault(True)
+                ok_button.setStyleSheet("""
+                    QPushButton {
+                        min-width: 54px;
+                        min-height: 22px;
+                        padding: 4px 12px;
+                        border-radius: 6px;
+                        border: 1px solid #1d4ed8;
+                        background-color: #2563eb;
+                        color: white;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+                    QPushButton:hover {
+                        background-color: #3b82f6;
+                        border: 1px solid #1e40af;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1e40af;
+                        border: 1px solid #1e3a8a;
+                    }
+                """)
+            msg_box.exec_()
             
     def handle_view(self):
         """Handle View button click"""
@@ -836,7 +967,66 @@ class DatabaseWindow(QDialog):
         # Get selected patient
         row = self.patients_table.currentRow()
         if row < 0 or self.patients_table.isRowHidden(row):
-            QMessageBox.information(self, "No Selection", "Pehle ek patient select karein.")
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("No Selection")
+            msg_box.setText("Please select a patient first.")
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: #f8fbff;
+                }
+                QMessageBox QLabel {
+                    color: #111827;
+                    font-size: 13px;
+                    font-weight: 500;
+                }
+                QMessageBox QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QMessageBox QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QMessageBox QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            ok_button = msg_box.button(QMessageBox.Ok)
+            if ok_button is not None:
+                ok_button.setAutoDefault(False)
+                ok_button.setDefault(True)
+                ok_button.setStyleSheet("""
+                    QPushButton {
+                        min-width: 54px;
+                        min-height: 22px;
+                        padding: 4px 12px;
+                        border-radius: 6px;
+                        border: 1px solid #1d4ed8;
+                        background-color: #2563eb;
+                        color: white;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+                    QPushButton:hover {
+                        background-color: #3b82f6;
+                        border: 1px solid #1e40af;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1e40af;
+                        border: 1px solid #1e3a8a;
+                    }
+                """)
+            msg_box.exec_()
             return
             
         # Get patient data
@@ -845,14 +1035,93 @@ class DatabaseWindow(QDialog):
         first_name = self.patients_table.item(row, 1).text()
         
         # Confirm deletion
-        from PyQt5.QtWidgets import QMessageBox
-        reply = QMessageBox.question(
-            self, 
-            'Confirm Delete',
-            f'Are you sure you want to delete patient "{last_name} {first_name}"?',
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Confirm Delete")
+        msg_box.setText(f'Are you sure you want to delete patient "{last_name} {first_name}"?')
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #fffaf7;
+            }
+            QMessageBox QLabel {
+                color: #111827;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QMessageBox QPushButton {
+                min-width: 54px;
+                min-height: 22px;
+                padding: 4px 12px;
+                border-radius: 6px;
+                border: 1px solid #1d4ed8;
+                background-color: #2563eb;
+                color: white;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #3b82f6;
+                border: 1px solid #1e40af;
+            }
+            QMessageBox QPushButton:pressed {
+                background-color: #1e40af;
+                border: 1px solid #1e3a8a;
+            }
+        """)
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        yes_button = msg_box.button(QMessageBox.Yes)
+        no_button = msg_box.button(QMessageBox.No)
+        if yes_button is not None:
+            yes_button.setText("Yes")
+            yes_button.setAutoDefault(False)
+            yes_button.setDefault(False)
+            yes_button.setStyleSheet("""
+                QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #dc2626;
+                    background-color: #ef4444;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    background-color: #f87171;
+                    border: 1px solid #b91c1c;
+                }
+                QPushButton:pressed {
+                    background-color: #dc2626;
+                    border: 1px solid #991b1b;
+                }
+            """)
+        if no_button is not None:
+            no_button.setText("No")
+            no_button.setAutoDefault(False)
+            no_button.setDefault(True)
+            no_button.setStyleSheet("""
+                QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+        reply = msg_box.exec_()
         
         if reply == QMessageBox.Yes:
             # Delete from database

@@ -49,34 +49,19 @@ except ImportError:
 
 
 SKIP_MINUTES = 20.0
-BASELINE_MINUTES = 45.0
 BASELINE_HOURLY_WINDOW_SEC = 3600.0
 MIN_EVENT_SEC = 10.0
 MAX_EVENT_SEC = 120.0
 MIN_STABLE_OCCURRENCE = 30
+MIN_STABLE_OCCURRENCE_PERCENT = 5.0
+MIN_STABLE_OCCURRENCE_FLOOR = 10
 BASELINE_TARGET_OCCURRENCE = 500
 BASELINE_OCCURRENCE_TOLERANCE = 50
 CANDIDATE_WINDOW_SEC = 1.0
-CANDIDATE_MIN_FRACTION = 0.60
-BAND_MAX_GAP_SAMPLES = 3
 CORE_MIN_SEC = 3.0
 # AASM: event continues as long as airflow stays below the hypopnea floor (30%).
 EVENT_BOUNDARY_DROP_PERCENT = 30.0
-MIN_HSA_AIRFLOW_AMPLITUDE = 3.0
-MIN_HSA_AIRFLOW_AMPLITUDE_RATIO = 0.08
-
-APNEA_DROP = 0.70
-HYPOPNEA_DROP = 0.30
-CSA_DROP = 0.80
 MERGE_GAP_SEC = 0.0
-
-SPO2_APNEA_DROP = 3.0
-SPO2_HYPOPNEA_DROP = 4.0
-
-SNORING_HIGH = 10.0
-MOVEMENT_HIGH = 2.5
-SNORING_LOW = 10.0
-MOVEMENT_LOW = 2.5
 
 # ---------------------------------------------------------------------------
 # AASM scoring rules
@@ -90,10 +75,16 @@ AASM_HYPOPNEA_SPO2_DESAT_MIN = 3.0
 # Apnea (Obstructive/Central/Mixed): airflow reduced >=90%.
 AASM_APNEA_DROP_PERCENT = 90.0
 # Obstructive vs Central is decided by breathing effort (Thorax/Abdomen), not
-# by how deep the airflow drop is. If effort amplitude during the event falls
-# below this fraction of the patient's normal baseline effort, effort is
-# considered "absent" for that portion of the event.
-EFFORT_ABSENT_RATIO = 0.25
+# by how deep the airflow drop is. ResMed-style two-threshold band: below
+# OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD, effort is "absent"; at/above
+# CENTRAL_APNEA_EFFORT_THRESHOLD, effort is clearly "present"; the band
+# between the two is "borderline". A CSA verdict is only finalized if the
+# whole event's effort amplitude also clears the stricter
+# CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO floor (ResMed's "Amplitude threshold
+# for central apnea") -- otherwise it is downgraded to MSA.
+OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD = 0.20
+CENTRAL_APNEA_EFFORT_THRESHOLD = 0.60
+CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO = 0.08
 
 # ---------------------------------------------------------------------------
 # Adjustable analysis parameters (Settings -> Analysis parameters bridge)
@@ -102,7 +93,9 @@ _ADJUSTABLE_DEFAULTS = {
     "AASM_HYPOPNEA_DROP_PERCENT": AASM_HYPOPNEA_DROP_PERCENT,
     "AASM_APNEA_DROP_PERCENT": AASM_APNEA_DROP_PERCENT,
     "AASM_HYPOPNEA_SPO2_DESAT_MIN": AASM_HYPOPNEA_SPO2_DESAT_MIN,
-    "EFFORT_ABSENT_RATIO": EFFORT_ABSENT_RATIO,
+    "OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD": OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD,
+    "CENTRAL_APNEA_EFFORT_THRESHOLD": CENTRAL_APNEA_EFFORT_THRESHOLD,
+    "CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO": CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO,
     "MIN_EVENT_SEC": MIN_EVENT_SEC,
     "MAX_EVENT_SEC": MAX_EVENT_SEC,
 }
@@ -209,11 +202,28 @@ def stable_peak_max(
     return selected_value, selected_count, selected_indices
 
 
+def _percent_based_min_occurrence(
+    window_signal: np.ndarray,
+    percent: float = MIN_STABLE_OCCURRENCE_PERCENT,
+    floor: int = MIN_STABLE_OCCURRENCE_FLOOR,
+) -> int:
+    """Scale the minimum-occurrence requirement to the local window."""
+    series = pd.Series(window_signal).dropna()
+    series = pd.to_numeric(series, errors="coerce").dropna()
+    if series.empty:
+        return int(floor)
+
+    peak_indices, _ = find_peaks(series.to_numpy(dtype=float))
+    total_peaks = len(peak_indices)
+    if total_peaks <= 0:
+        return int(floor)
+    return max(int(floor), int(total_peaks * percent / 100.0))
+
+
 def compute_hourly_peak_baselines(
     time_sec: np.ndarray,
     airflow: np.ndarray,
     skip_sec: float,
-    min_occurrence: int = MIN_STABLE_OCCURRENCE,
 ) -> list[dict[str, float | int | None]]:
     hourly_results: list[dict[str, float | int | None]] = []
     analysis_end_sec = float(time_sec[-1]) if len(time_sec) else skip_sec
@@ -231,9 +241,10 @@ def compute_hourly_peak_baselines(
             window_index += 1
             continue
 
+        window_min_occurrence = _percent_based_min_occurrence(window_airflow)
         peak_value, peak_occurrence, peak_indices = stable_peak_max(
             window_airflow,
-            min_occurrence=min_occurrence,
+            min_occurrence=window_min_occurrence,
         )
         peak_times = window_time[peak_indices] if len(peak_indices) > 0 else np.array([], dtype=float)
         hourly_results.append(
@@ -262,9 +273,10 @@ def compute_hourly_peak_baselines(
         remainder_airflow = airflow[remainder_mask]
         remainder_time = time_sec[remainder_mask]
         if len(remainder_airflow) > 0:
+            remainder_min_occurrence = _percent_based_min_occurrence(remainder_airflow)
             peak_value, peak_occurrence, peak_indices = stable_peak_max(
                 remainder_airflow,
-                min_occurrence=min_occurrence,
+                min_occurrence=remainder_min_occurrence,
             )
             peak_times = remainder_time[peak_indices] if len(peak_indices) > 0 else np.array([], dtype=float)
             hourly_results.append(
@@ -322,13 +334,34 @@ def stable_min_from_occurrence_band(
     return closest[0]
 
 
-def baseline_from_occurrence_band(
-    values: pd.Series | np.ndarray,
-    target_occurrence: int = BASELINE_TARGET_OCCURRENCE,
-    tolerance: int = BASELINE_OCCURRENCE_TOLERANCE,
-) -> tuple[float, int]:
-    baseline_value, baseline_count, _ = stable_peak_max(values, min_occurrence=MIN_STABLE_OCCURRENCE)
-    return baseline_value, baseline_count
+def compute_pre_event_baseline(
+    time_sec: np.ndarray,
+    airflow: np.ndarray,
+    event_start_sec: float,
+    pre_event_window_sec: float = 120.0,
+    stability_cv_threshold: float = 0.25,
+    fallback_baseline: float | None = None,
+) -> tuple[float, str]:
+    """AASM-style baseline from the 2 minutes before event onset."""
+    window_mask = (time_sec >= event_start_sec - pre_event_window_sec) & (time_sec < event_start_sec)
+    window_airflow = airflow[window_mask]
+    if len(window_airflow) < 3:
+        return (float(fallback_baseline) if fallback_baseline else 0.0), "insufficient_data"
+
+    breath_indices, _ = find_peaks(window_airflow)
+    if len(breath_indices) == 0:
+        return float(np.nanmax(window_airflow)), "no_breaths_found"
+
+    breath_amplitudes = window_airflow[breath_indices]
+    mean_amp = float(np.mean(breath_amplitudes))
+    std_amp = float(np.std(breath_amplitudes))
+    cv = std_amp / mean_amp if mean_amp else 0.0
+
+    if cv <= stability_cv_threshold:
+        return mean_amp, "stable"
+
+    largest_three = np.sort(breath_amplitudes)[-3:] if len(breath_amplitudes) >= 3 else breath_amplitudes
+    return float(np.mean(largest_three)), "unstable"
 
 
 def _segment_mask(mask: np.ndarray, time_sec: np.ndarray, min_event_sec: float) -> list[tuple[int, int, float]]:
@@ -388,14 +421,6 @@ def _expand_segment_to_drop_extent(
     return new_start, new_end
 
 
-def _rolling_fraction_mask(mask: np.ndarray, window_size: int, min_fraction: float) -> np.ndarray:
-    if window_size <= 1:
-        return mask.astype(bool)
-    kernel = np.ones(int(window_size), dtype=float)
-    fraction = np.convolve(mask.astype(float), kernel, mode="same") / float(window_size)
-    return fraction >= float(min_fraction)
-
-
 def _robust_signal_amplitude(values: pd.Series | np.ndarray) -> float:
     series = pd.Series(values)
     series = pd.to_numeric(series, errors="coerce").dropna()
@@ -429,18 +454,24 @@ def _compute_effort_baseline(
     return thorax_baseline_amp, abdomen_baseline_amp
 
 
-def _effort_present(
+def _effort_state(
     thorax_segment: np.ndarray,
     abdomen_segment: np.ndarray,
     thorax_baseline_amp: float,
     abdomen_baseline_amp: float,
-    absent_ratio: float = EFFORT_ABSENT_RATIO,
-) -> bool:
-    """True if breathing effort is still meaningfully present in this segment
-    relative to baseline (points to an obstructive component, not central)."""
+    absent_below: float = OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD,
+    present_at_or_above: float = CENTRAL_APNEA_EFFORT_THRESHOLD,
+) -> str:
+    """Classify one half-event's breathing effort relative to baseline as
+    'absent', 'borderline', or 'present'."""
     thorax_ratio = _effort_amplitude(thorax_segment) / thorax_baseline_amp if thorax_baseline_amp else 0.0
     abdomen_ratio = _effort_amplitude(abdomen_segment) / abdomen_baseline_amp if abdomen_baseline_amp else 0.0
-    return thorax_ratio >= absent_ratio or abdomen_ratio >= absent_ratio
+    best_ratio = max(thorax_ratio, abdomen_ratio)
+    if best_ratio < absent_below:
+        return "absent"
+    if best_ratio >= present_at_or_above:
+        return "present"
+    return "borderline"
 
 
 def classify_apnea_effort_type(
@@ -458,17 +489,22 @@ def classify_apnea_effort_type(
     if sample_count < 2:
         return "OSA"
     midpoint = sample_count // 2
-    first_half_present = _effort_present(
+    first_half_state = _effort_state(
         thorax_event[:midpoint], abdomen_event[:midpoint], thorax_baseline_amp, abdomen_baseline_amp
     )
-    second_half_present = _effort_present(
+    second_half_state = _effort_state(
         thorax_event[midpoint:], abdomen_event[midpoint:], thorax_baseline_amp, abdomen_baseline_amp
     )
-    if not first_half_present and not second_half_present:
-        return "CSA"
-    if not first_half_present and second_half_present:
+    if first_half_state == "present" and second_half_state == "present":
+        return "OSA"
+    if first_half_state == "absent" and second_half_state == "absent":
+        thorax_ratio = _effort_amplitude(thorax_event) / thorax_baseline_amp if thorax_baseline_amp else 0.0
+        abdomen_ratio = _effort_amplitude(abdomen_event) / abdomen_baseline_amp if abdomen_baseline_amp else 0.0
+        whole_event_ratio = max(thorax_ratio, abdomen_ratio)
+        if whole_event_ratio < CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO:
+            return "CSA"
         return "MSA"
-    return "OSA"
+    return "MSA"
 
 
 def _build_debug_summary(
@@ -558,7 +594,7 @@ def _write_text_report(result: dict[str, Any], csv_path: str | Path, output_dir:
 
     lines: list[str] = [
         f"report_type=rule_based_apnea_detection | source_csv={csv_path} | generated_date={generated_dt.strftime('%Y-%m-%d')} | generated_time={generated_dt.strftime('%H:%M:%S')}",
-        "formula=drop_percent=((window_baseline-analysis_peak_envelope)/window_baseline)*100",
+        "formula=legacy_candidate_scan_drop_percent=((window_baseline-analysis_peak_envelope)/window_baseline)*100",
         f"label_rules=AASM | Hypopnea:>={AASM_HYPOPNEA_DROP_PERCENT:.0f}%+spo2_desat>={AASM_HYPOPNEA_SPO2_DESAT_MIN:.0f}% | Apnea:>={AASM_APNEA_DROP_PERCENT:.0f}%(OSA/CSA/MSA by effort) | min_event_sec={MIN_EVENT_SEC:.1f}",
         "baseline_note=detection_uses_hourly_or_remainder_window_peak_baselines_not_one_combined_average",
         f"baseline_source={result.get('baseline_source', '--')}",
@@ -691,7 +727,6 @@ def detect_apnea_events_from_dataframe(
         time_sec=raw_time_sec,
         airflow=raw_airflow,
         skip_sec=skip_sec,
-        min_occurrence=MIN_STABLE_OCCURRENCE,
     )
     if not hourly_peak_baselines:
         raise ValueError("Hourly baseline windows are empty. Recording is too short after skip period.")
@@ -727,8 +762,8 @@ def detect_apnea_events_from_dataframe(
         baseline_airflow_amplitude = airflow_reduction_range
     effort_baseline = _compute_effort_baseline(thorax, abdomen, baseline_mask)
 
-    apnea_threshold = baseline_airflow_reference * (1.0 - APNEA_DROP)
-    hypopnea_threshold = baseline_airflow_reference * (1.0 - HYPOPNEA_DROP)
+    apnea_threshold = baseline_airflow_reference * (1.0 - AASM_APNEA_DROP_PERCENT / 100.0)
+    hypopnea_threshold = baseline_airflow_reference * (1.0 - AASM_HYPOPNEA_DROP_PERCENT / 100.0)
 
     analysis_mask = time_sec >= skip_sec
     analysis_time = time_sec[analysis_mask]
@@ -817,10 +852,22 @@ def detect_apnea_events_from_dataframe(
             # percentage and cause CSA to drift into HSA incorrectly.
             core_airflow = airflow[core_start_index:core_end_index + 1]
             event_window_baseline = analysis_window_baseline[core_start:core_end + 1]
-            event_baseline_airflow = (
+            hourly_fallback_baseline = (
                 float(np.nanmean(event_window_baseline))
                 if len(event_window_baseline) > 0
                 else float(baseline_airflow_reference)
+            )
+
+            # AASM-style: use the real pre-event 2-minute local baseline.
+            # Fall back to the hourly baseline only when the pre-event window
+            # is too short or too sparse.
+            event_baseline_airflow, _event_baseline_mode = compute_pre_event_baseline(
+                time_sec=time_sec,
+                airflow=airflow,
+                event_start_sec=float(time_sec[start_index]),
+                pre_event_window_sec=120.0,
+                stability_cv_threshold=0.25,
+                fallback_baseline=hourly_fallback_baseline,
             )
 
             event_min_airflow = float(np.nanmin(core_airflow))
@@ -1073,7 +1120,7 @@ def detect_apnea_events_from_dataframe(
             {
                 "window_index": int(item["window_index"]),
                 "window_label": str(item["window_label"]),
-                "apnea_threshold": float(float(item["peak_value"]) * (1.0 - APNEA_DROP)),
+                "apnea_threshold": float(float(item["peak_value"]) * (1.0 - AASM_APNEA_DROP_PERCENT / 100.0)),
             }
             for item in hourly_peak_baselines
         ],
@@ -1081,7 +1128,7 @@ def detect_apnea_events_from_dataframe(
             {
                 "window_index": int(item["window_index"]),
                 "window_label": str(item["window_label"]),
-                "hypopnea_threshold": float(float(item["peak_value"]) * (1.0 - HYPOPNEA_DROP)),
+                "hypopnea_threshold": float(float(item["peak_value"]) * (1.0 - AASM_HYPOPNEA_DROP_PERCENT / 100.0)),
             }
             for item in hourly_peak_baselines
         ],
