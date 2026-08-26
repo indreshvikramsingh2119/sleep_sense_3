@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog, QApplication, QDialog, QStyle
 )
-from PyQt5.QtCore import Qt, QTimer, QTime, QThread, pyqtSignal, QPoint, QRect, QMimeData, QPointF
+from PyQt5.QtCore import Qt, QTimer, QTime, QThread, pyqtSignal, QPoint, QRect, QMimeData, QPointF, QElapsedTimer
 import sip
 from PyQt5.QtGui import QPixmap, QScreen
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen, QColor
@@ -54,7 +54,7 @@ ACTIVE_SIGNAL_CONFIGS = [
     ("Airflow", "#8b5cf6", 0.3, 15, 50, 0, 1500),
     ("Snoring", "#ef4444", 1.0, 8, 50, 0, 100),
     ("Thorax", "#f59e0b", 0.2, 5, 50, 0, 4095),
-    ("Abdomen", "#10b981", 0.1, 2, 90, 0, 80),
+    # ("Abdomen", "#10b981", 0.1, 2, 90, 0, 80),
     ("SpO2", "#06b6d4", 1.5, 12, 50, 60, 100),
     ("Pulse", "#f97316", 0.0, 0, 30, 40, 140),
     ("Body Movement", "#8b5cf6", 0.1, 5, 20, 0, 100),
@@ -70,6 +70,27 @@ AUTO_RANGE_SIGNAL_NAMES = {"Airflow", "Thorax"}
 AIRFLOW_DROP_MIN_DURATION_SEC = 2.0
 AIRFLOW_EVENT_MAX_DURATION_SEC = None
 AIRFLOW_BASELINE_MIN_OCCURRENCE = 30
+
+# ---------------------------------------------------------------------------
+# PERF: debug logging is opt-in.
+#
+# The playback path used to emit ~20 print() calls per frame. At a 50 ms timer
+# that is ~400 writes/second to stdout; on macOS (Terminal / PyCharm console)
+# each write is synchronous and costs 0.1-1 ms, so printing alone could eat
+# more time than the actual plotting.
+#
+# Run with  PSG_DEBUG=1 python dashboard.py  to get the old chatter back.
+# ---------------------------------------------------------------------------
+PERF_DEBUG = os.environ.get("PSG_DEBUG", "0") not in ("0", "", "false", "False")
+
+
+def dbg(*args, **kwargs):
+    """No-op logger used on the per-frame hot path."""
+    if PERF_DEBUG:
+        print(*args, **kwargs)
+
+# Playback advances 0.1 s of data per 50 ms tick, i.e. 2x wall-clock at "1.0x".
+PLAYBACK_TIME_SCALE = 2.0
 
 DETECTION_IMPORT_ERROR = None
 try:
@@ -102,16 +123,18 @@ class SleepMonitorChart(QWidget):
         done = pyqtSignal(int, str, str)  # session_id, saved_at, copied_csv_path
         failed = pyqtSignal(str)  # error message
 
-        def __init__(self, patient_id, source_csv_path, parent=None):
+        def __init__(self, patient_id, source_csv_path, parent_session_id=None, parent=None):
             super().__init__(parent)
             self.patient_id = patient_id
             self.source_csv_path = source_csv_path
+            self.parent_session_id = parent_session_id
 
         def run(self):
             try:
                 session_id, saved_at, copied_csv_path = save_raw_csv_session(
                     self.patient_id,
                     self.source_csv_path,
+                    parent_session_id=self.parent_session_id,
                 )
                 self.done.emit(session_id, saved_at, copied_csv_path)
             except Exception as e:
@@ -122,6 +145,9 @@ class SleepMonitorChart(QWidget):
         self.current_time = QTime.currentTime()
         self.patient_id = "--------"
         self.current_time_window = 60  # Default to 60 seconds
+        # When True, a window larger than the remaining recording is shrunk to
+        # the data that actually exists so the plot always fills the full width.
+        self.fit_window_to_data = True
         self.is_playing = False
         self.playback_speed = 1.0
         self.play_pause_btn = None  # Initialize button reference
@@ -155,6 +181,14 @@ class SleepMonitorChart(QWidget):
         self.analysis_json_path = None
         self._save_in_progress = False
         self._worker = None
+        # Which saved session (if any) is currently loaded, and the root
+        # session it belongs to. Set via set_current_session() when a Records
+        # row is opened. A Re-analyze -> "New report" save uses
+        # current_session_root_id as its parent, so reanalyzed versions of
+        # the same recording stay nested under the original in the Records
+        # table instead of appearing as unrelated rows.
+        self.current_session_id = None
+        self.current_session_root_id = None
         
                 
         # SpO2 specific statistics
@@ -182,6 +216,15 @@ class SleepMonitorChart(QWidget):
         self._rendering_selections = False
         self._selection_render_scheduled = False
         
+        # PERF: whole-recording caches (see _invalidate_signal_caches)
+        self._body_position_cache = None
+        self._airflow_axis_range_cache = None
+        self._auto_axis_range_cache = {}
+        self._last_events_signature = None
+        self._last_detection_summary_text = None
+        self._playback_busy = False
+        self._playback_clock = QElapsedTimer()
+        
         # Apnea events storage
         self.apnea_events = []  # Store apnea event data
         self.event_plot_items = {}  # Store plot items for apnea events
@@ -202,36 +245,79 @@ class SleepMonitorChart(QWidget):
         # Don't start timer initially - wait for user to press play
 
     def _normalize_body_position_signal(self, values):
-        """Convert body position data into the canonical 0..4 categorical codes."""
-        signal = np.asarray(values, dtype=object).reshape(-1)
-        if len(signal) == 0:
+        """Convert body position data into the canonical 0..4 categorical codes.
+
+        PERF: this used to run a per-sample Python loop over the WHOLE
+        recording, and it was called on every playback frame. On a 2h50m file
+        that is ~537 ms per frame; on an 8h file ~1.6 s per frame. Both paths
+        below are fully vectorised, and the result is cached by
+        _get_body_position_signal() so it is computed once per loaded file.
+        """
+        array = np.asarray(values)
+        if array.size == 0:
             return np.asarray([], dtype=float)
 
-        normalized = np.full(len(signal), np.nan, dtype=float)
-        for index, raw_value in enumerate(signal):
-            if raw_value is None:
-                continue
+        if array.dtype.kind in "iuf":
+            # Fast path: the CSV loader already produced numbers.
+            numeric = array.astype(float).reshape(-1)
+            codes = np.clip(np.rint(numeric), 0, 4)
+            codes[~np.isfinite(numeric)] = np.nan
+        else:
+            # Mixed / label data: still vectorised, no Python loop.
+            text = pd.Series(array.reshape(-1)).astype(str).str.strip().str.lower()
+            mapped = text.map(BODY_POSITION_LABEL_TO_CODE)
+            numeric = pd.to_numeric(text, errors="coerce")
+            codes = mapped.astype(float).fillna(numeric).to_numpy(dtype=float)
+            codes = np.clip(np.rint(codes), 0, 4)
 
-            if isinstance(raw_value, (int, float, np.integer, np.floating)) and np.isfinite(raw_value):
-                normalized[index] = float(np.clip(np.rint(raw_value), 0, 4))
-                continue
-
-            label = str(raw_value).strip().lower()
-            if not label:
-                continue
-
-            if label in BODY_POSITION_LABEL_TO_CODE:
-                normalized[index] = float(BODY_POSITION_LABEL_TO_CODE[label])
-                continue
-
-            try:
-                normalized[index] = float(np.clip(np.rint(float(label)), 0, 4))
-            except ValueError:
-                continue
-
-        series = pd.Series(normalized)
+        series = pd.Series(codes)
         series = series.interpolate(limit_direction="both").ffill().bfill().fillna(4.0)
         return series.to_numpy(dtype=float)
+
+    def _get_body_position_signal(self):
+        """Return the normalised body-position channel, computed once per file."""
+        cached = getattr(self, "_body_position_cache", None)
+        if cached is not None:
+            return cached
+
+        signals = (self.psg_full_data or {}).get("signals", {})
+        raw = signals.get("body_position")
+        if raw is None:
+            return np.asarray([], dtype=float)
+
+        cached = self._normalize_body_position_signal(raw)
+        self._body_position_cache = cached
+        return cached
+
+    def _invalidate_signal_caches(self):
+        """Drop every whole-recording derived value. Call this after loading."""
+        self._body_position_cache = None
+        self._airflow_axis_range_cache = None
+        self._auto_axis_range_cache = {}
+        self._last_events_signature = None
+        self._last_detection_summary_text = None
+
+    def _get_full_signal_for_auto_range(self, chart_name):
+        """Return the full-recording array backing an auto-range chart (Airflow/Thorax)."""
+        if self.psg_full_data is None or "signals" not in self.psg_full_data:
+            return np.array([])
+
+        signals = self.psg_full_data["signals"]
+        signal_col = CHART_SIGNAL_MAPPING.get(chart_name)
+        if signal_col is None:
+            clean_name = str(chart_name).strip().rstrip(")")
+            signal_col = signal_key_for_chart(clean_name)
+
+        if signal_col not in signals:
+            return np.array([])
+
+        if signal_col == "airflow":
+            return self._get_airflow_signal_variant("display")
+        if signal_col == "thorax":
+            return self._get_thorax_signal_variant("display")
+        if signal_col == "body_position":
+            return self._get_body_position_signal()
+        return np.asarray(signals[signal_col], dtype=float)
 
     def _configure_body_position_axis(self, plot_widget):
         """Apply categorical ticks so body position is readable on the dashboard."""
@@ -429,6 +515,11 @@ class SleepMonitorChart(QWidget):
     
     def set_patient_id(self, patient_id: str):
         self.patient_id = patient_id or "--------"
+
+    def set_current_session(self, session_id, parent_session_id=None):
+        """Record which saved session is currently loaded."""
+        self.current_session_id = session_id
+        self.current_session_root_id = parent_session_id or session_id
     
     def set_dashboard_controls(self, time_window_dropdown, hidden_graphs_dropdown):
         """Set reference to dashboard controls for synchronization"""
@@ -668,13 +759,38 @@ class SleepMonitorChart(QWidget):
         """
         self._save_in_progress = True
 
-        self._worker = self._SaveWorker(self.patient_id, self.loaded_csv_path, parent=self)
+        self._worker = self._SaveWorker(
+            self.patient_id,
+            self.loaded_csv_path,
+            parent_session_id=self.current_session_root_id,
+            parent=self,
+        )
         self._worker.done.connect(self._on_save_done)
         self._worker.failed.connect(self._on_save_failed)
         self._worker.start()
 
     def _on_save_done(self, session_id: int, saved_at: str, copied_csv_path: str):
         self._save_in_progress = False
+        # Remember this save as the currently-loaded session. The first save
+        # in a chain (no root yet) becomes the root that later re-analyzed
+        # saves of the same recording will nest under.
+        self.current_session_id = session_id
+        if not self.current_session_root_id:
+            self.current_session_root_id = session_id
+        # Keep whatever manual events exist on this recording right now
+        # attached to the archived copy, so reopening that saved session
+        # later still shows them - even though the live session's view
+        # gets cleared right after this (this save flow is exclusively
+        # used by Re-analyze -> "New report" - see button_functions.py).
+        self._archive_manual_label_overrides_snapshot(copied_csv_path)
+
+        # The new report now owns whatever manual events were archived
+        # above (kept or intentionally deleted, per the user's choice).
+        # The live working screen should go back to showing just the
+        # fresh auto-detected events - in memory only, so the ORIGINAL
+        # recording's own sidecar on disk (and its "Current report"
+        # manual events) are never touched by this.
+        self._clear_manual_events_in_memory()
         label = f"Session #{session_id} - {self.patient_id}"
         self.raw_data_saved.emit(copied_csv_path, saved_at)
         db_path = get_db_path()
@@ -757,6 +873,37 @@ class SleepMonitorChart(QWidget):
         self._save_in_progress = False
         QMessageBox.critical(self, "Save Failed", f"Could not save data:\n{error_msg}")
 
+    def _archive_manual_label_overrides_snapshot(self, copied_csv_path: str) -> None:
+        """Copy the current manual-label overrides next to an archived CSV copy.
+
+        Manual events live in a sidecar "<csv-name>_manual_labels.json" file
+        next to whichever CSV is loaded (see _manual_label_overrides_path()).
+        A Re-analyze -> "New report" save archives a *copy* of the CSV under
+        a new file name, and then clears the live session's manual overrides
+        so the new analysis starts clean. Without this, that clear would
+        wipe out the manual events for good, since the archived copy would
+        have no overrides file of its own to fall back on. Writing a copy of
+        the current overrides here means: reopen the archived recording
+        later and its manual events are exactly as they were.
+        """
+        manual_selections = self._collect_manual_selections_for_save()
+        if not self.manual_label_overrides and not manual_selections:
+            return
+        try:
+            dest_overrides_path = Path(copied_csv_path).with_name(
+                f"{Path(copied_csv_path).stem}_manual_labels.json"
+            )
+            dest_overrides_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "label_overrides": self.manual_label_overrides,
+                "manual_selections": manual_selections,
+            }
+            dest_overrides_path.write_text(
+                json.dumps(payload, indent=2), encoding="utf-8"
+            )
+        except Exception as error:
+            print(f"⚠️ Could not archive manual label overrides for the saved copy: {error}")
+
     def _patient_id_icon_pixmap(self):
         """Create a blue patient-ID style icon for warning dialogs."""
         pixmap = QPixmap(48, 48)
@@ -823,16 +970,36 @@ class SleepMonitorChart(QWidget):
         return bool(getattr(self, "all_psg_mode", False))
 
     def get_effective_time_window_seconds(self):
-        """Return a positive visible window size for plotting and navigation."""
+        """Return a positive visible window size for plotting and navigation.
+
+        The visible window is never allowed to run past the end of the loaded
+        recording. If the user picks a 1 hour window but only 20 minutes of
+        data exist, the x-axis is shrunk to those 20 minutes so the signal
+        fills the full width of the plot instead of leaving empty space.
+        """
+        max_duration = self._get_playback_max_duration()
+
         if self.is_all_psg_mode() or float(self.current_time_window) <= 0:
-            max_duration = self._get_playback_max_duration()
             if max_duration > 0:
                 return max(1.0, float(max_duration))
         try:
-            return max(1.0, float(self.current_time_window))
+            window = max(1.0, float(self.current_time_window))
         except Exception:
-            return 60.0
-    
+            window = 60.0
+
+        # Fit the window to the data that is actually available from the
+        # current offset onwards (no trailing blank area on the chart).
+        if getattr(self, "fit_window_to_data", True) and max_duration > 0:
+            try:
+                offset = max(0.0, float(self.current_time_offset))
+            except Exception:
+                offset = 0.0
+            remaining = float(max_duration) - offset
+            if remaining > 0:
+                window = min(window, remaining)
+
+        return max(1.0, float(window))
+
     def navigate_backward(self):
         """Navigate backward in time"""
         if self.block_if_selection_active():
@@ -845,7 +1012,7 @@ class SleepMonitorChart(QWidget):
             self.current_time_offset = max(0, self.current_time_offset - self.current_time_window)
             self.refresh_charts()
             self.update_time_position_label()
-            print(f"Navigated backward to: {self.current_time_offset}s (max: {max_duration:.1f}s)")
+            dbg(f"Navigated backward to: {self.current_time_offset}s (max: {max_duration:.1f}s)")
     
     def navigate_forward(self):
         """Navigate forward in time"""
@@ -859,28 +1026,30 @@ class SleepMonitorChart(QWidget):
             self.current_time_offset = min(max_offset, new_offset)
             self.refresh_charts()
             self.update_time_position_label()
-            print(f"Navigated forward to: {self.current_time_offset}s (max: {max_duration:.1f}s, max_offset: {max_offset:.1f}s)")
+            dbg(f"Navigated forward to: {self.current_time_offset}s (max: {max_duration:.1f}s, max_offset: {max_offset:.1f}s)")
     
     def start_playback(self):
         """Start movie-like playback of recorded data"""
         sample_count = self._get_playback_sample_count()
-        print(f"🎬 start_playback called - active sample count: {sample_count}")
+        dbg(f"🎬 start_playback called - active sample count: {sample_count}")
         
         if self.block_if_selection_active():
-            print("🎬 Blocked by selection active")
+            dbg("🎬 Blocked by selection active")
             return
         
         if sample_count == 0:
-            print("No data available for playback")
+            dbg("No data available for playback")
             return
 
         self.current_time_offset = min(self.current_time_offset, self._get_playback_max_offset())
         
         self.is_playing = True
-        print(f"🎬 Timer starting... is_playing: {self.is_playing}")
+        self._playback_busy = False
+        self._playback_clock.start()
+        dbg(f"🎬 Timer starting... is_playing: {self.is_playing}")
         self.playback_timer.start(50)  
-        print(f"🎬 Timer started - Timer active: {self.playback_timer.isActive()}")
-        print("▶️ Playback started")
+        dbg(f"🎬 Timer started - Timer active: {self.playback_timer.isActive()}")
+        dbg("▶️ Playback started")
         
         # Update button if it exists
         if self.play_pause_btn:
@@ -889,47 +1058,66 @@ class SleepMonitorChart(QWidget):
     def pause_playback(self):
         """Pause the playback"""
         self.is_playing = False
+        self._playback_busy = False
+        self._playback_clock.invalidate()
         self.playback_timer.stop()
-        print("⏸ Playback paused")
+        dbg("⏸ Playback paused")
         
         # Update button if it exists
         if self.play_pause_btn:
             self.play_pause_btn.setText("▶ Play")
     
     def update_playback(self):
-        """Main playback logic - auto-scroll data like a movie"""
-        print(f"🎬 update_playback called - is_playing: {self.is_playing}")
-        
+        """Main playback logic - auto-scroll data like a movie.
+
+        PERF, two changes:
+
+        1. Re-entrancy guard. The timer fires every 50 ms. If one frame takes
+           longer than that, Qt keeps queueing timeouts and the event loop can
+           never catch up - that is what "hang" looks like to the user. We now
+           drop a tick instead of stacking it.
+        2. Wall-clock stepping. The offset advances by the time that actually
+           elapsed, not by a fixed 0.1 s per tick. Playback therefore keeps the
+           correct speed on a slow machine (it drops frames) instead of
+           silently running in slow motion.
+        """
         if not self.is_playing:
             return
-        
-        max_time = self._get_playback_max_duration()
-        if max_time <= 0:
-            self.pause_playback()
+        if self._playback_busy:
             return
 
-        max_offset = self._get_playback_max_offset()
-        
-        # Move forward in time 
-        self.current_time_offset += 0.1 * self.playback_speed
-        
-        # Stop on the last full visible window instead of sliding past the final samples.
-        if self.current_time_offset >= max_offset:
-            self.current_time_offset = max_offset
+        self._playback_busy = True
+        try:
+            max_time = self._get_playback_max_duration()
+            if max_time <= 0:
+                self.pause_playback()
+                return
+
+            max_offset = self._get_playback_max_offset()
+
+            # Move forward by the real elapsed time, scaled to keep the old feel.
+            if self._playback_clock.isValid():
+                elapsed_sec = self._playback_clock.restart() / 1000.0
+            else:
+                self._playback_clock.start()
+                elapsed_sec = 0.05
+            # Guard against a huge jump after the app was blocked/minimised.
+            elapsed_sec = min(elapsed_sec, 0.5)
+            self.current_time_offset += elapsed_sec * PLAYBACK_TIME_SCALE * self.playback_speed
+
+            # Stop on the last full visible window instead of sliding past the final samples.
+            if self.current_time_offset >= max_offset:
+                self.current_time_offset = max_offset
+                self.refresh_charts()
+                self.update_time_position_label()
+                self.pause_playback()
+                dbg(f"🎬 Playback completed: offset={max_offset:.1f}s, duration={max_time:.1f}s")
+                return
+
             self.refresh_charts()
             self.update_time_position_label()
-            self.pause_playback()
-            print(f"🎬 Playback completed at visible end window: offset={max_offset:.1f}s, duration={max_time:.1f}s")
-            return
-            
-        # Update all charts with new time position (skip overlay updates during rapid playback)
-        self.refresh_charts()
-        self.update_time_position_label()
-        
-        # Print progress for debugging 
-        if int(self.current_time_offset * 10) % 10 == 0:
-            progress_percent = (self.current_time_offset / max_time) * 100
-            print(f"🎬 AUTO-SCROLL: {self.current_time_offset:.1f}s / {max_time:.1f}s ({progress_percent:.1f}%)")
+        finally:
+            self._playback_busy = False
     
     def toggle_playback(self):
         """Toggle between play and pause states"""
@@ -989,7 +1177,7 @@ class SleepMonitorChart(QWidget):
     def refresh_charts_minimal(self):
         """Refresh charts during playback without overlay rendering to prevent crashes"""
         window_seconds = self.get_effective_time_window_seconds()
-        print(f"Debug: refresh_charts_minimal called with time_window={window_seconds}s, offset={self.current_time_offset}s")
+        dbg(f"Debug: refresh_charts_minimal called with time_window={window_seconds}s, offset={self.current_time_offset}s")
         
         for i in range(self.charts_layout.count()):
             container = self.charts_layout.itemAt(i).widget()
@@ -1002,7 +1190,7 @@ class SleepMonitorChart(QWidget):
                 vb = plot_widget.getViewBox()
                 if hasattr(vb, 'set_time_window_limits'):
                     vb.set_time_window_limits(0, window_seconds)
-                    print(f"Debug: ViewBox limits set to 0 → {window_seconds}, offset={self.current_time_offset}")
+                    dbg(f"Debug: ViewBox limits set to 0 → {window_seconds}, offset={self.current_time_offset}")
                 
                 # Force X-axis range to be fixed (prevent any sliding)
                 plot_widget.setXRange(0, window_seconds, padding=0)
@@ -1020,7 +1208,7 @@ class SleepMonitorChart(QWidget):
     def refresh_charts(self):
         """Refresh all charts with current time window and offset."""
         window_seconds = self.get_effective_time_window_seconds()
-        print(f"Debug: refresh_charts called with time_window={window_seconds}s, offset={self.current_time_offset}s")
+        dbg(f"Debug: refresh_charts called with time_window={window_seconds}s, offset={self.current_time_offset}s")
 
         self.setUpdatesEnabled(False)
         try:
@@ -1036,7 +1224,7 @@ class SleepMonitorChart(QWidget):
                     vb = plot_widget.getViewBox()
                     if hasattr(vb, 'set_time_window_limits'):
                         vb.set_time_window_limits(0, window_seconds)
-                        print(f"Debug: ViewBox limits set to 0 -> {window_seconds}, offset={self.current_time_offset}")
+                        dbg(f"Debug: ViewBox limits set to 0 -> {window_seconds}, offset={self.current_time_offset}")
 
                     # Store current Y-axis range to preserve zoom settings
                     if not hasattr(plot_widget, 'zoom_y_range'):
@@ -1091,26 +1279,26 @@ class SleepMonitorChart(QWidget):
                             else:
                                 if plot_widget.zoom_y_range is not None:
                                     new_y_min, new_y_max = plot_widget.zoom_y_range
-                                    print(f"Preserving zoom range during playback: {new_y_min} - {new_y_max}")
+                                    dbg(f"Preserving zoom range during playback: {new_y_min} - {new_y_max}")
                                 else:
                                     new_y_min, new_y_max = 60, 100
 
                                 try:
                                     plot_widget.setYRange(new_y_min, new_y_max)
                                 except TypeError:
-                                    plot_widget.setRange(yRange=[new_y_min, new_y_max])
+                                  plot_widget.setRange(yRange=[new_y_min, new_y_max])
 
                             if 10 <= window_seconds <= 30:
                                 # Always update value labels dynamically for real-time navigation
-                                print(f"Creating/Updating SpO2 value labels for {window_seconds}s time window")
+                                dbg(f"Creating/Updating SpO2 value labels for {window_seconds}s time window")
                                 self.create_spo2_markers_and_labels(plot_widget, x, y)
-                                print(f"Updated SpO2 value labels with {len(x)} points for time offset {self.current_time_offset}s")
+                                dbg(f"Updated SpO2 value labels with {len(x)} points for time offset {self.current_time_offset}s")
                             else:
                                 if hasattr(plot_widget, 'value_labels'):
                                     for label in plot_widget.value_labels:
                                         plot_widget.removeItem(label)
                                     plot_widget.value_labels = []
-                                print(f"Removed SpO2 value labels for {window_seconds}s time window")
+                                dbg(f"Removed SpO2 value labels for {window_seconds}s time window")
                         else:
                             plot_widget.plot_curve.setData([], [])
                     else:
@@ -1138,10 +1326,10 @@ class SleepMonitorChart(QWidget):
                                 plot_widget.plot_curve.setData(x_step, y_step, connect='finite', stepMode=True)
                             else:
                                 plot_widget.plot_curve.setData(x, y, connect='finite')
-                            print(f"Updated {chart_name} with real data: {len(x)} points")
+                            dbg(f"Updated {chart_name} with real data: {len(x)} points")
                         else:
                             plot_widget.plot_curve.setData([], [])
-                            print(f"Left {chart_name} blank because no active signal data is mapped")
+                            dbg(f"Left {chart_name} blank because no active signal data is mapped")
 
                         if hasattr(plot_widget, 'axis_properties'):
                             properties = plot_widget.axis_properties
@@ -1152,10 +1340,20 @@ class SleepMonitorChart(QWidget):
                             except TypeError:
                                 plot_widget.setRange(yRange=[low_value, high_value], padding=0)
                         elif chart_name.strip() == "Airflow":
-                            airflow_y_min, airflow_y_max = self.get_signal_auto_axis_range(chart_name)
-                            self._lock_auto_axis(plot_widget, airflow_y_min, airflow_y_max)
+                            fallback_min, fallback_max = SIGNAL_Y_RANGES.get(
+                                chart_name.strip(), (0.0, 100.0)
+                            )
+                            airflow_y_min, airflow_y_max = self._auto_axis_range_from_values(
+                                y,
+                                fallback_min,
+                                fallback_max,
+                            )
+                            hard_min, hard_max = self._finite_min_max(y)
+                            self._lock_auto_axis(
+                                plot_widget, airflow_y_min, airflow_y_max, hard_min, hard_max
+                            )
                             _event_x, detection_y = self.get_airflow_detection_data_for_window(
-                                self.current_time_window,
+                                window_seconds,
                                 self.current_time_offset,
                             )
                             self.mark_airflow_drop_events(
@@ -1164,13 +1362,29 @@ class SleepMonitorChart(QWidget):
                                 y,
                                 detection_y_data=detection_y,
                             )
+                        elif chart_name.strip() == "Thorax":
+                            fallback_min, fallback_max = SIGNAL_Y_RANGES.get(
+                                chart_name.strip(), (0.0, 100.0)
+                            )
+                            thorax_y_min, thorax_y_max = self._auto_axis_range_from_values(
+                                y,
+                                fallback_min,
+                                fallback_max,
+                            )
+                            hard_min, hard_max = self._finite_min_max(y)
+                            self._lock_auto_axis(
+                                plot_widget, thorax_y_min, thorax_y_max, hard_min, hard_max
+                            )
                         elif chart_name.strip() in AUTO_RANGE_SIGNAL_NAMES:
-                            # Auto Y-range for all auto-range charts, but event detection
-                            # remains Airflow-only.
-                            auto_y_min, auto_y_max = self.get_signal_auto_axis_range(chart_name)
-                            self._lock_auto_axis(plot_widget, auto_y_min, auto_y_max)
+                            auto_y_min, auto_y_max = self.get_signal_auto_axis_range(
+                                chart_name.strip()
+                            )
+                            hard_min, hard_max = self._finite_min_max(y)
+                            self._lock_auto_axis(
+                                plot_widget, auto_y_min, auto_y_max, hard_min, hard_max
+                            )
                 except Exception as chart_error:
-                    print(f"⚠️ {chart_name if 'chart_name' in locals() else 'unknown chart'} refresh failed: {chart_error}")
+                    dbg(f"⚠️ {chart_name if 'chart_name' in locals() else 'unknown chart'} refresh failed: {chart_error}")
                     continue
 
             self.render_dynamic_selections()
@@ -1448,19 +1662,19 @@ class SleepMonitorChart(QWidget):
         pg.setConfigOptions(antialias=True)
 
         for position, (name, color, freq, amp, offset, y_min, y_max) in enumerate(ACTIVE_SIGNAL_CONFIGS):
-            print(f"DEBUG: Creating chart for {name} with range {y_min}-{y_max}")
+            dbg(f"DEBUG: Creating chart for {name} with range {y_min}-{y_max}")
             chart = self.create_signal_chart(name, color, freq, amp, offset, y_min, y_max)
             self.charts_layout.addWidget(chart, stretch=1)
             # Track the original order
             self.graph_order.append(name)
         
-        print("DEBUG: All charts created in init_charts")
+        dbg("DEBUG: All charts created in init_charts")
         # INITIAL VIEWBOX SYNC (Fix first-time rendering)
         QTimer.singleShot(150, self._initial_viewbox_sync)
     
     def _initial_viewbox_sync(self):
         """Initial ViewBox synchronization to fix first-time rendering issue"""
-        print("Debug: _initial_viewbox_sync called - fixing first-time rendering")
+        dbg("Debug: _initial_viewbox_sync called - fixing first-time rendering")
         for i in range(self.charts_layout.count()):
             container = self.charts_layout.itemAt(i).widget()
             if hasattr(container, 'plot_widget'):
@@ -1468,13 +1682,13 @@ class SleepMonitorChart(QWidget):
                 
                 # Force X-axis range update
                 start = 0
-                end = self.current_time_window
+                end = self.get_effective_time_window_seconds()
                 pw.setXRange(start, end, padding=0)
                 
                 # Force redraw
                 pw.getViewBox().update()
                 pw.repaint()
-                print(f"Initial ViewBox sync for {pw.chart_name}: {start} → {end}")
+                dbg(f"Initial ViewBox sync for {pw.chart_name}: {start} → {end}")
 
     def _prepare_external_array_signal(
         self,
@@ -1486,12 +1700,15 @@ class SleepMonitorChart(QWidget):
         if len(signal) == 0:
             return signal
 
+        # Keep the gap-fill window tied to the actual sample rate so the
+        # "max ~5 second gap" behavior stays correct for non-10 Hz data.
+        fill_limit = max(1, int(round(float(sample_rate_hz) * 5.0)))
         series = pd.Series(signal).replace([np.inf, -np.inf], np.nan)
         series = series.interpolate(
             method="linear",
             limit_direction="both",
-            limit=50,
-        )  # 10 Hz par max ~5 second ka gap bharega
+            limit=fill_limit,
+        )  # sample_rate_hz par max ~5 second ka gap bharega
         return series.to_numpy(dtype=float)
 
     def _load_uploaded_psg_signals(self, csv_path):
@@ -1533,6 +1750,16 @@ class SleepMonitorChart(QWidget):
                 signals["airflow_enhanced"] = enhanced_airflow
                 signals["airflow_display"] = enhanced_airflow
                 signals["airflow_detection"] = enhanced_airflow
+            elif signal_name == "thorax":
+                raw_thorax = np.asarray(prepared_signal, dtype=float)
+                smoothed_thorax = self.smooth_data(
+                    np.arange(len(raw_thorax), dtype=float),
+                    raw_thorax,
+                    window_size=11,
+                )
+                signals["thorax_raw"] = raw_thorax
+                signals["thorax_smoothed"] = smoothed_thorax
+                signals["thorax_display"] = smoothed_thorax
 
         return time_data, signals
 
@@ -1551,6 +1778,22 @@ class SleepMonitorChart(QWidget):
         selected = variant_map.get(variant)
         if selected is None:
             selected = signals.get("airflow", np.array([]))
+        return np.asarray(selected, dtype=float)
+
+    def _get_thorax_signal_variant(self, variant="display"):
+        """Return the preferred thorax series for raw or smoothed thorax use."""
+        if self.psg_full_data is None or "signals" not in self.psg_full_data:
+            return np.array([])
+
+        signals = self.psg_full_data["signals"]
+        variant_map = {
+            "raw": signals.get("thorax_raw"),
+            "smoothed": signals.get("thorax_smoothed"),
+            "display": signals.get("thorax_smoothed", signals.get("thorax_display")),
+        }
+        selected = variant_map.get(variant)
+        if selected is None:
+            selected = signals.get("thorax", np.array([]))
         return np.asarray(selected, dtype=float)
 
     def save_airflow_smoothing_debug_report(self, csv_path, raw_airflow, enhanced_airflow):
@@ -1696,7 +1939,7 @@ class SleepMonitorChart(QWidget):
                 binned_time = np.concatenate([binned_time, [np.nanmean(remainder_time)]])
                 binned_signal = np.concatenate([binned_signal, [np.nanmean(remainder_signal)]])
 
-        print(
+        dbg(
             f"🔽 Downsampled plot data {sample_count} → {len(binned_signal)} "
             f"(bin_size={bin_size}, max_points={max_points})"
         )
@@ -1735,58 +1978,74 @@ class SleepMonitorChart(QWidget):
         )
 
     def get_airflow_event_baseline(self, airflow, min_occurrence=AIRFLOW_BASELINE_MIN_OCCURRENCE):
-        """Pick the most frequent peak value as the airflow event baseline."""
-        airflow_series = pd.Series(np.asarray(airflow, dtype=float).reshape(-1)).dropna()
-        airflow_series = pd.to_numeric(airflow_series, errors="coerce").dropna()
-        if airflow_series.empty:
+        """Pick the most frequent peak value as the airflow event baseline.
+
+        PERF: identical result to the previous pandas version, but numpy-only
+        (no Series construction / value_counts / Python-level sort). Roughly
+        2x faster, and it is called on every frame for the visible window.
+        """
+        signal = np.asarray(airflow, dtype=float).reshape(-1)
+        signal = signal[np.isfinite(signal)]
+        if signal.size == 0:
             return 0.0, 0
 
-        signal = airflow_series.to_numpy(dtype=float)
         peak_indices, _ = find_peaks(signal)
-        if len(peak_indices) == 0:
-            rounded = airflow_series.round(2)
-            counts = rounded.value_counts()
-        else:
-            counts = pd.Series(signal[peak_indices]).round(2).value_counts()
-        candidates = [
-            (float(value), int(count))
-            for value, count in counts.items()
-            if int(count) >= int(min_occurrence)
-        ]
-        if candidates:
-            candidates.sort(key=lambda item: (item[1], item[0]), reverse=True)
-            return candidates[0]
+        pool = np.round(signal[peak_indices] if peak_indices.size else signal, 2)
+        if pool.size == 0:
+            return 0.0, 0
 
-        fallback_value = float(counts.idxmax())
-        fallback_count = int(counts.max())
-        return fallback_value, fallback_count
+        values, counts = np.unique(pool, return_counts=True)
+        eligible = counts >= int(min_occurrence)
+        if eligible.any():
+            # Highest count wins; ties broken by the larger value.
+            candidate_values = values[eligible]
+            candidate_counts = counts[eligible]
+            best = np.lexsort((candidate_values, candidate_counts))[-1]
+            return float(candidate_values[best]), int(candidate_counts[best])
+
+        best = int(np.argmax(counts))
+        return float(values[best]), int(counts[best])
 
     def get_airflow_display_axis_range(self, airflow):
-        """Return the airflow graph range from zero to baseline plus headroom."""
+        """Return an airflow graph range centered on the actual signal excursion.
+
+        Previously this always started at 0, which meant a normal breathing
+        signal (baseline ~800-950) got squashed into the top ~15% of the
+        plot. Center it the same way the Thorax chart does, using a padded
+        percentile range around the observed values instead of a fixed floor.
+        """
         airflow = np.asarray(airflow, dtype=float).reshape(-1)
         finite_airflow = airflow[np.isfinite(airflow)]
         if finite_airflow.size == 0:
             return 0.0, 100.0
 
-        baseline_airflow, _baseline_occurrence = self.get_airflow_event_baseline(finite_airflow)
-        return 0.0, float(max(baseline_airflow + 20.0, 20.0))
+        return self._auto_axis_range_from_values(finite_airflow, 0.0, 100.0)
 
-    def _lock_auto_axis(self, plot_widget, y_min, y_max):
+    def _lock_auto_axis(self, plot_widget, y_min, y_max, hard_min=None, hard_max=None):
         """Lock an auto-range chart to a data-driven range with limited headroom.
 
         The lock should move with the data, not disappear entirely. That keeps
         zoom/pan bounded while still allowing the visible range to follow the
         current signal window.
+
+        hard_min/hard_max (optional): the TRUE min/max of the signal actually
+        drawn in the current time window (before percentile-trimming). When
+        given, they set a floor under how far the "-" zoom-in button/wheel can
+        shrink the view, so a real peak or trough in the window can never end
+        up clipped outside the visible plot area.
         """
         y_min = float(y_min)
         y_max = float(y_max)
         span = max(y_max - y_min, 1e-6)
-        headroom = span * 0.5
+        chart_name = getattr(plot_widget, "chart_name", "").strip()
+        default_min, default_max = SIGNAL_Y_RANGES.get(chart_name, (y_min, y_max))
+        default_span = max(float(default_max) - float(default_min), span)
+        headroom = max(span * 0.5, default_span * 0.15)
 
         # ADC signals (0..4095) cannot go negative, so keep the zoom-out floor
         # clamped at 0 to prevent the chart from drifting below zero.
-        limit_min = max(y_min - headroom, 0.0)
-        limit_max = y_max + headroom
+        limit_min = max(min(y_min, float(default_min)) - headroom, 0.0)
+        limit_max = max(y_max, float(default_max)) + headroom
 
         try:
             plot_widget.setYRange(y_min, y_max, padding=0)
@@ -1802,8 +2061,21 @@ class SleepMonitorChart(QWidget):
         plot_widget.original_y_max = y_max
         plot_widget.zoom_y_min_limit = limit_min
         plot_widget.zoom_y_max_limit = limit_max
-        plot_widget.zoom_y_min_span = max(span * 0.1, 1e-3)
-        plot_widget.zoom_y_max_span = limit_max - limit_min
+        # FIX: this used to be span * 0.1, letting "-" zoom-in shrink the view
+        # to a tenth of the auto-fit range with nothing stopping it. Any peak
+        # or trough in the window wider than that tiny span would then draw
+        # past the top/bottom of the plot and get clipped at the container's
+        # border. When we know the window's true (untrimmed) min/max, use
+        # that as the floor instead - the view can never get tighter than
+        # what's needed to show every real sample in this window.
+        if hard_min is not None and hard_max is not None:
+            true_span = max(float(hard_max) - float(hard_min), 1e-6)
+            plot_widget.zoom_y_min_span = max(true_span * 1.05, 1e-3)
+        else:
+            plot_widget.zoom_y_min_span = max(span * 0.1, 1e-3)
+        # Cap zoom-out to a few multiples of the actual data span so
+        # auto-range charts cannot be blown up until they look flat again.
+        plot_widget.zoom_y_max_span = min(limit_max - limit_min, span * 6.0)
 
     def _auto_axis_range_from_values(self, values, default_min=0.0, default_max=100.0):
         """Return a padded percentile range for the provided signal values."""
@@ -1818,6 +2090,14 @@ class SleepMonitorChart(QWidget):
         pad = max((float(high) - float(low)) * 0.15, 1.0)
         return float(low) - pad, float(high) + pad
 
+    def _finite_min_max(self, values):
+        """Return (min, max) over the finite samples in values, or (None, None) if none."""
+        series = np.asarray(values, dtype=float).reshape(-1)
+        series = series[np.isfinite(series)]
+        if series.size == 0:
+            return None, None
+        return float(series.min()), float(series.max())
+
     def get_signal_auto_axis_range(self, chart_name):
         """Return the data-driven default Y-axis range for a chart."""
         name = str(chart_name).strip()
@@ -1827,22 +2107,18 @@ class SleepMonitorChart(QWidget):
         if self.psg_full_data is None or "signals" not in self.psg_full_data:
             return SIGNAL_Y_RANGES.get(name, (0.0, 100.0))
 
-        if name == "Airflow":
-            return self.get_airflow_display_axis_range(
-                self._get_airflow_signal_variant("display")
-            )
         if name in AUTO_RANGE_SIGNAL_NAMES:
-            _x_data, y_data = self.get_signal_data_for_window(
-                name,
-                self.get_effective_time_window_seconds(),
-                self.current_time_offset,
-            )
-            fallback_min, fallback_max = SIGNAL_Y_RANGES.get(name, (0.0, 100.0))
-            return self._auto_axis_range_from_values(
-                y_data,
-                fallback_min,
-                fallback_max,
-            )
+            cached = self._auto_axis_range_cache.get(name)
+            if cached is None:
+                fallback_min, fallback_max = SIGNAL_Y_RANGES.get(name, (0.0, 100.0))
+                full_signal = self._get_full_signal_for_auto_range(name)
+                cached = self._auto_axis_range_from_values(
+                    full_signal,
+                    fallback_min,
+                    fallback_max,
+                )
+                self._auto_axis_range_cache[name] = cached
+            return cached
 
         return SIGNAL_Y_RANGES.get(name, (0.0, 100.0))
 
@@ -1860,7 +2136,7 @@ class SleepMonitorChart(QWidget):
 
         y_min, y_max = self.get_signal_auto_axis_range(chart_name)
         self._lock_auto_axis(plot_widget, y_min, y_max)
-        print(f"Applied {chart_name} auto axis range: {y_min} - {y_max}")
+        dbg(f"Applied {chart_name} auto axis range: {y_min} - {y_max}")
 
         
     def load_psg_data(self, csv_path):
@@ -1868,6 +2144,19 @@ class SleepMonitorChart(QWidget):
         try:
             if self.is_playing:
                 self.pause_playback()
+
+            # _clear_auto_detected_selections() below deliberately KEEPS
+            # manually-drawn events (source == "manual") so a same-file
+            # refresh (e.g. after Re-analyze) doesn't wipe them. But when
+            # this call is loading a genuinely different recording, those
+            # leftover manual markers must not carry over onto the new
+            # file's chart - the old file's data is gone, the old manual
+            # events should go with it.
+            previous_csv_path = getattr(self, "loaded_csv_path", None)
+            is_different_file = previous_csv_path is not None and str(csv_path) != str(previous_csv_path)
+            if is_different_file:
+                self.dynamic_selections = {}
+                self.selection_labels = {}
 
             self.current_time_offset = 0
             self.auto_focus_applied = False
@@ -1878,16 +2167,23 @@ class SleepMonitorChart(QWidget):
                 raise ValueError("Uploaded PSG CSV data could not be loaded.")
 
             self.psg_full_data = {"time": time_data, "signals": signals}
+            self.current_psg_data = self.psg_full_data
             self.spo2_full_data = (
                 np.asarray(time_data, dtype=float),
                 np.asarray(signals.get("spo2", []), dtype=float),
             )
             self.loaded_csv_path = str(csv_path)
+            # A fresh load resets session tracking; if this CSV came from a
+            # Records row, database_window.py calls set_current_session()
+            # right after this returns to re-link it.
+            self.current_session_id = None
+            self.current_session_root_id = None
             self._load_manual_label_overrides()
             self.all_psg_mode = False
             self.current_time_window = min(60, int(time_data[-1]) if len(time_data) else 60)
             self.auto_rule_ai_result = None
             self.last_detection_error = None
+            self._invalidate_signal_caches()
             for i in range(self.charts_layout.count()):
                 container = self.charts_layout.itemAt(i).widget()
                 if not container or not hasattr(container, "plot_widget"):
@@ -1918,11 +2214,11 @@ class SleepMonitorChart(QWidget):
                     self.analysis_results,
                     source_csv=csv_path,
                 )
-                print(f"📝 Analysis JSON saved: {self.analysis_json_path}")
+                dbg(f"📝 Analysis JSON saved: {self.analysis_json_path}")
             except Exception as analysis_error:
                 self.analysis_results = None
                 self.analysis_json_path = None
-                print(f"⚠️ Could not calculate/save PSG metrics JSON: {analysis_error}")
+                dbg(f"⚠️ Could not calculate/save PSG metrics JSON: {analysis_error}")
             global_events = self._build_airflow_navigation_events(enhanced_airflow)
             windowed_events = self._build_windowed_airflow_navigation_events(
                 enhanced_airflow,
@@ -1934,21 +2230,25 @@ class SleepMonitorChart(QWidget):
             self.current_window_airflow_events = []
             self.emit_detected_events_panel()
             self.update_detection_summary_label()
-            print(
+            dbg(
                 "✅ Loaded respiratory graph data from uploaded CSV "
                 f"{csv_path}"
             )
-            print(f"   Duration: {time_data[-1]/60:.1f} minutes")
+            dbg(f"   Duration: {time_data[-1]/60:.1f} minutes")
             return time_data, signals
             
         except Exception as e:
-            print(f"❌ Error loading PSG data: {e}")
+            dbg(f"❌ Error loading PSG data: {e}")
             import traceback
             traceback.print_exc()
             # Return empty data if loading fails
+            self._invalidate_signal_caches()
             self.psg_full_data = None
+            self.current_psg_data = None
             self.spo2_full_data = (np.array([]), np.array([]))
             self.loaded_csv_path = None
+            self.current_session_id = None
+            self.current_session_root_id = None
             self.auto_rule_ai_result = None
             self.manual_label_overrides = {}
             self.airflow_detected_events = []
@@ -1995,8 +2295,28 @@ class SleepMonitorChart(QWidget):
         return list(getattr(self, "current_window_airflow_events", []))
 
     def emit_detected_events_panel(self):
-        """Emit the full detected-event list for the side panel."""
-        self.apnea_events_updated.emit(self.get_all_detected_events())
+        """Emit the full detected-event list for the side panel.
+
+        PERF: this was fired from mark_airflow_drop_events() on EVERY frame,
+        so the side panel rebuilt its whole QListWidget ~20 times a second even
+        though the event set almost never changes. Emit only on real changes.
+        """
+        events = self.get_all_detected_events()
+        signature = (
+            len(events),
+            tuple(
+                (
+                    round(float(event.get("start_sec", 0.0)), 3),
+                    round(float(event.get("end_sec", 0.0)), 3),
+                    str(event.get("final_label") or event.get("label") or ""),
+                )
+                for event in events
+            ),
+        )
+        if signature == getattr(self, "_last_events_signature", None):
+            return
+        self._last_events_signature = signature
+        self.apnea_events_updated.emit(events)
 
     def _manual_label_overrides_path(self) -> Path | None:
         if not getattr(self, "loaded_csv_path", None):
@@ -2041,8 +2361,18 @@ class SleepMonitorChart(QWidget):
         if not isinstance(raw_data, dict):
             return
 
+        # New sidecar files are {"label_overrides": {...}, "manual_selections": {...}}.
+        # Old files are just the flat {time_key: label} dict - treat that whole
+        # dict as label_overrides for backward compatibility.
+        if "label_overrides" in raw_data or "manual_selections" in raw_data:
+            label_overrides_raw = raw_data.get("label_overrides") or {}
+            manual_selections_raw = raw_data.get("manual_selections") or {}
+        else:
+            label_overrides_raw = raw_data
+            manual_selections_raw = {}
+
         normalized = {}
-        for key, value in raw_data.items():
+        for key, value in label_overrides_raw.items():
             if isinstance(value, str):
                 normalized[str(key)] = {
                     "label": value,
@@ -2057,6 +2387,84 @@ class SleepMonitorChart(QWidget):
                 }
 
         self.manual_label_overrides = normalized
+        self._load_manual_selections_from_raw(manual_selections_raw)
+
+    def _load_manual_selections_from_raw(self, manual_selections_raw):
+        """Rebuild freely-drawn (Type 2) manual selection boxes from the
+        sidecar JSON's "manual_selections" payload.
+
+        Any manual entries already sitting in memory for a chart are
+        dropped first, so re-loading (e.g. a same-file refresh, where
+        _clear_auto_detected_selections() left the old manual entries in
+        place) doesn't duplicate them - the file on disk is the source
+        of truth for what gets loaded back in.
+        """
+        if not isinstance(manual_selections_raw, dict):
+            manual_selections_raw = {}
+
+        for chart_name in list(self.selection_labels.keys()):
+            self.selection_labels[chart_name] = [
+                sel for sel in self.selection_labels[chart_name]
+                if not (isinstance(sel, dict) and sel.get("source") == "manual")
+            ]
+        for chart_name in list(self.dynamic_selections.keys()):
+            self.dynamic_selections[chart_name] = [
+                sel for sel in self.dynamic_selections[chart_name]
+                if not (isinstance(sel, dict) and sel.get("source") == "manual")
+            ]
+
+        for chart_name, entries in manual_selections_raw.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    start_time = float(entry.get("start_time", entry.get("start", 0.0)))
+                    end_time = float(entry.get("end_time", entry.get("end", 0.0)))
+                except (TypeError, ValueError):
+                    continue
+                label = entry.get("label")
+                if not label:
+                    continue
+
+                color = entry.get("color") or self.get_label_color(label)
+                selection_data = {
+                    "label": label,
+                    "start": start_time,
+                    "end": end_time,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "color": color,
+                    "source": "manual",
+                }
+                dynamic_selection_data = {
+                    "label": label,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "color": color,
+                    "spo2_info": entry.get("spo2_info", ""),
+                    "source": "manual",
+                }
+
+                self.selection_labels.setdefault(chart_name, []).append(selection_data)
+                self.dynamic_selections.setdefault(chart_name, []).append(dynamic_selection_data)
+
+    def _collect_manual_selections_for_save(self):
+        """Pull just the freely-drawn (Type 2) manual boxes out of
+        dynamic_selections, keyed by chart name, ready to write to the
+        sidecar JSON. Auto-detected entries (source == "auto_rule_ai")
+        are excluded.
+        """
+        manual_selections = {}
+        for chart_name, entries in self.dynamic_selections.items():
+            manual_entries = [
+                dict(entry) for entry in entries
+                if isinstance(entry, dict) and entry.get("source") == "manual"
+            ]
+            if manual_entries:
+                manual_selections[chart_name] = manual_entries
+        return manual_selections
 
     def _save_manual_label_overrides(self):
         overrides_path = self._manual_label_overrides_path()
@@ -2065,7 +2473,11 @@ class SleepMonitorChart(QWidget):
 
         try:
             overrides_path.parent.mkdir(parents=True, exist_ok=True)
-            overrides_path.write_text(json.dumps(self.manual_label_overrides, indent=2), encoding="utf-8")
+            payload = {
+                "label_overrides": self.manual_label_overrides,
+                "manual_selections": self._collect_manual_selections_for_save(),
+            }
+            overrides_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as error:
             print(f"⚠️ Could not save manual label overrides: {error}")
 
@@ -2154,10 +2566,74 @@ class SleepMonitorChart(QWidget):
         return True
 
     def clear_all_manual_label_overrides(self):
-        """Clear all manual label overrides before a fresh re-analysis."""
+        """Clear ALL manual events before a fresh, clean re-analysis - both
+        relabeled auto-events (Type 1, manual_label_overrides) and freely
+        -drawn selection boxes (Type 2, selection_labels/dynamic_selections
+        entries with source == "manual").
+        """
         self.manual_label_overrides = {}
+        for chart_name in list(self.selection_labels.keys()):
+            self.selection_labels[chart_name] = [
+                sel for sel in self.selection_labels[chart_name]
+                if not (isinstance(sel, dict) and sel.get("source") == "manual")
+            ]
+        for chart_name in list(self.dynamic_selections.keys()):
+            self.dynamic_selections[chart_name] = [
+                sel for sel in self.dynamic_selections[chart_name]
+                if not (isinstance(sel, dict) and sel.get("source") == "manual")
+            ]
         self._save_manual_label_overrides()
         self._apply_manual_label_overrides_to_auto_result()
+        self.render_dynamic_selections()
+
+    def _clear_manual_events_in_memory(self):
+        """Wipe manual events from the LIVE view only - never touches the
+        sidecar JSON on disk for whatever file is currently loaded.
+
+        This exists specifically for the Re-analyze -> "New report" flow:
+        - Before save (only when the user picked "delete manual events"):
+          clearing here first means the fresh detection pass has nothing
+          to reapply, and _archive_manual_label_overrides_snapshot() then
+          has nothing to write onto the new copy - a clean new report.
+        - After save (always, called from _on_save_done once the archive
+          snapshot has already been written): the manual events that
+          existed at save time are now the new saved report's concern,
+          not the live screen's - the working view goes back to showing
+          just the fresh auto-detected events.
+
+        Using clear_all_manual_label_overrides() for either of the above
+        would be wrong: that method also SAVES the (now empty) state to
+        the sidecar of whichever file is currently open - which, in this
+        flow, is still the ORIGINAL recording. That would silently wipe
+        the original's own manual events from disk, breaking the
+        "Current report manual events are always permanent" rule.
+        """
+        self.manual_label_overrides = {}
+        for chart_name in list(self.selection_labels.keys()):
+            self.selection_labels[chart_name] = [
+                sel for sel in self.selection_labels[chart_name]
+                if not (isinstance(sel, dict) and sel.get("source") == "manual")
+            ]
+        for chart_name in list(self.dynamic_selections.keys()):
+            self.dynamic_selections[chart_name] = [
+                sel for sel in self.dynamic_selections[chart_name]
+                if not (isinstance(sel, dict) and sel.get("source") == "manual")
+            ]
+        self._apply_manual_label_overrides_to_auto_result()
+        self.render_dynamic_selections()
+
+    def has_any_manual_events(self) -> bool:
+        """True if this recording currently has any manual events - either
+        a relabeled auto-detected event (Type 1) or a freely-drawn
+        selection box (Type 2). Used to decide whether the New-report
+        "delete manual events?" prompt needs to be shown at all.
+        """
+        if self.manual_label_overrides:
+            return True
+        for entries in self.selection_labels.values():
+            if any(isinstance(entry, dict) and entry.get("source") == "manual" for entry in entries):
+                return True
+        return False
 
     def _refresh_auto_rule_ai_views(self):
         self._apply_manual_label_overrides_to_auto_result()
@@ -2338,7 +2814,7 @@ class SleepMonitorChart(QWidget):
         events = sorted(self.get_available_navigation_events(), key=lambda event: float(event["start_sec"]))
         if not events:
             return False
-        center_time = self.current_time_offset + (self.current_time_window / 2.0)
+        center_time = self.current_time_offset + (self.get_effective_time_window_seconds() / 2.0)
         for event in events:
             if float(event["start_sec"]) > center_time:
                 return self.focus_on_event(event)
@@ -2349,7 +2825,7 @@ class SleepMonitorChart(QWidget):
         events = sorted(self.get_available_navigation_events(), key=lambda event: float(event["start_sec"]))
         if not events:
             return False
-        center_time = self.current_time_offset + (self.current_time_window / 2.0)
+        center_time = self.current_time_offset + (self.get_effective_time_window_seconds() / 2.0)
         for event in reversed(events):
             if float(event["start_sec"]) < center_time:
                 return self.focus_on_event(event)
@@ -2386,9 +2862,10 @@ class SleepMonitorChart(QWidget):
         first_time = self.format_timestamp(float(first_event["start_sec"])) if first_event else "--:--:--"
         counts_text = " | ".join(f"{label}:{count}" for label, count in sorted(counts.items()))
         status = "focused" if self.auto_focus_applied else "detected"
-        self.detection_summary_label.setText(
-            f"Events: {len(events)} | First: {first_time} | {counts_text} | {status}"
-        )
+        summary_text = f"Events: {len(events)} | First: {first_time} | {counts_text} | {status}"
+        if summary_text != getattr(self, "_last_detection_summary_text", None):
+            self._last_detection_summary_text = summary_text
+            self.detection_summary_label.setText(summary_text)
         if hasattr(self, "jump_to_event_btn"):
             self.jump_to_event_btn.setEnabled(True)
         if hasattr(self, "prev_event_btn"):
@@ -2497,18 +2974,19 @@ class SleepMonitorChart(QWidget):
                 # Apply convolution with 'valid' mode to prevent edge artifacts, then pad
                 y_smooth_valid = np.convolve(y_data, weights, mode='valid')
                 
-                # Pad the smoothed data to match original length using original edge values
-                pad_size = (len(y_data) - len(y_smooth_valid)) // 2
-                y_smooth = np.concatenate([
-                    y_data[:pad_size],  
-                    y_smooth_valid,     
-                    y_data[-pad_size:]  
-                ])
+                # Pad the smoothed data to match original length using original edge values.
+                # Split the padding cleanly so even window sizes do not lose a sample.
+                pad_total = len(y_data) - len(y_smooth_valid)
+                pad_left = pad_total // 2
+                pad_right = pad_total - pad_left
+                left_part = y_data[:pad_left] if pad_left > 0 else y_data[:0]
+                right_part = y_data[-pad_right:] if pad_right > 0 else y_data[:0]
+                y_smooth = np.concatenate([left_part, y_smooth_valid, right_part])
                 
                 return y_smooth
             else:
                 return y_data
-        except:
+        except Exception:
             # Fallback to original data if smoothing fails
             return y_data
     
@@ -2529,13 +3007,15 @@ class SleepMonitorChart(QWidget):
             signal_col = signal_key_for_chart(clean_name)
         
         if signal_col not in signals:
-            print(f"Warning: Signal {signal_name} (mapped to {signal_col}) not found in loaded data")
+            dbg(f"Warning: Signal {signal_name} (mapped to {signal_col}) not found in loaded data")
             return np.array([]), np.array([])
         
         if signal_col == "airflow":
             full_signal = self._get_airflow_signal_variant("display")
+        elif signal_col == "thorax":
+            full_signal = self._get_thorax_signal_variant("display")
         elif signal_col == "body_position":
-            full_signal = self._normalize_body_position_signal(signals[signal_col])
+            full_signal = self._get_body_position_signal()
         else:
             full_signal = signals[signal_col]
 
@@ -2571,13 +3051,13 @@ class SleepMonitorChart(QWidget):
         if signal_col == "airflow":
             nan_count = int(np.count_nonzero(~np.isfinite(window_signal)))
             zero_count = int(np.count_nonzero(window_signal == 0.0))
-            print(
+            dbg(
                 f"DEBUG Airflow window offset={time_offset}s samples={num_samples}/{expected_samples} "
                 f"nan={nan_count} zero={zero_count} "
                 f"start={window_signal[:5]!r} end={window_signal[-5:]!r}"
             )
         
-        print(f"{signal_name} window: {time_window_seconds}s, Samples: {num_samples}, Expected: {expected_samples}")
+        dbg(f"{signal_name} window: {time_window_seconds}s, Samples: {num_samples}, Expected: {expected_samples}")
         
         return window_time, window_signal
     
@@ -2637,7 +3117,7 @@ class SleepMonitorChart(QWidget):
         if num_samples == 0:
             return np.array([]), np.array([])
 
-        print(f"SpO2 window: {time_window_seconds}s, Samples: {num_samples}, Expected: {expected_samples}")
+        dbg(f"SpO2 window: {time_window_seconds}s, Samples: {num_samples}, Expected: {expected_samples}")
         
         return window_time, window_spo2
 
@@ -2691,7 +3171,8 @@ class SleepMonitorChart(QWidget):
                 variability_score=0.0,
                 duration_sec=float(duration_sec) if duration_sec is not None else None,
             )
-        except Exception:
+        except Exception as classify_error:
+            dbg(f"classify_airflow_event failed, defaulting to NO_EVENT: {classify_error}")
             return "NO_EVENT"
 
     def _build_airflow_navigation_events(self, airflow, fs=EXTERNAL_ARRAY_SAMPLE_RATE_HZ):
@@ -2950,7 +3431,7 @@ class SleepMonitorChart(QWidget):
 
             x1 = float(x_data[event_start])
             x2 = float(x_data[event_end]) + plot_step
-            x2 = min(x2, float(self.current_time_window))
+            x2 = min(x2, float(self.get_effective_time_window_seconds()))
             if x2 <= x1:
                 x2 = x1 + plot_step
 
@@ -2994,7 +3475,7 @@ class SleepMonitorChart(QWidget):
                 f"{event_label}  |  {self.format_timestamp(start_time_abs)} → "
                 f"{self.format_timestamp(end_time_abs)}  |  {self.format_duration(duration_sec)}"
             )
-            block.setStyleSheet(f"""
+            block_style = f"""
                 background-color: rgba({red}, {green}, {blue}, 0.35);
                 border: none;
                 border-radius: 0px;
@@ -3003,7 +3484,10 @@ class SleepMonitorChart(QWidget):
                 font-weight: 800;
                 letter-spacing: 0.4px;
                 padding: 0px 2px;
-            """)
+            """
+            if getattr(block, "_applied_style", None) != block_style:
+                block._applied_style = block_style
+                block.setStyleSheet(block_style)
             block.setGeometry(int(x_min), 0, int(width), 15)
             block.selection_id = self._get_selection_id(selection_data)
             block.mousePressEvent = lambda event, ov=block, cn=getattr(plot_widget, "chart_name", "Airflow"): self.handle_overlay_click(event, ov, cn)
@@ -3098,7 +3582,6 @@ class SleepMonitorChart(QWidget):
                     stop: 1 #e2e8f0
                 );
                 border: 2px solid #cbd5e1;
-                border-bottom: 3px solid #000000;
                 border-radius: 8px;
                 margin: 2px;
             }
@@ -3111,7 +3594,6 @@ class SleepMonitorChart(QWidget):
                     stop: 1 #bae6fd
                 );
                 border: 2px solid #3b82f6;
-                border-bottom: 3px solid #000000;
             }
         """)
         container_layout = QHBoxLayout(container)
@@ -3456,15 +3938,16 @@ class SleepMonitorChart(QWidget):
         except Exception:
             pass
         
-        # Set X-axis range to show time window from 0 to current_time_window
-        plot_widget.setXRange(0, self.current_time_window)
+        # Set X-axis range to the visible window (clamped to available data)
+        visible_window = self.get_effective_time_window_seconds()
+        plot_widget.setXRange(0, visible_window, padding=0)
         
         # Set time window limits on CustomViewBox to enforce zoom constraints
         vb = plot_widget.getViewBox()
         if hasattr(vb, "owner_plot_widget"):
             vb.owner_plot_widget = plot_widget
         if hasattr(vb, 'set_time_window_limits'):
-            vb.set_time_window_limits(0, self.current_time_window)
+            vb.set_time_window_limits(0, visible_window)
         
         plot_widget.setMouseEnabled(x=False, y=True)
         plot_widget.hideButtons()  # Hide the 'A' button
@@ -3485,13 +3968,13 @@ class SleepMonitorChart(QWidget):
         if name.strip() == "SpO2":
             # Get SpO2 data for current time window
             # Get filtered data for current time window
-            x, y = self.get_spo2_data_for_window(self.current_time_window, self.current_time_offset)
+            x, y = self.get_spo2_data_for_window(visible_window, self.current_time_offset)
 
             if len(x) > 0 and len(y) > 0:
                 # Use real SpO2 data as-is (no artificial baseline correction)
                 print(f"Using real SpO2 data: {len(y)} points, range: {np.min(y):.1f}-{np.max(y):.1f}")
         else:
-            x, y = self.get_signal_data_for_window(name, self.current_time_window, self.current_time_offset)
+            x, y = self.get_signal_data_for_window(name, visible_window, self.current_time_offset)
             if len(x) > 0 and len(y) > 0:
                 print(f"Using real {name} data: {len(y)} points, range: {np.min(y):.1f}-{np.max(y):.1f}")
         
@@ -3508,11 +3991,12 @@ class SleepMonitorChart(QWidget):
             plot_curve = plot_widget.plot(x, y, pen=pen, fill=None, connect='finite')
 
         if name.strip() in AUTO_RANGE_SIGNAL_NAMES:
-            auto_y_min, auto_y_max = self.get_signal_auto_axis_range(name.strip())
+            fallback_min, fallback_max = SIGNAL_Y_RANGES.get(name.strip(), (0.0, 100.0))
+            auto_y_min, auto_y_max = self._auto_axis_range_from_values(y, fallback_min, fallback_max)
             self._lock_auto_axis(plot_widget, auto_y_min, auto_y_max)
         if name.strip() == "Airflow":
             _event_x, detection_y = self.get_airflow_detection_data_for_window(
-                self.current_time_window,
+                visible_window,
                 self.current_time_offset,
             )
             self.mark_airflow_drop_events(
@@ -3525,11 +4009,11 @@ class SleepMonitorChart(QWidget):
         # Add value labels for SpO2 graph - only in 10s-30s time window
         if name.strip() == "SpO2" and len(x) > 0 and len(y) > 0:
             # Check if current time window is between 10s and 30s
-            if 10 <= self.current_time_window <= 30:
+            if 10 <= visible_window <= 30:
                 # Add value labels on the graph (positioned exactly on data points)
-                self.add_spo2_value_labels(plot_widget, x, y, self.current_time_window)
+                self.add_spo2_value_labels(plot_widget, x, y, visible_window)
                 
-                print(f"SpO2 value labels enabled for {self.current_time_window}s time window")
+                print(f"SpO2 value labels enabled for {visible_window}s time window")
             else:
                 # Time window is outside 10s-30s range, no value labels
                 # Clear value labels if they exist
@@ -3965,11 +4449,25 @@ class SleepMonitorChart(QWidget):
         """Reset zoom to original medical standard range"""
         # Get the chart name from the plot widget
         chart_name = getattr(plot_widget, 'chart_name', '')
-        if chart_name.strip() in AUTO_RANGE_SIGNAL_NAMES:
-            y_min, y_max = self.get_signal_auto_axis_range(chart_name)
+        clean_name = chart_name.strip()
+        if clean_name in AUTO_RANGE_SIGNAL_NAMES:
+            # FIX: this used to call get_signal_auto_axis_range(), which
+            # returns the WHOLE-RECORDING cached range - not the tight
+            # per-window range the redraw loop now uses. Pressing Reset would
+            # therefore snap Thorax/Airflow back to the old too-wide range
+            # (looking flat) until the next scroll/redraw recomputed it.
+            # Recompute from the currently visible window instead, same as
+            # the redraw path, so Reset matches what's actually on screen.
+            _reset_x, reset_y = self.get_signal_data_for_window(
+                clean_name, self.get_effective_time_window_seconds(), self.current_time_offset
+            )
+            fallback_min, fallback_max = SIGNAL_Y_RANGES.get(clean_name, (0.0, 100.0))
+            y_min, y_max = self._auto_axis_range_from_values(reset_y, fallback_min, fallback_max)
+            hard_min, hard_max = self._finite_min_max(reset_y)
+            self._lock_auto_axis(plot_widget, y_min, y_max, hard_min, hard_max)
         else:
-            y_min, y_max = SIGNAL_Y_RANGES.get(chart_name.strip(), (0, 100))
-        
+            y_min, y_max = SIGNAL_Y_RANGES.get(clean_name, (0, 100))
+
         try:
             plot_widget.setYRange(y_min, y_max)
        
@@ -3989,10 +4487,14 @@ class SleepMonitorChart(QWidget):
             # Jump forward by current time window
             self.current_time = self.current_time.addSecs(self.current_time_window)
             
-            #  UPDATE OFFSET
-            self.current_time_offset += self.current_time_window
-            
+            #  UPDATE OFFSET (never scroll past the end of the recording)
+            self.current_time_offset = min(
+                self._get_playback_max_offset(),
+                self.current_time_offset + self.current_time_window,
+            )
+
             #  FORCE VIEWBOX UPDATE AND PLOT REDRAW
+            end = self.get_effective_time_window_seconds()
             for i in range(self.charts_layout.count()):
                 container = self.charts_layout.itemAt(i).widget()
                 if hasattr(container, 'plot_widget'):
@@ -4000,7 +4502,6 @@ class SleepMonitorChart(QWidget):
                     
                     # Force X-axis range update
                     start = 0
-                    end = self.current_time_window
                     pw.setXRange(start, end, padding=0)
                     
                     # Force redraw
@@ -4105,12 +4606,12 @@ class SleepMonitorChart(QWidget):
     
     def create_spo2_markers_and_labels(self, plot_widget, x_data, y_data):
         """Create value labels for SpO2 when they don't exist (no scatter plot dots)"""
-        print(f"DEBUG: create_spo2_markers_and_labels called with {len(x_data)} points")
+        dbg(f"DEBUG: create_spo2_markers_and_labels called with {len(x_data)} points")
         
         # Add value labels on the graph (positioned exactly on data points)
-        self.add_spo2_value_labels(plot_widget, x_data, y_data, self.current_time_window)
+        self.add_spo2_value_labels(plot_widget, x_data, y_data, self.get_effective_time_window_seconds())
         
-        print(f"Created SpO2 value labels for {self.current_time_window}s time window")
+        dbg(f"Created SpO2 value labels for {self.current_time_window}s time window")
     
     def add_spo2_value_labels(self, plot_widget, x_data, y_data, time_window):
         """Add value labels on SpO2 graph at regular intervals like in the image"""
@@ -4944,6 +5445,12 @@ class SleepMonitorChart(QWidget):
         self.selection_labels[chart_name].append(selection_data)
         self.dynamic_selections[chart_name].append(dynamic_selection_data)
 
+        # Persist this freely-drawn manual box to the sidecar JSON right
+        # away, same as a relabeled auto-event does - so it survives a
+        # Current-report re-analyze and is available to archive if this
+        # session is later saved as a New report.
+        self._save_manual_label_overrides()
+
      
         if hasattr(plot_widget, 'selection_overlay'):
             plot_widget.selection_overlay.setVisible(False)
@@ -5079,9 +5586,13 @@ class SleepMonitorChart(QWidget):
         if chart_name in self.dynamic_selections:
             # Find and remove matching dynamic selection
             self.dynamic_selections[chart_name] = [
-                sel for sel in self.dynamic_selections[chart_name] 
+                sel for sel in self.dynamic_selections[chart_name]
                 if self._get_selection_id(sel) != overlay_id
             ]
+
+        # Keep the sidecar JSON in sync so a deleted manual box doesn't
+        # reappear next time this file is loaded.
+        self._save_manual_label_overrides()
 
         # Re-render selections to update positions
         self.render_dynamic_selections()
@@ -5114,7 +5625,9 @@ class SleepMonitorChart(QWidget):
         return str(selection)
     
     def enforce_fixed_ranges(self):
-        """Continuously enforce fixed X-axis ranges on all charts"""
+        """Continuously enforce fixed X-axis ranges on all charts."""
+        if self.is_playing:
+            return
         if self.is_all_psg_mode():
             fixed_end = self._get_playback_max_duration()
         else:
@@ -5134,7 +5647,7 @@ class SleepMonitorChart(QWidget):
                             abs(current_range[0][0] - plot_widget.fixed_range[0]) > 1e-3
                             or abs(current_range[0][1] - plot_widget.fixed_range[1]) > 1e-3
                         ):
-                            print(f"🔧 FIXING ViewBox {plot_widget.chart_name}: {current_range[0]} → {plot_widget.fixed_range}")
+                            dbg(f"🔧 FIXING ViewBox {plot_widget.chart_name}: {current_range[0]} → {plot_widget.fixed_range}")
                         plot_widget.setXRange(plot_widget.fixed_range[0], plot_widget.fixed_range[1], padding=0)
                     except:
                         pass  
@@ -5224,10 +5737,14 @@ class SleepMonitorChart(QWidget):
                     # Find and remove the corresponding dynamic selection
                     removed_id = self._get_selection_id(removed_label)
                     self.dynamic_selections[chart_name] = [
-                        sel for sel in self.dynamic_selections[chart_name] 
+                        sel for sel in self.dynamic_selections[chart_name]
                         if self._get_selection_id(sel) != removed_id
                     ]
                 
+                # Keep the sidecar JSON in sync so a deleted manual box
+                # doesn't reappear next time this file is loaded.
+                self._save_manual_label_overrides()
+
                 # Re-render selections to update overlays with error handling
                 try:
                     self.render_dynamic_selections()
@@ -5403,11 +5920,12 @@ class SleepMonitorChart(QWidget):
                 if not (container and hasattr(container, 'findChildren')):
                     continue
 
-                plots = container.findChildren(pg.PlotWidget)
-                if not plots:
-                    continue
-
-                plot_widget = plots[0]
+                plot_widget = getattr(container, 'plot_widget', None)
+                if plot_widget is None:
+                    plots = container.findChildren(pg.PlotWidget)
+                    if not plots:
+                        continue
+                    plot_widget = plots[0]
                 if not hasattr(plot_widget, 'chart_name'):
                     continue
                 chart_name = plot_widget.chart_name
@@ -5420,7 +5938,7 @@ class SleepMonitorChart(QWidget):
                                 overlay.hide()
                                 overlay.setGeometry(-1000, -1000, 1, 1)
                         except Exception as e:
-                            print(f"Warning: Could not hide overlay: {e}")
+                            dbg(f"Warning: Could not hide overlay: {e}")
                             continue
 
                 if chart_name not in self.dynamic_selections:
@@ -5439,7 +5957,7 @@ class SleepMonitorChart(QWidget):
                             start_time_rel = start_time_abs - self.current_time_offset
                             end_time_rel = end_time_abs - self.current_time_offset
                             visible_start = 0.0
-                            visible_end = self.current_time_window
+                            visible_end = self.get_effective_time_window_seconds()
 
                         if not (end_time_rel >= visible_start and start_time_rel <= visible_end):
                             continue
@@ -5487,7 +6005,7 @@ class SleepMonitorChart(QWidget):
 {selection_data['spo2_info']}
 """
                         overlay.setText(full_text)
-                        overlay.setStyleSheet(f"""
+                        overlay_style = f"""
                             background-color: {selection_data['color']};
                             border: 1px solid rgba(0, 0, 0, 0.25);
                             border-radius: 6px;
@@ -5495,7 +6013,10 @@ class SleepMonitorChart(QWidget):
                             font-size: 10px;
                             font-weight: bold;
                             padding: 2px;
-                        """)
+                        """
+                        if getattr(overlay, "_applied_style", None) != overlay_style:
+                            overlay._applied_style = overlay_style
+                            overlay.setStyleSheet(overlay_style)
 
                         overlay.mousePressEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_click(event, ov, cn)
                         overlay.mouseDoubleClickEvent = lambda event, ov=overlay, cn=chart_name: self.handle_overlay_double_click(event, ov, cn)
@@ -5520,15 +6041,15 @@ class SleepMonitorChart(QWidget):
                             overlay.selection_id = self._get_selection_id(selection_data)
                             overlay.show()
 
-                            print(
+                            dbg(
                                 f"Rendered selection '{selection_data['label']}' on {chart_name} "
                                 f"at {start_time_clamped:.1f}s-{end_time_clamped:.1f}s"
                             )
                     except Exception as e:
-                        print(f"Error rendering selection overlay: {e}")
+                        dbg(f"Error rendering selection overlay: {e}")
                         continue
         except Exception as e:
-            print(f"Error in render_dynamic_selections: {e}")
+            dbg(f"Error in render_dynamic_selections: {e}")
         finally:
             self._rendering_selections = False
 

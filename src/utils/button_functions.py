@@ -694,20 +694,83 @@ class ButtonFunctions:
             print("Tools -> Re-analyze cancelled")
             return
 
-        if hasattr(monitor_chart, "clear_all_manual_label_overrides"):
-            monitor_chart.clear_all_manual_label_overrides()
+        if clicked is new_report_btn:
+            self._reanalyze_as_new_report(monitor_chart)
+            return
+
+        monitor_chart.run_rule_ai_apnea_detection()
+        self._show_reanalyze_summary(monitor_chart, "current report")
+
+    def _reanalyze_as_new_report(self, monitor_chart):
+        """"New report": ask (only if manual events exist) whether to drop
+        them, apply that choice, re-detect, then save.
+
+        confirm_and_save_raw_data() archives whatever is currently in
+        monitor_chart.manual_label_overrides alongside the saved copy (see
+        _archive_manual_label_overrides_snapshot in sleep_monitor_chart.py).
+        So: "keep them" here means they travel with the new saved session
+        and show up again when it is reopened later; "delete them" clears
+        them first, so the save is clean and the live view is clean too.
+        """
+        # has_any_manual_events() checks BOTH kinds of manual events -
+        # relabeled auto-events (manual_label_overrides) and freely-drawn
+        # selection boxes (selection_labels/dynamic_selections). Fall back
+        # to the old manual_label_overrides-only check if it's missing.
+        if hasattr(monitor_chart, "has_any_manual_events"):
+            has_manual_edits = monitor_chart.has_any_manual_events()
+        else:
+            has_manual_edits = bool(getattr(monitor_chart, "manual_label_overrides", None))
+        if has_manual_edits:
+            delete_manual_events = self._ask_delete_manual_events_for_new_report()
+            if delete_manual_events and hasattr(monitor_chart, "_clear_manual_events_in_memory"):
+                # In-memory only - NOT clear_all_manual_label_overrides(),
+                # which also saves the (now empty) state to disk. That
+                # would wipe the ORIGINAL recording's own permanent
+                # manual events, which must never happen: only the new
+                # report being created here should end up without them.
+                monitor_chart._clear_manual_events_in_memory()
 
         monitor_chart.run_rule_ai_apnea_detection()
 
+        if hasattr(monitor_chart, "confirm_and_save_raw_data"):
+            # Saving is async (QThread). Once it finishes,
+            # _on_save_done() in sleep_monitor_chart.py archives whatever
+            # manual-event state exists at that moment onto the new saved
+            # copy, THEN clears the live view back to auto-events-only -
+            # so the screen you're looking at right now will update to a
+            # clean view a moment after this call returns, without ever
+            # touching the original recording's own sidecar on disk.
+            monitor_chart.confirm_and_save_raw_data()
+
+        self._show_reanalyze_summary(monitor_chart, "new report")
+
+    def _ask_delete_manual_events_for_new_report(self):
+        """Yes/No: should the new report drop this recording's manual events?
+
+        Returns True for "delete them", False for "keep them". Defaults to
+        keeping them (the non-destructive choice) if the dialog is dismissed
+        without a clear answer.
+        """
+        confirm_box = QMessageBox(self.parent)
+        confirm_box.setIcon(QMessageBox.Question)
+        confirm_box.setWindowTitle("Manual Events")
+        confirm_box.setText(
+            "This recording has manually edited/added events.\n\n"
+            "Delete the manual events for this new report?\n\n"
+            "Yes, delete - save with fresh auto-detected events only.\n"
+            "No, keep them - the new report keeps the manual events too."
+        )
+        yes_btn = confirm_box.addButton("Yes, delete", QMessageBox.YesRole)
+        no_btn = confirm_box.addButton("No, keep them", QMessageBox.NoRole)
+        confirm_box.setDefaultButton(no_btn)
+        confirm_box.exec_()
+        return confirm_box.clickedButton() is yes_btn
+
+    def _show_reanalyze_summary(self, monitor_chart, report_choice):
         event_count = 0
         auto_result = getattr(monitor_chart, "auto_rule_ai_result", None)
         if isinstance(auto_result, dict):
             event_count = len(auto_result.get("events", []))
-
-        if clicked is new_report_btn and hasattr(monitor_chart, "confirm_and_save_raw_data"):
-            monitor_chart.confirm_and_save_raw_data()
-
-        report_choice = "new report" if clicked is new_report_btn else "current report"
         print(f"Tools -> Re-analyze complete ({report_choice}), {event_count} events detected")
 
         QMessageBox.information(
@@ -862,6 +925,22 @@ class ButtonFunctions:
 
         apnea_detector.apply_analysis_parameters(parameters)
         print(f"Tools -> Analysis parameters applied: {parameters}")
+
+        # Hypopnea / Snoring / Desaturation / CSR tab values.
+        # Kept separate so the apnea detector only receives the constants it
+        # knows; they are applied only if the detector exposes a setter, and
+        # are always cached on the window for the rest of the app to read.
+        extra_parameters = dialog.get_extra_parameters()
+        if extra_parameters is not None:
+            self.parent.analysis_extra_parameters = extra_parameters
+            if monitor_chart is not None:
+                monitor_chart.analysis_extra_parameters = extra_parameters
+            if hasattr(apnea_detector, "apply_extra_analysis_parameters"):
+                try:
+                    apnea_detector.apply_extra_analysis_parameters(extra_parameters)
+                except Exception as extra_error:
+                    print(f"Extra analysis parameters not applied: {extra_error}")
+            print(f"Tools -> Extra analysis parameters: {extra_parameters}")
         msg_box = QMessageBox(self.parent)
         msg_box.setWindowTitle("Analysis Parameters")
         msg_box.setText("New parameters applied. Run Re-analyze to use them on the current data.")
@@ -1752,10 +1831,10 @@ class EDFExportDialog(QDialog):
             checkbox.setChecked(checked)
     
     def load_standard_parameters(self):
-        """Load standard parameters"""
+        """Load standard parameter"""
         self._set_all_checkboxes(self.channel_checkboxes, True)
         self._set_all_checkboxes(self.event_checkboxes, True)
-        QMessageBox.information(self, "Standard Parameters", "Standard parameters loaded")
+        QMessageBox.information(self, "Standard parameter", "Standard parameter loaded")
     
     def get_export_settings(self):
         """Get current export settings"""
@@ -1771,14 +1850,14 @@ class EDFExportDialog(QDialog):
 
 class AnalysisParametersDialog(QDialog):
     """Dialog for analysis parameters settings"""
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Analysis parameters")
-        self.setMinimumWidth(640)
-        self.setMinimumHeight(420)
+        self.setMinimumWidth(760)
+        self.setMinimumHeight(520)
         self.init_ui()
-    
+
     def init_ui(self):
         """Initialize the dialog UI"""
         self.setStyleSheet("""
@@ -1864,21 +1943,104 @@ class AnalysisParametersDialog(QDialog):
             QPushButton#standardButton:hover {
                 background-color: #eff6ff;
             }
+            QTabWidget::pane {
+                border: 1px solid #e2e5ea;
+                border-radius: 8px;
+                background-color: #ffffff;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background-color: #eef2f7;
+                color: #374151;
+                border: 1px solid #e2e5ea;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                padding: 8px 20px;
+                margin-right: 2px;
+                font-size: 12px;
+                font-weight: 600;
+                min-width: 92px;
+            }
+            QTabBar::tab:selected {
+                background-color: #2563eb;
+                color: #ffffff;
+                border: 1px solid #1e40af;
+                border-bottom: none;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #dbe4f0;
+            }
+            QGroupBox {
+                border: 1px solid #e2e5ea;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 12px 10px 10px 10px;
+                background-color: #ffffff;
+                font-size: 12px;
+                font-weight: 600;
+                color: #2563eb;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 0px 6px;
+            }
+            QCheckBox {
+                color: #111827;
+                font-size: 13px;
+                font-weight: 500;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 15px;
+                height: 15px;
+                border: 1.5px solid #9ca3af;
+                border-radius: 3px;
+                background-color: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #2563eb;
+                border: 1.5px solid #1e40af;
+            }
         """)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(22, 20, 22, 16)
         main_layout.setSpacing(10)
 
-        # Only the Apnea section is wired to the real detector right now.
-        # Hypopnea/Snoring/Desaturation/CSR setup methods stay in this file
-        # (untouched, further down) but are intentionally not called here.
-        self.setup_apnea_tab(main_layout)
+        # ------------------------------------------------------------------
+        # 4 tabs: Apnea | Hypopnea | Snoring | Desaturation
+        # CSR tab is hidden for now.
+        # ------------------------------------------------------------------
+        self.tabs = QTabWidget()
+
+        self.apnea_tab = QWidget()
+        self.hypopnea_tab = QWidget()
+        self.snoring_tab = QWidget()
+        self.desaturation_tab = QWidget()
+
+        self.tabs.addTab(self.apnea_tab, "Apnea")
+        self.tabs.addTab(self.hypopnea_tab, "Hypopnea")
+        self.tabs.addTab(self.snoring_tab, "Snoring")
+        self.tabs.addTab(self.desaturation_tab, "Desaturation")
+
+        apnea_layout = QVBoxLayout(self.apnea_tab)
+        apnea_layout.setContentsMargins(16, 14, 16, 12)
+        apnea_layout.setSpacing(8)
+        self.setup_apnea_tab(apnea_layout)
+
+        self.setup_hypopnea_tab()
+        self.setup_snoring_tab()
+        self.setup_desaturation_tab()
+
+        main_layout.addWidget(self.tabs)
 
         # Buttons
         button_layout = QHBoxLayout()
 
-        standard_button = QPushButton("Standard Parameters")
+        standard_button = QPushButton("standard parameters")
         standard_button.setObjectName("standardButton")
         standard_button.clicked.connect(self.standard_parameter)
         button_layout.addWidget(standard_button)
@@ -1896,7 +2058,7 @@ class AnalysisParametersDialog(QDialog):
         button_layout.addWidget(ok_button)
 
         main_layout.addLayout(button_layout)
-    
+
     def setup_apnea_tab(self, layout):
         current = {}
         if apnea_detector is not None:
@@ -2028,9 +2190,359 @@ class AnalysisParametersDialog(QDialog):
 
         layout.addWidget(duration_frame)
         layout.addStretch()
+
     def setup_hypopnea_tab(self):
-        """Setup Hypopnea tab EXACT like reference UI"""
+        """Setup the hypopnea tab."""
         layout = QVBoxLayout(self.hypopnea_tab)
+
+        classic_group = QGroupBox("Classic definition")
+        classic_layout = QVBoxLayout()
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Threshold:"))
+        self.hypopnea_classic_threshold = QLineEdit("50")
+        self.hypopnea_classic_threshold.setFixedWidth(50)
+        row1.addWidget(self.hypopnea_classic_threshold)
+
+        row1.addWidget(QLabel("%  [1-90]   = flow reduction of"))
+
+        self.hypopnea_classic_flow_reduction = QLineEdit("50")
+        self.hypopnea_classic_flow_reduction.setFixedWidth(50)
+        row1.addWidget(self.hypopnea_classic_flow_reduction)
+
+        row1.addWidget(QLabel("%"))
+        row1.addStretch()
+
+        classic_layout.addLayout(row1)
+        classic_group.setLayout(classic_layout)
+        layout.addWidget(classic_group)
+
+        aasm_group = QGroupBox("")
+        aasm_layout = QVBoxLayout()
+
+        row2 = QHBoxLayout()
+
+        self.hypopnea_aasm_checkbox = QCheckBox("AASM definition")
+        self.hypopnea_aasm_checkbox.setChecked(True)
+        row2.addWidget(self.hypopnea_aasm_checkbox)
+
+        row2.addSpacing(20)
+
+        row2.addWidget(QLabel("Threshold:"))
+        self.hypopnea_aasm_threshold = QLineEdit("70")
+        self.hypopnea_aasm_threshold.setFixedWidth(50)
+        row2.addWidget(self.hypopnea_aasm_threshold)
+
+        row2.addWidget(QLabel("%  [1-90]   = flow reduction of"))
+
+        self.hypopnea_aasm_flow_reduction = QLineEdit("30")
+        self.hypopnea_aasm_flow_reduction.setFixedWidth(50)
+        row2.addWidget(self.hypopnea_aasm_flow_reduction)
+
+        row2.addWidget(QLabel("%"))
+        row2.addStretch()
+
+        aasm_layout.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        row3.addSpacing(30)
+        row3.addWidget(QLabel("Signal quality switch:"))
+
+        self.hypopnea_aasm_signal_quality = QLineEdit("5")
+        self.hypopnea_aasm_signal_quality.setFixedWidth(50)
+        row3.addWidget(self.hypopnea_aasm_signal_quality)
+
+        row3.addWidget(QLabel("[0-20]"))
+        row3.addStretch()
+
+        aasm_layout.addLayout(row3)
+
+        aasm_group.setLayout(aasm_layout)
+        layout.addWidget(aasm_group)
+
+        duration_group = QGroupBox("")
+        duration_layout = QHBoxLayout()
+
+        duration_layout.addWidget(QLabel("Min. duration:"))
+        self.hypopnea_min_duration = QLineEdit("10")
+        self.hypopnea_min_duration.setFixedWidth(50)
+        duration_layout.addWidget(self.hypopnea_min_duration)
+
+        duration_layout.addWidget(QLabel("s  [1-20]"))
+        duration_layout.addSpacing(30)
+
+        duration_layout.addWidget(QLabel("Max. duration:"))
+        self.hypopnea_max_duration = QLineEdit("100")
+        self.hypopnea_max_duration.setFixedWidth(50)
+        duration_layout.addWidget(self.hypopnea_max_duration)
+
+        duration_layout.addWidget(QLabel("s  [1-120]"))
+        duration_layout.addStretch()
+
+        duration_group.setLayout(duration_layout)
+        layout.addWidget(duration_group)
+
+        resp_group = QGroupBox("")
+        resp_layout = QHBoxLayout()
+
+        resp_layout.addWidget(QLabel("Maximum respiratory mean time when linking apneas/hypopneas:"))
+
+        self.hypopnea_respiratory_mean_time = QLineEdit("1.0")
+        self.hypopnea_respiratory_mean_time.setFixedWidth(60)
+        resp_layout.addWidget(self.hypopnea_respiratory_mean_time)
+
+        resp_layout.addWidget(QLabel("s  [0.0 - 1.5]"))
+        resp_layout.addStretch()
+
+        resp_group.setLayout(resp_layout)
+        layout.addWidget(resp_group)
+
+        note = QLabel("Time value of 0 means linking is turned off")
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(note)
+
+        layout.addStretch()
+
+    def setup_snoring_tab(self):
+        layout = QVBoxLayout(self.snoring_tab)
+
+        main_row = QHBoxLayout()
+        left_col = QVBoxLayout()
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Threshold for\n-> snoring:"))
+        self.snoring_threshold = QLineEdit("6.0")
+        self.snoring_threshold.setFixedWidth(50)
+        row1.addWidget(self.snoring_threshold)
+        row1.addWidget(QLabel("%  [1.5 - 10.0]"))
+        row1.addStretch()
+        left_col.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Min. length of a\nsnoring event:"))
+        self.snoring_min_duration = QLineEdit("0.3")
+        self.snoring_min_duration.setFixedWidth(50)
+        row2.addWidget(self.snoring_min_duration)
+        row2.addWidget(QLabel("s  [0.3 - 0.9]"))
+        row2.addStretch()
+        left_col.addLayout(row2)
+
+        right_col = QVBoxLayout()
+
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Max. duration of a\nsnoring event:"))
+        self.snoring_max_duration = QLineEdit("3.5")
+        self.snoring_max_duration.setFixedWidth(50)
+        row3.addWidget(self.snoring_max_duration)
+        row3.addWidget(QLabel("s  [2.0 - 5.0]"))
+        row3.addStretch()
+        right_col.addLayout(row3)
+
+        row4 = QHBoxLayout()
+        row4.addWidget(QLabel("Max. resp. snoring\nmean time:"))
+        self.snoring_mean_time = QLineEdit("0.5")
+        self.snoring_mean_time.setFixedWidth(50)
+        row4.addWidget(self.snoring_mean_time)
+        row4.addWidget(QLabel("s  [0.0 - 2.0]"))
+        row4.addStretch()
+        right_col.addLayout(row4)
+
+        main_row.addLayout(left_col)
+        main_row.addSpacing(40)
+        main_row.addLayout(right_col)
+
+        layout.addLayout(main_row)
+
+        note = QLabel("Time value of 0 means linking is turned off")
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(note)
+
+        layout.addStretch()
+
+    def setup_desaturation_tab(self):
+        layout = QVBoxLayout(self.desaturation_tab)
+
+        main_row = QHBoxLayout()
+        label = QLabel("Threshold for oxygen\ndesaturation:")
+        main_row.addWidget(label)
+
+        self.desaturation_threshold = QLineEdit("4")
+        self.desaturation_threshold.setFixedWidth(50)
+        main_row.addWidget(self.desaturation_threshold)
+
+        main_row.addWidget(QLabel("%  [3 - 5]"))
+        main_row.addStretch()
+
+        layout.addLayout(main_row)
+        layout.addStretch()
+
+    # def setup_csr_tab(self):
+    #     layout = QVBoxLayout(self.csr_tab)
+    #
+    #     self.csr_checkbox = QCheckBox("Run CSR analysis")
+    #     self.csr_checkbox.setChecked(True)
+    #     layout.addWidget(self.csr_checkbox)
+    #
+    #     main_row = QHBoxLayout()
+    #     label = QLabel("Threshold for CSR detection")
+    #     main_row.addWidget(label)
+    #
+    #     self.csr_threshold = QLineEdit("0.5")
+    #     self.csr_threshold.setFixedWidth(50)
+    #     main_row.addWidget(self.csr_threshold)
+    #
+    #     range_label = QLabel("[0.2 - 0.8]")
+    #     main_row.addWidget(range_label)
+    #     main_row.addStretch()
+    #
+    #     layout.addLayout(main_row)
+    #     layout.addStretch()
+
+    def standard_parameter(self):
+        """Reset all fields to their built-in default values."""
+        defaults = {}
+        if apnea_detector is not None:
+            try:
+                defaults = apnea_detector.get_default_analysis_parameters()
+            except Exception:
+                defaults = {}
+
+        hypopnea_percent = defaults.get("AASM_HYPOPNEA_DROP_PERCENT", 30.0)
+        apnea_percent = defaults.get("AASM_APNEA_DROP_PERCENT", 90.0)
+        obstructive_effort_percent = float(defaults.get("OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD", 0.20)) * 100.0
+        central_effort_percent = float(defaults.get("CENTRAL_APNEA_EFFORT_THRESHOLD", 0.60)) * 100.0
+        central_amplitude_percent = float(defaults.get("CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO", 0.08)) * 100.0
+        min_sec = defaults.get("MIN_EVENT_SEC", 10.0)
+        max_sec = defaults.get("MAX_EVENT_SEC", 120.0)
+
+        self.hypopnea_threshold.setText(str(hypopnea_percent))
+        self.apnea_threshold.setText(str(apnea_percent))
+        self.obstructive_effort_threshold.setText(str(round(obstructive_effort_percent, 1)))
+        self.central_effort_threshold.setText(str(round(central_effort_percent, 1)))
+        self.central_amplitude_threshold.setText(str(round(central_amplitude_percent, 1)))
+        self.min_duration.setText(str(min_sec))
+        self.max_duration.setText(str(max_sec))
+
+        self.hypopnea_classic_threshold.setText("50")
+        self.hypopnea_classic_flow_reduction.setText("50")
+        self.hypopnea_aasm_checkbox.setChecked(True)
+        self.hypopnea_aasm_threshold.setText("70")
+        self.hypopnea_aasm_flow_reduction.setText("30")
+        self.hypopnea_aasm_signal_quality.setText("5")
+        self.hypopnea_min_duration.setText("10")
+        self.hypopnea_max_duration.setText("100")
+        self.hypopnea_respiratory_mean_time.setText("1.0")
+
+        self.snoring_threshold.setText("6.0")
+        self.snoring_min_duration.setText("0.3")
+        self.snoring_max_duration.setText("3.5")
+        self.snoring_mean_time.setText("0.5")
+
+        self.desaturation_threshold.setText("4")
+
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle("Standard parameter")
+        msg_box.setText("Default analysis parameters loaded.")
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #f8fbff;
+            }
+            QMessageBox QLabel {
+                color: #111827;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QMessageBox QPushButton {
+                min-width: 54px;
+                min-height: 22px;
+                padding: 4px 12px;
+                border-radius: 6px;
+                border: 1px solid #1d4ed8;
+                background-color: #2563eb;
+                color: white;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #3b82f6;
+                border: 1px solid #1e40af;
+            }
+            QMessageBox QPushButton:pressed {
+                background-color: #1e40af;
+                border: 1px solid #1e3a8a;
+            }
+        """)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        ok_button = msg_box.button(QMessageBox.Ok)
+        if ok_button is not None:
+            ok_button.setAutoDefault(False)
+            ok_button.setDefault(True)
+            ok_button.setStyleSheet("""
+                QPushButton {
+                    min-width: 54px;
+                    min-height: 22px;
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    background-color: #3b82f6;
+                    border: 1px solid #1e40af;
+                }
+                QPushButton:pressed {
+                    background-color: #1e40af;
+                    border: 1px solid #1e3a8a;
+                }
+            """)
+        msg_box.exec_()
+
+    def get_parameters(self):
+        """Get current Apnea field values, mapped to the detector's real AASM constant names."""
+        try:
+            return {
+                "AASM_HYPOPNEA_DROP_PERCENT": float(self.hypopnea_threshold.text()),
+                "AASM_APNEA_DROP_PERCENT": float(self.apnea_threshold.text()),
+                "OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD": float(self.obstructive_effort_threshold.text()) / 100.0,
+                "CENTRAL_APNEA_EFFORT_THRESHOLD": float(self.central_effort_threshold.text()) / 100.0,
+                "CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO": float(self.central_amplitude_threshold.text()) / 100.0,
+                "MIN_EVENT_SEC": float(self.min_duration.text()),
+                "MAX_EVENT_SEC": float(self.max_duration.text()),
+            }
+        except ValueError:
+            return None
+
+    def get_extra_parameters(self):
+        """Get the non-Apnea tab values for app-level caching."""
+        try:
+            return {
+                "hypopnea": {
+                    "classic_threshold": float(self.hypopnea_classic_threshold.text()),
+                    "classic_flow_reduction": float(self.hypopnea_classic_flow_reduction.text()),
+                    "aasm_enabled": self.hypopnea_aasm_checkbox.isChecked(),
+                    "aasm_threshold": float(self.hypopnea_aasm_threshold.text()),
+                    "aasm_flow_reduction": float(self.hypopnea_aasm_flow_reduction.text()),
+                    "aasm_signal_quality_switch": float(self.hypopnea_aasm_signal_quality.text()),
+                    "min_duration": float(self.hypopnea_min_duration.text()),
+                    "max_duration": float(self.hypopnea_max_duration.text()),
+                    "respiratory_mean_time": float(self.hypopnea_respiratory_mean_time.text()),
+                },
+                "snoring": {
+                    "threshold": float(self.snoring_threshold.text()),
+                    "min_duration": float(self.snoring_min_duration.text()),
+                    "max_duration": float(self.snoring_max_duration.text()),
+                    "mean_time": float(self.snoring_mean_time.text()),
+                },
+                "desaturation": {
+                    "threshold": float(self.desaturation_threshold.text()),
+                },
+            }
+        except ValueError:
+            return None
 
         # -------- Classic Definition --------
         classic_group = QGroupBox("Classic definition")
@@ -2243,34 +2755,34 @@ class AnalysisParametersDialog(QDialog):
         layout.addLayout(main_row)
         layout.addStretch()
     
-    def setup_csr_tab(self):
-        layout = QVBoxLayout(self.csr_tab)
-
-        # Checkbox (top)
-        self.csr_checkbox = QCheckBox("Run CSR analysis")
-        self.csr_checkbox.setChecked(True)
-        layout.addWidget(self.csr_checkbox)
-
-        main_row = QHBoxLayout()
-
-        # Label (single line like image)
-        label = QLabel("Threshold for CSR detection")
-        main_row.addWidget(label)
-
-        # Input box (value corrected)
-        self.csr_threshold = QLineEdit("0.5")
-        self.csr_threshold.setFixedWidth(50)
-        main_row.addWidget(self.csr_threshold)
-
-        # Range text
-        range_label = QLabel("[0.2 - 0.8]")
-        main_row.addWidget(range_label)
-
-        # Push everything left like image
-        main_row.addStretch()
-
-        layout.addLayout(main_row)
-        layout.addStretch()
+    # def setup_csr_tab(self):
+    #     layout = QVBoxLayout(self.csr_tab)
+    #
+    #     # Checkbox (top)
+    #     self.csr_checkbox = QCheckBox("Run CSR analysis")
+    #     self.csr_checkbox.setChecked(True)
+    #     layout.addWidget(self.csr_checkbox)
+    #
+    #     main_row = QHBoxLayout()
+    #
+    #     # Label (single line like image)
+    #     label = QLabel("Threshold for CSR detection")
+    #     main_row.addWidget(label)
+    #
+    #     # Input box (value corrected)
+    #     self.csr_threshold = QLineEdit("0.5")
+    #     self.csr_threshold.setFixedWidth(50)
+    #     main_row.addWidget(self.csr_threshold)
+    #
+    #     # Range text
+    #     range_label = QLabel("[0.2 - 0.8]")
+    #     main_row.addWidget(range_label)
+    #
+    #     # Push everything left like image
+    #     main_row.addStretch()
+    #
+    #     layout.addLayout(main_row)
+    #     layout.addStretch()
     
     def standard_parameter(self):
         """Reset the Apnea fields to the detector's built-in default values."""
@@ -2299,8 +2811,8 @@ class AnalysisParametersDialog(QDialog):
 
         msg_box = QMessageBox(self)
         msg_box.setIcon(QMessageBox.Information)
-        msg_box.setWindowTitle("Standard Parameters")
-        msg_box.setText("Default apnea detection parameters loaded.")
+        msg_box.setWindowTitle("Standard parameter")
+        msg_box.setText("Default apnea detection standard parameter loaded.")
         msg_box.setStyleSheet("""
             QMessageBox {
                 background-color: #f8fbff;

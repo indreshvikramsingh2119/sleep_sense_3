@@ -1061,7 +1061,7 @@ class SleepSenseDashboard(QMainWindow):
 
         # Sync graph chip states with the current defaults and hide Abdomen by default.
         self._update_graph_controls_state()
-        self.toggle_graph_visibility("Abdomen", self.graph_visibility["Abdomen"])
+        # self.toggle_graph_visibility("Abdomen", self.graph_visibility["Abdomen"])
         
         # Use the user-activation signal so programmatic syncs do not retrigger refresh loops.
         self.time_window_dropdown.activated[int].connect(self.monitor_chart.on_time_window_changed)
@@ -1190,7 +1190,7 @@ class SleepSenseDashboard(QMainWindow):
             "Airflow": True,
             "Snoring": True,
             "Thorax": True,
-            "Abdomen": False,
+            # "Abdomen": False,
             "SpO2": True,
             "Pulse": True,
             "Body Movement": True,
@@ -2164,6 +2164,23 @@ class SleepSenseDashboard(QMainWindow):
         # Create and show the patient record form as modal dialog
         self.patient_record_form = PatientRecordForm(self)
         self.patient_record_form.exec_()  # Modal dialog
+
+    def _get_report_psg_payload(self):
+        """Return the most report-friendly PSG payload available."""
+        for attr_name in ("current_psg_data", "psg_full_data"):
+            payload = getattr(self.monitor_chart, attr_name, None)
+            if isinstance(payload, dict) and payload:
+                if isinstance(payload.get("signals"), dict):
+                    return payload
+                if "time" in payload:
+                    signals = {
+                        key: value
+                        for key, value in payload.items()
+                        if key != "time"
+                    }
+                    if signals:
+                        return {"time": payload.get("time"), "signals": signals}
+        return {}
     
     def open_medical_report(self):
         """Generate Medical Report and show in internal viewer"""
@@ -2195,20 +2212,20 @@ class SleepSenseDashboard(QMainWindow):
                 print("⚠️ No current patient DB id available for report generation")
 
             screenshot_paths = list(getattr(self, 'dashboard_screenshot_paths', []))
+            report_psg_payload = self._get_report_psg_payload()
+            report_signals = report_psg_payload.get("signals", {})
             report_context = calculate_report_context(
                 getattr(self.monitor_chart, "analysis_results", None),
-                getattr(self.monitor_chart, "psg_full_data", {}).get("signals", {}) if getattr(self.monitor_chart, "psg_full_data", None) else {},
+                report_signals,
                 getattr(getattr(self.monitor_chart, "auto_rule_ai_result", None), "get", lambda *_: [])("events", []),
             )
 
             hypnogram_path = None
             try:
-                psg_payload = getattr(self.monitor_chart, "psg_full_data", None) or {}
-                signals = psg_payload.get("signals", {})
-                if signals:
+                if report_signals:
                     output_folder = Path.home() / "SleepSenseReports" / "generated_assets"
                     hypnogram_path = generate_full_psg_hypnogram(
-                        psg_data=signals,
+                        psg_data=report_psg_payload,
                         output_folder=str(output_folder),
                         sampling_rate=10.0,
                         patient_id=str(patient_data.get("patient_id") or patient_db_id or "patient") if patient_data else str(patient_db_id or "patient"),
@@ -2234,9 +2251,16 @@ class SleepSenseDashboard(QMainWindow):
             self.save_generated_report_to_db(patient_data, patient_db_id, pdf_path)
             
             # Show PDF in internal viewer
-            self.pdf_viewer = PDFViewerWidget(pdf_path, self)
+            self.pdf_viewer = PDFViewerWidget(
+                pdf_path,
+                self,
+                patient_data=patient_data,
+                analysis_results=getattr(self.monitor_chart, "analysis_results", None),
+                dashboard_screenshot_path=screenshot_paths if screenshot_paths else None,
+                report_context=report_context,
+            )
             self.pdf_viewer.exec_()
-            
+
         except Exception as e:
             print(f"❌ Error generating medical report: {str(e)}")
 
@@ -2307,7 +2331,16 @@ class SleepSenseDashboard(QMainWindow):
         print(f"Patient data loaded successfully in dashboard")
 
     def load_psg_data_from_path(self, file_path):
-        """Load a previously saved PSG file directly from disk."""
+        """Load a previously saved PSG file directly from disk.
+
+        Uses load_psg_data_and_detect() (not the bare load_psg_data()) so a
+        recording opened from the Records table behaves exactly like one
+        opened from the Save file List: the graphs load AND auto-detection
+        runs right away, so the "Detected Events" side panel populates and
+        the user gets the same "Data loaded and graphs updated" style
+        confirmation - instead of a silent load with an empty events panel
+        that looked like "nothing happened."
+        """
         if not file_path:
             return False
 
@@ -2322,8 +2355,34 @@ class SleepSenseDashboard(QMainWindow):
             return False
 
         print(f"🎬 Loading PSG data from saved session: {file_path}")
+        if getattr(self.monitor_chart, "is_playing", False):
+            self.monitor_chart.pause_playback()
         self.monitor_chart.skip_next_auto_playback = True
-        self.monitor_chart.load_psg_data(file_path)
+        time_data, signals, jumped = self.monitor_chart.load_psg_data_and_detect(file_path)
+        if len(time_data) == 0 or not signals:
+            QMessageBox.warning(
+                self,
+                "Load Failed",
+                f"Could not load this recording:\n{file_path}",
+            )
+            return False
+
+        event_count = 0
+        auto_result = getattr(self.monitor_chart, "auto_rule_ai_result", None)
+        if isinstance(auto_result, dict):
+            event_count = len(auto_result.get("events", []))
+        detail = (
+            f"Auto-detection complete: {event_count} events found."
+            if event_count
+            else "No auto-detected events found."
+        )
+        if jumped:
+            detail += "\nJumped to the first detected event."
+        QMessageBox.information(
+            self,
+            "Saved Data Loaded",
+            f"Data loaded and graphs updated:\n{Path(file_path).name}\n{detail}",
+        )
         return True
     
     def open_signal_view(self):

@@ -190,7 +190,9 @@ def _build_single_dashboard_screenshot(image_path, index, doc, styles):
             return []
 
         max_width = doc.width
-        max_height = doc.height - 60
+        # Leave extra room for the section title and padding so the image never
+        # spills onto a mostly blank follow-up page.
+        max_height = doc.height - 130
         scale = min(max_width / image_width, max_height / image_height)
         screenshot = Image(
             image_path,
@@ -210,7 +212,7 @@ def _build_single_dashboard_screenshot(image_path, index, doc, styles):
             Paragraph(f"<b>{graph_label}</b>", styles["ImageLabel"]),
             Spacer(1, 6),
             screenshot,
-            Spacer(1, 16),
+            Spacer(1, 8),
         ]
     except Exception as error:
         print(f"⚠️ Could not add dashboard screenshot to report: {error}")
@@ -268,7 +270,7 @@ def _load_latest_analysis_results():
 
 
 def _get_report_logo_path():
-    logo_path = get_asset_path("assets/images/deck_mount_logo.png")
+    logo_path = get_asset_path("assets/images/dmk_logo.png")
     return logo_path if Path(logo_path).exists() else None
 
 
@@ -1566,9 +1568,14 @@ class PDFViewerWidget(QDialog):
             if not file_path.lower().endswith(".pdf"):
                 file_path += ".pdf"
 
-            latest_analysis_results = _load_latest_analysis_results()
-            if latest_analysis_results:
-                self.analysis_results = latest_analysis_results
+            # Prefer the analysis that came with the currently loaded upload.
+            # Only fall back to the newest JSON on disk if we do not already
+            # have report metrics in memory, otherwise a newer unrelated file
+            # can overwrite the real values for this report.
+            if not self.analysis_results:
+                latest_analysis_results = _load_latest_analysis_results()
+                if latest_analysis_results:
+                    self.analysis_results = latest_analysis_results
 
             pdf_path = generate_sleep_report(
                 pdf_path=file_path,

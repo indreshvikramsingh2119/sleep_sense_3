@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QToolBar, QSizePolicy, QMessageBox, QInputDialog
 )
 from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QColor
 import hashlib
 import sys
 import os
@@ -79,6 +79,7 @@ class DatabaseWindow(QDialog):
         self.setWindowTitle("Patient Database")
         self.setFixedSize(1200, 800)
         self.db_manager = DatabaseManager()
+        self._record_group_rows = {}
         self.init_ui()
  
         self.connect_signals()
@@ -278,11 +279,14 @@ class DatabaseWindow(QDialog):
         layout = QVBoxLayout(group)
         
         # Records table
+        # Column 0 is a narrow "+/-" expand column: a root recording row that
+        # has reanalyzed ("New report") versions saved under it gets a toggle
+        # button there to show/hide those child rows.
         self.records_table = QTableWidget()
-        self.records_table.setColumnCount(6)
+        self.records_table.setColumnCount(7)
         self.records_table.setHorizontalHeaderLabels([
-            "Last name", "First name", "Recording date", 
-            "Start time", "Duration", "Archived"
+            "", "Last name", "First name", "Patient ID", "Recording date",
+            "Start time", "Duration"
         ])
         
         # Professional medical table styling
@@ -323,17 +327,21 @@ class DatabaseWindow(QDialog):
         
         # Set table properties
         header = self.records_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.records_table.setColumnWidth(0, 32)
         self.records_table.setAlternatingRowColors(True)
         self.records_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.records_table.setShowGrid(True)
         self.records_table.verticalHeader().setVisible(False)
-        self.records_table.setSortingEnabled(True)
+        # Sorting stays off here: root/child (reanalyzed) rows must sit next
+        # to each other for the +/- expand toggle to work.
+        self.records_table.setSortingEnabled(False)
         self.records_table.setEditTriggers(QTableWidget.NoEditTriggers)
         
         layout.addWidget(self.records_table)
@@ -553,6 +561,16 @@ class DatabaseWindow(QDialog):
         self.load_records_for_patient(patient)
         self.load_reports_from_database(patient)
 
+        # Remember this on the main dashboard window (NOT on self) - this
+        # DatabaseWindow dialog gets thrown away and recreated from scratch
+        # (see dashboard.py's open_database()) every time it's closed, e.g.
+        # right after double-clicking a Records row to load a recording.
+        # Storing it on the parent means the NEXT DatabaseWindow instance
+        # can still find out who was selected before.
+        parent = self.parent()
+        if parent is not None:
+            parent._last_selected_database_patient_id = patient.get('id')
+
     def get_selected_patient(self):
         """Jis row par user ne click kiya, usi patient ka poora DB row (ya None).
 
@@ -645,8 +663,17 @@ class DatabaseWindow(QDialog):
         msg_box.exec_()
 
     def load_records_for_patient(self, patient):
-        """Populate the Records table with the selected patient's saved sessions."""
+        """Populate the Records table with the selected patient's saved sessions.
+
+        Sessions are grouped: an original recording is a "root" row, and any
+        Re-analyze -> "New report" saves made from that same recording are
+        nested underneath it as hidden "child" rows, revealed with the +/-
+        button in column 0. Recordings saved before this feature existed have
+        no parent_session_id, so they simply show up as roots with no
+        children - nothing about them changes.
+        """
         self.records_table.setRowCount(0)
+        self._record_group_rows = {}
         if not patient:
             return
 
@@ -659,39 +686,122 @@ class DatabaseWindow(QDialog):
             print(f"Error loading sessions: {error}")
             return
 
-        was_sorting = self.records_table.isSortingEnabled()
         self.records_table.setSortingEnabled(False)
-        self.records_table.setRowCount(len(sessions))
-
-        for row, session in enumerate(sessions):
-            saved_at = str(session.get('saved_at') or '')
-            if 'T' in saved_at:
-                recording_date, start_time = saved_at.split('T', 1)
+        sessions_by_id = {s.get('id'): s for s in sessions if s.get('id') is not None}
+        children_by_root = {}
+        roots = []
+        for session in sessions:
+            parent_id = session.get('parent_session_id')
+            if parent_id and parent_id in sessions_by_id and parent_id != session.get('id'):
+                children_by_root.setdefault(parent_id, []).append(session)
             else:
-                recording_date, start_time = saved_at, ''
+                roots.append(session)
 
-            file_path = str(session.get('file_path') or '')
-            archived = "Yes" if file_path and os.path.exists(file_path) else "Missing"
+        total_rows = len(roots) + sum(len(v) for v in children_by_root.values())
+        self.records_table.setRowCount(total_rows)
 
-            first_item = QTableWidgetItem(patient.get('last_name') or "")
-            first_item.setData(Qt.UserRole, file_path)
-            self.records_table.setItem(row, 0, first_item)
-            self.records_table.setItem(row, 1, QTableWidgetItem(patient.get('first_name') or ""))
-            self.records_table.setItem(row, 2, QTableWidgetItem(recording_date))
-            self.records_table.setItem(row, 3, QTableWidgetItem(start_time))
-            self.records_table.setItem(row, 4, QTableWidgetItem(session.get('duration') or "--"))
-            self.records_table.setItem(row, 5, QTableWidgetItem(archived))
+        row = 0
+        for root_session in roots:
+            self._populate_record_row(row, patient, root_session, is_child=False)
+            root_row = row
+            row += 1
 
-        self.records_table.setSortingEnabled(was_sorting)
+            child_rows = []
+            for child_session in children_by_root.get(root_session.get('id'), []):
+                self._populate_record_row(row, patient, child_session, is_child=True)
+                self.records_table.setRowHidden(row, True)
+                child_rows.append(row)
+                row += 1
+
+            if child_rows:
+                self._record_group_rows[root_row] = child_rows
+                self.records_table.setCellWidget(root_row, 0, self.create_expand_button(child_rows))
+
+    def _populate_record_row(self, row, patient, session, is_child):
+        """Fill one Records row (either a root recording or a reanalyzed child)."""
+        saved_at = str(session.get('saved_at') or '')
+        if 'T' in saved_at:
+            recording_date, start_time = saved_at.split('T', 1)
+        else:
+            recording_date, start_time = saved_at, ''
+
+        file_path = str(session.get('file_path') or '')
+        patient_id_value = str(patient.get('patient_id') or session.get('patient_id') or '')
+
+        first_name_text = patient.get('first_name') or ""
+        if is_child:
+            first_name_text = f"↳ Reanalyzed - {first_name_text}".strip(" -")
+
+        last_item = QTableWidgetItem(patient.get('last_name') or "")
+        # File path + session identity travel on the Last name cell so
+        # open_selected_record() and a later re-analyze save can find them.
+        last_item.setData(Qt.UserRole, file_path)
+        last_item.setData(Qt.UserRole + 1, session.get('id'))
+        last_item.setData(Qt.UserRole + 2, session.get('parent_session_id'))
+
+        items = [
+            last_item,
+            QTableWidgetItem(first_name_text),
+            QTableWidgetItem(patient_id_value),
+            QTableWidgetItem(recording_date),
+            QTableWidgetItem(start_time),
+            QTableWidgetItem(session.get('duration') or "--"),
+        ]
+
+        if is_child:
+            for cell in items:
+                cell.setBackground(QColor("#f3f8fc"))
+                cell.setForeground(QColor("#5b6b7c"))
+                font = cell.font()
+                font.setItalic(True)
+                cell.setFont(font)
+
+        for col, cell in enumerate(items, start=1):
+            self.records_table.setItem(row, col, cell)
+
+    def create_expand_button(self, child_rows):
+        """+/- toggle shown on a root Records row that has reanalyzed children."""
+        button = StrictClickButton("+")
+        button.setCursor(Qt.PointingHandCursor)
+        button.setFixedSize(24, 24)
+        button.setStyleSheet("""
+            QPushButton {
+                background-color: #eef6fc;
+                color: #1e3a5f;
+                border: 1px solid #3498db;
+                border-radius: 4px;
+                font-weight: 700;
+                font-size: 13px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #d9ecfb;
+            }
+            QPushButton:pressed {
+                background-color: #bfe0f7;
+            }
+        """)
+        button.clicked.connect(lambda checked=False, btn=button, rows=child_rows: self.toggle_record_group(btn, rows))
+        return button
+
+    def toggle_record_group(self, button, child_rows):
+        """Expand/collapse the reanalyzed (child) rows beneath a record."""
+        expanding = button.text() == "+"
+        for row in child_rows:
+            if row < self.records_table.rowCount():
+                self.records_table.setRowHidden(row, not expanding)
+        button.setText("−" if expanding else "+")
 
     def open_selected_record(self, item):
         """Double-click a Records row to load that recording in the dashboard."""
         row = item.row()
-        first_item = self.records_table.item(row, 0)
-        if first_item is None:
+        last_item = self.records_table.item(row, 1)
+        if last_item is None:
             return
 
-        file_path = first_item.data(Qt.UserRole)
+        file_path = last_item.data(Qt.UserRole)
+        session_id = last_item.data(Qt.UserRole + 1)
+        parent_session_id = last_item.data(Qt.UserRole + 2)
         if not file_path:
             QMessageBox.warning(self, "No File", "This session did not save a file path.")
             return
@@ -711,6 +821,12 @@ class DatabaseWindow(QDialog):
 
         if parent and hasattr(parent, 'load_psg_data_from_path'):
             if parent.load_psg_data_from_path(file_path):
+                # Tell the chart which saved session this is, so a later
+                # Re-analyze -> "New report" save nests under the same root
+                # instead of starting an unrelated new one.
+                monitor_chart = getattr(parent, 'monitor_chart', None)
+                if monitor_chart is not None and hasattr(monitor_chart, 'set_current_session') and session_id is not None:
+                    monitor_chart.set_current_session(session_id, parent_session_id)
                 self.accept()
         else:
             QMessageBox.warning(self, "Not Available", "The dashboard cannot load this recording.")
@@ -737,8 +853,37 @@ class DatabaseWindow(QDialog):
         
         # Clear the Records table for now
         self.records_table.setRowCount(0)
-        # Load reports for the selected patient
-        self.load_reports_from_database(self.get_selected_patient())
+        self.reports_table.setRowCount(0)
+
+        # Keep whichever patient was selected before highlighted, so
+        # reopening the Patient Database - which recreates this whole
+        # dialog - doesn't leave you hunting for who you were looking at.
+        self._restore_last_selected_patient_row()
+
+    def _restore_last_selected_patient_row(self):
+        """Re-select and re-highlight the last-selected patient's row.
+
+        The "last selected" id lives on the parent (main dashboard) window,
+        not on self, because self (this DatabaseWindow) is destroyed and
+        rebuilt from scratch each time the dialog is closed and reopened -
+        see on_patient_selection_changed() where it's saved, and
+        dashboard.py's open_database() for why a fresh instance happens so
+        often (e.g. right after loading a recording via double-click).
+        """
+        parent = self.parent()
+        last_patient_id = getattr(parent, "_last_selected_database_patient_id", None) if parent else None
+        if last_patient_id is None:
+            return
+
+        for row in range(self.patients_table.rowCount()):
+            if self.patients_table.isRowHidden(row):
+                continue
+            name_item = self.patients_table.item(row, 0)
+            if name_item is not None and name_item.data(Qt.UserRole) == last_patient_id:
+                self.patients_table.selectRow(row)
+                self.patients_table.setCurrentCell(row, 0)
+                self.on_patient_selection_changed()
+                break
 
     def create_edit_button(self):
         """Create a simple Edit button for one row."""
