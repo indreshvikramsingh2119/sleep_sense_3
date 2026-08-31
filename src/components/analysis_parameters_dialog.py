@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QPalette
+from ..utils.sample_rate import DEFAULT_SAMPLE_RATE_HZ
 
 class AnalysisParametersDialog(QDialog):
     """Analysis Parameters Configuration Dialog"""
@@ -23,6 +24,7 @@ class AnalysisParametersDialog(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("Analysis Parameters")
         self.setModal(True)
         self.setFixedSize(800, 600)
@@ -727,7 +729,7 @@ class AnalysisParametersDialog(QDialog):
         layout.addWidget(QLabel("Update Frequency:"), 1, 0, 1, 1)
         self.update_frequency = QSpinBox()
         self.update_frequency.setRange(1, 60)
-        self.update_frequency.setValue(10)  # Default 10 Hz
+        self.update_frequency.setValue(int(DEFAULT_SAMPLE_RATE_HZ))  # Default sample rate
         self.update_frequency.setSuffix(" Hz")
         self.update_frequency.valueChanged.connect(self.on_parameter_changed)
         layout.addWidget(self.update_frequency, 1, 1, 1, 1)
@@ -926,7 +928,7 @@ class AnalysisParametersDialog(QDialog):
         self.algorithm_combo.setCurrentText("Auto")
         self.realtime_enabled.setChecked(True)
         self.auto_update_enabled.setChecked(True)
-        self.update_frequency.setValue(10)
+        self.update_frequency.setValue(int(DEFAULT_SAMPLE_RATE_HZ))
         self.processing_delay.setValue(100)
         
         print("Parameters reset to defaults")

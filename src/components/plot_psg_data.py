@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-SAMPLE_RATE_HZ = 10.0
+from src.utils.sample_rate import DEFAULT_SAMPLE_RATE_HZ as SAMPLE_RATE_HZ
 TIMESTAMP_COLUMN = 0
 
 # Canonical signal key -> raw CSV column index.
@@ -180,5 +180,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

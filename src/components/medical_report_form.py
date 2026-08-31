@@ -154,7 +154,7 @@ def _build_dashboard_screenshot_section(image_paths, doc, styles):
     if not existing_paths:
         return []
 
-    elements = [_section_heading("FULL PSG DATA", styles), Spacer(1, 12)]
+    elements = [Spacer(1, 12)]
     hypnogram_paths = []
     screenshot_paths = []
 
@@ -200,17 +200,7 @@ def _build_single_dashboard_screenshot(image_path, index, doc, styles):
             height=image_height * scale,
         )
 
-        graph_label = f"Full PSG Graph {index}"
-        try:
-            stem_name = Path(image_path).stem
-            if "psg_hypnogram" in stem_name or "full_psg" in stem_name:
-                graph_label = "Full-Duration PSG Overview"
-        except Exception:
-            pass
-
         return [
-            Paragraph(f"<b>{graph_label}</b>", styles["ImageLabel"]),
-            Spacer(1, 6),
             screenshot,
             Spacer(1, 8),
         ]
@@ -234,6 +224,13 @@ def _default_report_output_path(filename, *, unique=False):
 def _text_or_dash(value):
     text = "" if value is None else str(value).strip()
     return text if text else "-"
+
+
+def _truncate_text(value, limit=120):
+    text = _text_or_dash(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _patient_display_name(patient_data):
@@ -489,7 +486,7 @@ def _build_snoring_parameter_table(snoring, table_width, styles):
         ("TOPPADDING", (0, 0), (-1, -1), 6),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
-    return _rounded_card(table, width=table_width, padding=0)
+    return table
 
 
 def _build_patient_information_rows(patient_data, styles):
@@ -510,14 +507,85 @@ def _build_patient_information_rows(patient_data, styles):
         [cell("Weight"), cell(patient_data.get("weight")), cell("Height"), cell(patient_data.get("height"))],
         [cell("BMI"), cell(patient_data.get("bmi")), cell("Blood Pressure"), cell(patient_data.get("blood_pressure"))],
         [cell("Status"), cell(patient_data.get("status")), cell("Report Date"), cell(datetime.now().strftime("%d-%m-%Y"))],
-        [cell("History"), cell(patient_data.get("history")), cell("Comments"), cell(patient_data.get("comments"))],
+        [cell("History"), cell(_truncate_text(patient_data.get("history"), 120)), cell("Comments"), cell(_truncate_text(patient_data.get("comments"), 120))],
     ]
+
+
+def _build_interpretation_card(report_context, styles, card_width):
+    interpretation = report_context.get("report_interpretation", {}) or {}
+    diagnosis = _text_or_dash(interpretation.get("diagnosis"))
+    findings = interpretation.get("findings", []) or []
+    recommendations = interpretation.get("recommendations", []) or []
+    manual_items = interpretation.get("manual_items", []) or []
+    custom_note = str(interpretation.get("custom_note") or "").strip()
+
+    body_style = styles["BodyText"].clone("InterpretationBody")
+    body_style.fontName = "Helvetica"
+    body_style.fontSize = 8
+    body_style.leading = 10
+    body_style.textColor = CARD_TEXT_MUTED
+
+    value_style = styles["BodyText"].clone("InterpretationValue")
+    value_style.fontName = "Helvetica-Bold"
+    value_style.fontSize = 8
+    value_style.leading = 10
+    value_style.textColor = CARD_ACCENT
+
+    findings_html = "<br/>".join(
+        f"• {str(item).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}"
+        for item in findings
+    ) or "• No additional findings available."
+    recommendations_html = "<br/>".join(
+        f"• {str(item).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}"
+        for item in recommendations
+    ) or "• No recommendations available."
+
+    manual_items_html = "<br/>".join(
+        f"â€¢ {str(item).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}"
+        for item in manual_items
+    )
+    manual_items_html = manual_items_html.replace("Ã¢â‚¬Â¢", "-").replace("â€¢", "-")
+    custom_note_html = (
+        custom_note.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        if custom_note else ""
+    )
+
+    table_rows = [
+        ["INTERPRETATION", ""],
+        [Paragraph("Diagnosis", body_style), Paragraph(diagnosis, value_style)],
+        [Paragraph("Findings", body_style), Paragraph(findings_html, body_style)],
+        [Paragraph("Recommendations", body_style), Paragraph(recommendations_html, body_style)],
+    ]
+    if manual_items_html:
+        table_rows.append([Paragraph("Selected Notes", body_style), Paragraph(manual_items_html, body_style)])
+    if custom_note_html:
+        table_rows.append([Paragraph("Custom Note", body_style), Paragraph(custom_note_html, body_style)])
+
+    table = Table(
+        table_rows,
+        colWidths=[card_width * 0.22, card_width * 0.78],
+    )
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, CARD_GRID_COLOR),
+        ("SPAN", (0, 0), (-1, 0)),
+        ("BACKGROUND", (0, 0), (-1, 0), CARD_HEADER_BG),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8.5),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    return table
 
 
 def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=None, dashboard_screenshot_path=None, report_context=None):
     """Generate basic sleep report format with improved visual presentation"""
     if pdf_path is None:
-        pdf_path = _default_report_output_path("sleep_report_clean.pdf", unique=True)
+        pdf_path = _default_report_output_path("sleep_report.pdf", unique=True)
 
     patient_data = patient_data or {}
     analysis_results = analysis_results or {}
@@ -540,7 +608,7 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
     logo_image = None
     if logo_path:
         try:
-            logo_image = Image(logo_path, width=90, height=60)
+            logo_image = Image(logo_path, width=120, height=32)
         except Exception as error:
             print(f"⚠️ Could not load report logo: {error}")
 
@@ -555,11 +623,11 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
                 [Paragraph("<b>SLEEP TEST REPORT</b>", styles["Title"])],
                 [Paragraph(report_subtitle, styles["ReportSubTitle"])],
             ],
-            colWidths=[page1_content_width - 118],
+            colWidths=[page1_content_width - 150],
         )
     ]]
 
-    header_container = Table(header_data, colWidths=[102, page1_content_width - 102])
+    header_container = Table(header_data, colWidths=[134, page1_content_width - 134])
     header_container.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,-1), colors.white),
         ('BORDER', (0,0), (-1,-1), 1, colors.black),
@@ -608,9 +676,8 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
     # ---------------- TIME INFORMATION CONTAINER ----------------
     times_data = [
         ["TIME INFORMATION", "", "", ""],
-        ["Lights off", time_information.get("lights_off", "-"), "TRT", time_information.get("trt_display", "-")],
-        ["Lights on", time_information.get("lights_on", "-"), "TIB", time_information.get("tib_display", "-")],
-        # ["", "", "MT", "408.9 min"],
+        ["Lights off", time_information.get("lights_off", "-"), "TRT (Total Recording Time)", time_information.get("trt_display", "-")],
+        ["Lights on", time_information.get("lights_on", "-"), "TIB (Time in Bed)", time_information.get("tib_display", "-")],
     ]
 
     time_table = Table(times_data, colWidths=[page1_content_width / 4.0] * 4)
@@ -693,7 +760,7 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
         height = 20
         total = 50
 
-        d = Drawing(width, 50)
+        d = Drawing(width, 58)
 
         # ---- Color Segments ----
         green_w  = (5 / total) * width
@@ -744,13 +811,24 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
 
         # ---- Current Value ----
         marker_x = (value / total) * width
+        marker_x = max(18, min(width - 30, marker_x))
 
         d.add(String(
-            marker_x - 10,
-            43,
+            marker_x,
+            41,
+            "AHI",
+            fontSize=8,
+            fillColor=CARD_TEXT_MUTED,
+            textAnchor="middle",
+        ))
+
+        d.add(String(
+            marker_x,
+            30,
             f"{value:.1f}",
             fontSize=10,
-            fillColor=colors.black
+            fillColor=colors.black,
+            textAnchor="middle",
         ))
 
         # ---- Bottom Scale ----
@@ -786,6 +864,7 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
     respiratory_rows = respiratory_summary.get("rows", [])
     total_row = respiratory_summary.get("total_row", {}) or {}
     rei_in_position = respiratory_summary.get("rei_in_position", {}) or {}
+    time_in_position = respiratory_summary.get("time_in_position", {}) or {}
     row_lookup = {
         row.get("name"): row for row in respiratory_rows
     }
@@ -803,7 +882,7 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
         ["Obstructive Apneas", obstructive_row.get("index_display", "0.0"), obstructive_row.get("count_display", "0"), obstructive_row.get("mean_duration_display", "0.0"), obstructive_row.get("max_duration_display", "0.0"), str(obstructive_row.get("positions", {}).get("Supine", 0)), str(obstructive_row.get("positions", {}).get("Prone", 0)), str(obstructive_row.get("positions", {}).get("Left", 0)), str(obstructive_row.get("positions", {}).get("Right", 0)), str(obstructive_row.get("positions", {}).get("Up", 0))],
         ["Mixed Apneas", mixed_row.get("index_display", "0.0"), mixed_row.get("count_display", "0"), mixed_row.get("mean_duration_display", "0.0"), mixed_row.get("max_duration_display", "0.0"), str(mixed_row.get("positions", {}).get("Supine", 0)), str(mixed_row.get("positions", {}).get("Prone", 0)), str(mixed_row.get("positions", {}).get("Left", 0)), str(mixed_row.get("positions", {}).get("Right", 0)), str(mixed_row.get("positions", {}).get("Up", 0))],
         ["Hypopneas", hypopnea_row.get("index_display", "0.0"), hypopnea_row.get("count_display", "0"), hypopnea_row.get("mean_duration_display", "0.0"), hypopnea_row.get("max_duration_display", "0.0"), str(hypopnea_row.get("positions", {}).get("Supine", 0)), str(hypopnea_row.get("positions", {}).get("Prone", 0)), str(hypopnea_row.get("positions", {}).get("Left", 0)), str(hypopnea_row.get("positions", {}).get("Right", 0)), str(hypopnea_row.get("positions", {}).get("Up", 0))],
-        ["Apneas + Hypopneas", total_row.get("index_display", "0.0"), total_row.get("count_display", "0"), total_row.get("mean_duration_display", "0.0"), total_row.get("max_duration_display", "0.0"), str(total_row.get("positions", {}).get("Supine", 0)), str(total_row.get("positions", {}).get("Prone", 0)), str(total_row.get("positions", {}).get("Left", 0)), str(total_row.get("positions", {}).get("Right", 0)), str(total_row.get("positions", {}).get("Up", 0))],
+        ["Apneas + Hypopneas (AHI)", total_row.get("index_display", "0.0"), total_row.get("count_display", "0"), total_row.get("mean_duration_display", "0.0"), total_row.get("max_duration_display", "0.0"), str(total_row.get("positions", {}).get("Supine", 0)), str(total_row.get("positions", {}).get("Prone", 0)), str(total_row.get("positions", {}).get("Left", 0)), str(total_row.get("positions", {}).get("Right", 0)), str(total_row.get("positions", {}).get("Up", 0))],
         # ["RERAs", "0.0", "0", "0.0", "0.0", "0", "", "0", "0", "0"],
 
         ["Total", total_row.get("index_display", "0.0"), total_row.get("count_display", "0"), total_row.get("mean_duration_display", "0.0"), total_row.get("max_duration_display", "0.0"), str(total_row.get("positions", {}).get("Supine", 0)), str(total_row.get("positions", {}).get("Prone", 0)), str(total_row.get("positions", {}).get("Left", 0)), str(total_row.get("positions", {}).get("Right", 0)), str(total_row.get("positions", {}).get("Up", 0))],
@@ -862,7 +941,7 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
         # Blue color for index and duration values
         ('TEXTCOLOR', (1,2), (4,8), CARD_ACCENT),  # index + duration values
         ('TEXTCOLOR', (5,2), (9,7), CARD_ACCENT),  # position event counts
-        ('TEXTCOLOR', (5,9), (9,10), CARD_ACCENT),  # position time/REI values
+        ('TEXTCOLOR', (5,9), (9,9), CARD_ACCENT),  # position REI values
 
         # Padding
         ('LEFTPADDING', (0,0), (-1,-1), 5),
@@ -873,6 +952,34 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
 
     page1_elements.append(_rounded_card(resp_table, width=page1_content_width, padding=0))
     page1_elements.append(Spacer(1, 10))
+
+    # Method note removed by request.
+    # method_oximetry = _get_section(analysis_results, "oximetry")
+    # method_lines = [
+    #     "Method: respiratory events are scored on nasal airflow (AASM). Apnea = airflow amplitude reduced 90% or more for at least 10 s; hypopnea = reduced 30% or more for at least 10 s with an associated oxygen desaturation of 3% or more. Baseline is the pre-event breathing amplitude.",
+    #     "Limitation: this is a Type-3 home sleep apnea test with a single thoracic effort belt. Obstructive, central and mixed apneas are separated by effort on that one belt; thoracoabdominal paradox cannot be assessed, and EEG arousals are not recorded, so arousal-only hypopneas are not detected. Total event counts may therefore be lower than an in-laboratory polysomnogram.",
+    # ]
+    # if str(method_oximetry.get("oximetry_quality_status", "")).lower() != "valid":
+    #     method_lines.append(
+    #         "This recording has no usable SpO2 signal. Hypopneas are reported on the airflow criterion alone and are NOT desaturation-confirmed; interpret the hypopnea count and AHI with caution."
+    #     )
+    # method_note_style = styles["BodyText"].clone("MethodNoteStyle")
+    # method_note_style.fontSize = 7
+    # method_note_style.leading = 9
+    # method_note_style.textColor = CARD_TEXT_MUTED
+    # method_note_table = Table(
+    #     [[Paragraph(line, method_note_style)] for line in method_lines],
+    #     colWidths=[page1_content_width],
+    # )
+    # method_note_table.setStyle(TableStyle([
+    #     ('BACKGROUND', (0,0), (-1,-1), colors.white),
+    #     ('LEFTPADDING', (0,0), (-1,-1), 8),
+    #     ('RIGHTPADDING', (0,0), (-1,-1), 8),
+    #     ('TOPPADDING', (0,0), (-1,-1), 4),
+    #     ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+    # ]))
+    # page1_elements.append(_rounded_card(method_note_table, width=page1_content_width, padding=0))
+    # page1_elements.append(Spacer(1, 10))
     
     # Add all page 1 elements without KeepTogether (content is too large)
     elements.extend(page1_elements)
@@ -889,33 +996,22 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
 
     # ---------------- OXIMETRY CONTAINER ----------------
     oximetry = _get_section(analysis_results, "oximetry")
-    spo2_tib_pct = oximetry.get("mean_spo2_tib_pct", 0.0)
-    spo2_tib_pct_text = f"{float(spo2_tib_pct):.1f}" if spo2_tib_pct is not None else "-"
+    spo2_coverage_text = oximetry.get("valid_spo2_ratio_display", "-")
     oxi_data = [
         ["OXIMETRY SUMMARY", "", ""],
-        ["Parameter", "% TIB", "Value"],
-        ["Mean SpO2 % during sleep", "99", oximetry.get("mean_spo2_display", "0")],
-        ["Min SpO2 % during sleep", "99", oximetry.get("min_spo2_display", "0")],
-        ["Max SpO2 % during sleep", "99", oximetry.get("max_spo2_display", "0")],
-        ["Total # of Desats", "", oximetry.get("total_desats_display", "0")],
-        ["Desat Index (#/hour)", "", oximetry.get("desaturation_index_display", "0")],
+        ["Parameter", "Coverage", "Value"],
+        ["Mean SpO2 % during sleep", spo2_coverage_text, oximetry.get("mean_spo2_display", "-")],
+        ["Min SpO2 % during sleep", spo2_coverage_text, oximetry.get("min_spo2_display", "-")],
+        ["Max SpO2 % during sleep", spo2_coverage_text, oximetry.get("max_spo2_display", "-")],
+        ["ODI3 (#/hour)", "", oximetry.get("odi3_display", "0.0 /h")],
+        ["ODI3 Events", "", oximetry.get("odi3_event_count_display", "0")],
+        ["ODI3 Severity", "", oximetry.get("odi3_severity", "Normal")],
         ["Hypoxic Burden", "", oximetry.get("hypoxic_burden_display", oximetry.get("desat_max_pct_display", "0"))],
         ["HB Index", "", oximetry.get("hb_index_display", "0.0 %min/h")],
         ["HB Severity", "", oximetry.get("hb_severity", "Normal")],
-        ["Longest Duration", "", oximetry.get("longest_duration_display", oximetry.get("desat_max_sec_display", "0 sec"))],
-        ["Total Count Event", "", oximetry.get("total_count_event_display", oximetry.get("total_desats_display", "0"))],
-        # ["Desat Max (%)", "", oximetry.get("desat_max_pct_display", "0")],
-        # ["Desat Max dur (sec)", "", oximetry.get("desat_max_sec_display", "0 sec")],
-        # ["Lowest SpO2 % during sleep", "", oximetry.get("lowest_spo2_display", "0")],
-        # ["Duration of Min SpO2 (sec)", "", oximetry.get("duration_of_min_spo2_display", "0 sec")],
-        # ["Highest SpO2 % during sleep", "", oximetry.get("highest_spo2_display", "0")],
-        # ["Duration of Max SpO2 (sec)", "", oximetry.get("duration_of_max_spo2_display", "0 sec")],
-        # ["SpO2 < 90% duration", "", oximetry.get("duration_below_90_display", "0 sec")],
-        ["SpO2 < 85% duration", "", oximetry.get("duration_below_85_display", "0 sec")],
-        # ["SpO2 < 80% duration", "", oximetry.get("duration_below_80_display", "0 sec")],
-        # ["Baseline SpO2", "", oximetry.get("baseline_spo2_display", "0")],
-        # ["SpO2 Variability", "", oximetry.get("spo2_variability", "0")],
-        # ["Oxygen Saturation Trend", "", oximetry.get("oxygen_saturation_trend", "0")],
+        ["Longest Duration (HB)", "", oximetry.get("longest_duration_display", oximetry.get("desat_max_sec_display", "0 sec"))],
+        ["Total Count Event (HB)", "", oximetry.get("total_count_event_display", oximetry.get("total_desats_display", "0"))],
+        ["SpO2 < 85% duration", oximetry.get("duration_below_85_pct_display", "0.0%"), oximetry.get("duration_below_85_display", "0 sec")],
     ]
 
     oxi_col_widths = [LEFT_SECTION_WIDTH * ratio for ratio in (0.69, 0.11, 0.20)]
@@ -965,7 +1061,12 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
     oxi_note_style.leading = 9
     oxi_note_style.textColor = CARD_TEXT_MUTED
     oxi_note = Paragraph(
-        "Hypoxic burden is calculated from a fixed 95% SpO2 baseline. HB Index is normalized as total hypoxic burden divided by total recording hours.",
+        f"SpO2 quality: {oximetry.get('oximetry_quality_status', '-')}."
+        + (
+            f" {oximetry.get('oximetry_quality_reason')}"
+            if oximetry.get("oximetry_quality_reason")
+            else " Hypoxic burden uses a fixed 95% SpO2 baseline and HB Index is normalized by recording hours."
+        ),
         oxi_note_style,
     )
     oxi_note_table = Table([[oxi_note]], colWidths=[LEFT_SECTION_WIDTH])
@@ -1026,11 +1127,11 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
     hr_data = [
         ["HEART RATE STATS", ""],
         ["Parameter", "Value"],
-        ["Mean HR during sleep", heart_rate.get("mean_hr_display", "0 BPM")],
-        ["Highest HR during sleep", heart_rate.get("highest_hr_display", "0 BPM")],
-        ["Highest HR during TIB", heart_rate.get("highest_hr_display", "0 BPM")],
-        ["Lowest HR during sleep", heart_rate.get("lowest_hr_display", "0 BPM")],
-        ["Lowest HR during TIB", heart_rate.get("lowest_hr_display", "0 BPM")]
+        ["Mean HR during sleep", heart_rate.get("mean_hr_during_sleep_display", heart_rate.get("mean_hr_display", "-"))],
+        ["Highest HR during sleep", heart_rate.get("highest_hr_during_sleep_display", heart_rate.get("highest_hr_display", "-"))],
+        ["Highest HR during TIB", heart_rate.get("highest_hr_during_tib_display", heart_rate.get("highest_hr_display", "-"))],
+        ["Lowest HR during sleep", heart_rate.get("lowest_hr_during_sleep_display", heart_rate.get("lowest_hr_display", "-"))],
+        ["Lowest HR during TIB", heart_rate.get("lowest_hr_during_tib_display", heart_rate.get("lowest_hr_display", "-"))],
     ]
 
     hr_col_widths = [RIGHT_SECTION_WIDTH / 2.0, RIGHT_SECTION_WIDTH / 2.0]
@@ -1104,6 +1205,8 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
 
     page2_elements.append(page2_main_table)
     page2_elements.append(Spacer(1, 20))
+    page2_elements.append(_build_interpretation_card(report_context, styles, page1_content_width))
+    page2_elements.append(Spacer(1, 16))
 
     # Add page 2 content directly so reportlab can paginate cleanly without odd blank-page behavior.
     elements.extend(page2_elements)
@@ -1555,7 +1658,7 @@ class PDFViewerWidget(QDialog):
         self.generating = True
 
         try:
-            suggested_path = _default_report_output_path("sleep_report_clean.pdf")
+            suggested_path = _default_report_output_path("sleep_report.pdf")
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save Medical Report",

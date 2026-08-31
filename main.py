@@ -161,7 +161,7 @@ def main():
 
     # --- Single instance check ---
     if is_already_running():
-        QMessageBox.information(
+        QMessageBox.information( 
             None,
             "Already Running",
             "Sleep Sense is already open.\nCheck the taskbar."

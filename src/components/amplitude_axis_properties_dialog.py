@@ -19,6 +19,7 @@ class AmplitudeAxisPropertiesDialog(QDialog):
     
     def __init__(self, parent=None, current_properties=None):
         super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("Amplitude Axis Properties")
         self.setModal(True)
         self.resize(400, 350)

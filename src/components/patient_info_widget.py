@@ -247,6 +247,7 @@ class PatientInfoWidget(QWidget):
         """Handle upload data action"""
         if not self.monitor_chart or not getattr(self.monitor_chart, "patient_id", None) or self.monitor_chart.patient_id in ("", "--------", None):
             msg_box = QMessageBox(self)
+            msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
             msg_box.setWindowTitle("No Patient Selected")
             msg_box.setText("Please select a patient from the database before uploading data.")
             msg_box.setIconPixmap(self._database_icon_pixmap())
@@ -345,6 +346,7 @@ class PatientInfoWidget(QWidget):
             if getattr(self.monitor_chart, "auto_rule_ai_result", None):
                 detected_events = list(self.monitor_chart.auto_rule_ai_result.get("events", []))
             msg_box = QMessageBox(self)
+            msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
             msg_box.setWindowTitle("Upload Complete")
             msg_box.setTextFormat(Qt.RichText)
             msg_box.setIconPixmap(self.style().standardIcon(QStyle.SP_DialogApplyButton).pixmap(48, 48))
@@ -427,7 +429,7 @@ class PatientInfoWidget(QWidget):
         """Inline raw-data file list shown under patient details."""
         frame = QFrame()
         frame.setObjectName("rawDataSection")
-        frame.setMinimumHeight(170)  # Keep the card compact so the dashboard does not grow
+        frame.setMinimumHeight(210)
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(12, 12, 12, 12)  # Increased margins for more space
@@ -453,34 +455,25 @@ class PatientInfoWidget(QWidget):
         self.raw_file_list = QListWidget()
         self.raw_file_list.setObjectName("Saved file List")
         self.raw_file_list.setMinimumHeight(0)
-        self.raw_file_list.setMaximumHeight(140)
+        self.raw_file_list.setMaximumHeight(180)
         self.raw_file_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.raw_file_list.setVisible(False)
-        # Reduce item spacing and padding to minimize empty space
+        self.raw_file_list.setWordWrap(True)
+        self.raw_file_list.setTextElideMode(Qt.ElideNone)
+        self.raw_file_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.raw_file_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.raw_file_list.setStyleSheet("""
             QListWidget#Saved file List {
                 background-color: #f8fafc;
                 border: 1px solid #e2e8f0;
                 border-radius: 6px;
-                padding: 4px;
-                spacing: 2px;
+                padding: 6px;
+                spacing: 4px;
             }
             QListWidget#Saved file List::item {
-                background-color: white;
-                border: 1px solid #e5e7eb;
-                border-radius: 4px;
-                padding: 6px 8px;
-                margin: 1px;
-                min-height: 24px;
-            }
-            QListWidget#Saved file List::item:selected {
-                background-color: #3b82f6;
-                color: white;
-                border: 1px solid #2563eb;
-            }
-            QListWidget#Saved file List::item:hover {
-                background-color: #f1f5f9;
-                border: 1px solid #cbd5e1;
+                border: none;
+                padding: 0px;
+                margin: 0px;
             }
         """)
         self.raw_file_list.itemClicked.connect(self.load_saved_raw_file)
@@ -527,10 +520,35 @@ class PatientInfoWidget(QWidget):
 
         return frame
 
+    def _build_raw_file_row_widget(self, filename: str, timestamp_iso: str) -> QWidget:
+        row_widget = QWidget()
+        row_layout = QVBoxLayout(row_widget)
+        row_layout.setContentsMargins(8, 6, 8, 4)
+        row_layout.setSpacing(4)
+
+        filename_label = QLabel(filename)
+        filename_label.setWordWrap(True)
+        filename_label.setStyleSheet("color: #111827; font-size: 12px; font-weight: 500; background: transparent;")
+        row_layout.addWidget(filename_label)
+
+        timestamp_label = QLabel(timestamp_iso)
+        timestamp_label.setWordWrap(True)
+        timestamp_label.setStyleSheet("color: #374151; font-size: 11px; background: transparent;")
+        row_layout.addWidget(timestamp_label)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.HLine)
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background-color: #111111; border: none; margin: 0px; padding: 0px;")
+        row_layout.addWidget(divider)
+
+        return row_widget
+
     def create_detected_events_section(self):
         """Auto detected apnea events list with jump support."""
         frame = QFrame()
         frame.setObjectName("detectedEventsSection")
+        frame.setMinimumHeight(250)
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(12, 12, 12, 12)
         frame_layout.setSpacing(12)
@@ -633,7 +651,10 @@ class PatientInfoWidget(QWidget):
         item = QListWidgetItem(item_text)
         item.setData(Qt.UserRole, file_path)
         item.setToolTip(file_path)
+        row_widget = self._build_raw_file_row_widget(filename, timestamp_iso)
+        item.setSizeHint(row_widget.sizeHint())
         self.raw_file_list.insertItem(0, item)
+        self.raw_file_list.setItemWidget(item, row_widget)
 
     def _get_raw_data_dir(self):
         """Raw CSV folder dhundo: helper -> last saved file -> DB folder."""

@@ -42,6 +42,8 @@ except ImportError:
         preprocess_signals,
     )
 
+from src.utils.sample_rate import DEFAULT_SAMPLE_RATE_HZ
+
 try:
     from src.components.airflow_display_processing import enhance_airflow_for_graph_and_detection
 except ImportError:
@@ -85,6 +87,16 @@ AASM_APNEA_DROP_PERCENT = 90.0
 OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD = 0.20
 CENTRAL_APNEA_EFFORT_THRESHOLD = 0.60
 CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO = 0.08
+DESAT_DROP_PERCENT = 3.0
+DESAT_LINK_WINDOW_SEC = 30.0
+DESAT_BASELINE_LOOKBACK_SEC = 60.0   # how far back the pre-desat baseline is taken
+# The fall must also be a fall against the RECENT level, not just against the
+# best value in the last minute. On a slow drift (99 -> 98 -> 97 -> 96 over a
+# minute) the 60 s p90 keeps quoting a value half a minute old and manufactures
+# a 3% "desaturation" where nothing ever fell. This is checked only at ONSET;
+# once a desaturation has started it runs on the normal baseline, so a long
+# event is not truncated when SpO2 sits at its new low level.
+DESAT_RECENT_BASELINE_SEC = 20.0
 
 # ---------------------------------------------------------------------------
 # Adjustable analysis parameters (Settings -> Analysis parameters bridge)
@@ -99,6 +111,12 @@ _ADJUSTABLE_DEFAULTS = {
     "MIN_EVENT_SEC": MIN_EVENT_SEC,
     "MAX_EVENT_SEC": MAX_EVENT_SEC,
 }
+
+
+# Registered here, not in the _ADJUSTABLE_DEFAULTS literal above: that dict is
+# built long before this constant exists, so naming it there would be a
+# NameError at import.
+_ADJUSTABLE_DEFAULTS["DESAT_DROP_PERCENT"] = DESAT_DROP_PERCENT
 
 
 def get_analysis_parameters() -> dict[str, Any]:
@@ -142,6 +160,9 @@ class DetectedApneaEvent:
     variability_score: float
     rule_label: str
     spo2_confirmed: bool = True
+    desat_nadir_sec: float | None = None
+    desat_nadir_spo2: float | None = None
+    desat_baseline_spo2: float | None = None
     ai_label: str | None = None
     ai_confidence: float | None = None
     final_label: str | None = None
@@ -618,7 +639,7 @@ def _robust_signal_amplitude(values: pd.Series | np.ndarray) -> float:
     return float(np.nanpercentile(series, 95) - np.nanpercentile(series, 5))
 
 
-def _effort_amplitude(values: np.ndarray | None, fs: float = 10.0) -> float:
+def _effort_amplitude(values: np.ndarray | None, fs: float = DEFAULT_SAMPLE_RATE_HZ) -> float:
     """Breathing amplitude on an effort belt, immune to slow belt drift.
 
     p95-p5 of the raw segment measures DRIFT as well as breathing: a belt that
@@ -647,7 +668,7 @@ def _effort_ratios(
     abdomen_segment: np.ndarray | None,
     thorax_baseline_amp: float,
     abdomen_baseline_amp: float,
-    fs: float = 10.0,
+    fs: float = DEFAULT_SAMPLE_RATE_HZ,
 ) -> float:
     thorax_ratio = (
         _effort_amplitude(thorax_segment, fs) / thorax_baseline_amp
@@ -687,7 +708,7 @@ def _compute_effort_baseline(
     thorax: np.ndarray | None,
     abdomen: np.ndarray | None,
     baseline_mask: np.ndarray,
-    fs: float = 10.0,
+    fs: float = DEFAULT_SAMPLE_RATE_HZ,
 ) -> tuple[float, float] | None:
     """Return (thorax_baseline_amplitude, abdomen_baseline_amplitude).
 
@@ -717,8 +738,8 @@ def _effort_state(
     thorax_baseline_amp: float,
     abdomen_baseline_amp: float,
     fs: float,
-    absent_below: float = OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD,
-    present_at_or_above: float = CENTRAL_APNEA_EFFORT_THRESHOLD,
+    absent_below: float | None = None,
+    present_at_or_above: float | None = None,
 ) -> str:
     """Classify one half-event's breathing effort as 'absent', 'borderline'
     or 'present'.
@@ -728,6 +749,15 @@ def _effort_state(
     0.3 even on a dead-flat trace. So a segment with NO detectable breaths is
     called absent regardless of that ratio.
     """
+    # Resolved at call time, not at def time. Python binds a default argument
+    # once, when the function object is created, so these used to keep the
+    # 0.20 / 0.60 they were born with -- the Settings dialog could rebind the
+    # module globals all it liked and the classifier never noticed.
+    if absent_below is None:
+        absent_below = OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD
+    if present_at_or_above is None:
+        present_at_or_above = CENTRAL_APNEA_EFFORT_THRESHOLD
+
     best_ratio = _effort_ratios(
         thorax_segment, abdomen_segment, thorax_baseline_amp, abdomen_baseline_amp, fs
     )
@@ -754,7 +784,7 @@ def classify_apnea_effort_type(
     abdomen_event: np.ndarray | None,
     thorax_baseline_amp: float,
     abdomen_baseline_amp: float,
-    fs: float = 10.0,
+    fs: float = DEFAULT_SAMPLE_RATE_HZ,
 ) -> str:
     """Classify an apnea-tier event (>=90% airflow drop) as Obstructive (OSA),
     Central (CSA), or Mixed (MSA) based on whether breathing effort
@@ -972,6 +1002,127 @@ def classify_rule_event(
     return "NO_EVENT"
 
 
+def detect_desaturations(
+    time_sec: np.ndarray,
+    spo2: np.ndarray,
+    lookback_sec: float | None = None,
+    drop_percent: float | None = None,
+    min_event_sec: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Detect AASM-style desaturation events from SpO2.
+
+    The rule is a fall of at least `drop_percent` from the recent pre-event
+    baseline. This helper is intentionally small so the report can reuse the
+    detector's logic instead of inventing a second counting formula.
+    """
+    # Same late-binding trap as _effort_state: resolve from the live globals so
+    # the Desaturation tab's threshold actually reaches the scorer.
+    if drop_percent is None:
+        drop_percent = DESAT_DROP_PERCENT
+    if lookback_sec is None:
+        lookback_sec = DESAT_BASELINE_LOOKBACK_SEC
+
+    time_arr = np.asarray(time_sec, dtype=float).reshape(-1)
+    spo2_arr = np.asarray(spo2, dtype=float).reshape(-1)
+    if time_arr.size == 0 or spo2_arr.size == 0:
+        return []
+
+    sample_count = min(time_arr.size, spo2_arr.size)
+    time_arr = time_arr[:sample_count]
+    spo2_arr = spo2_arr[:sample_count].copy()
+    # 70, not 50: pulse oximeters are only validated down to about 70%, and
+    # report_metrics_calculator already rejects below 70. Two different floors
+    # meant the dashboard scored 16 desaturations where the report scored 14.
+    spo2_arr[~np.isfinite(spo2_arr) | (spo2_arr < 70.0) | (spo2_arr > 100.0)] = np.nan
+
+    finite_diffs = np.diff(time_arr)
+    finite_diffs = finite_diffs[np.isfinite(finite_diffs) & (finite_diffs > 0)]
+    sample_dt = float(np.median(finite_diffs)) if finite_diffs.size else 0.0
+    if sample_dt <= 0.0:
+        sample_dt = 1.0
+
+    lookback_samples = max(1, int(round(float(lookback_sec) / sample_dt)))
+    recent_samples = max(1, int(round(DESAT_RECENT_BASELINE_SEC / sample_dt)))
+
+    # Both trailing baselines are computed once for the full recording with a
+    # vectorized rolling quantile. The old per-sample np.nanpercentile() loop
+    # dominated runtime on long studies. shift(1) keeps each baseline strictly
+    # before the current sample, matching the original slice spo2_arr[start:index].
+    spo2_series = pd.Series(spo2_arr)
+    baseline_series = (
+        spo2_series.rolling(window=lookback_samples, min_periods=1)
+        .quantile(0.90)
+        .shift(1)
+        .to_numpy(dtype=float)
+    )
+    recent_series = (
+        spo2_series.rolling(window=recent_samples, min_periods=1)
+        .quantile(0.90)
+        .shift(1)
+        .to_numpy(dtype=float)
+    )
+
+    active = np.zeros(sample_count, dtype=bool)
+    in_desaturation = False
+
+    for index, value in enumerate(spo2_arr):
+        if not np.isfinite(value):
+            continue
+        baseline_spo2 = baseline_series[index]
+        if not np.isfinite(baseline_spo2) or baseline_spo2 <= 0.0:
+            continue
+        if baseline_spo2 - float(value) < float(drop_percent):
+            in_desaturation = False
+            continue
+
+        if not in_desaturation:
+            # ONSET only: a drift has already carried the recent level down, so
+            # the fall does not show against the last few seconds. A real
+            # desaturation still does -- SpO2 is high right up to the fall.
+            recent_baseline = recent_series[index]
+            if np.isfinite(recent_baseline) and recent_baseline - float(value) < float(drop_percent):
+                continue
+            in_desaturation = True
+
+        active[index] = True
+
+    events: list[dict[str, Any]] = []
+    for start_index, end_index, duration_sec in _segment_mask(active, time_arr, min_event_sec):
+        baseline_spo2 = float(baseline_series[start_index])
+        segment = spo2_arr[start_index : end_index + 1]
+        finite_segment = segment[np.isfinite(segment)]
+        if finite_segment.size:
+            nadir_local_index = int(np.nanargmin(finite_segment))
+            nadir_spo2 = float(finite_segment[nadir_local_index])
+            finite_positions = np.flatnonzero(np.isfinite(segment))
+            nadir_abs_index = int(start_index + finite_positions[nadir_local_index])
+            nadir_sec = float(time_arr[nadir_abs_index])
+        else:
+            nadir_spo2 = float("nan")
+            nadir_sec = float(time_arr[start_index])
+        measured_drop = (
+            float(baseline_spo2 - nadir_spo2)
+            if np.isfinite(baseline_spo2) and np.isfinite(nadir_spo2)
+            else float(drop_percent)
+        )
+        events.append(
+            {
+                "start_index": int(start_index),
+                "end_index": int(end_index),
+                "start_sec": float(time_arr[start_index]),
+                "end_sec": float(time_arr[end_index]),
+                "duration_sec": float(duration_sec),
+                "baseline_spo2": baseline_spo2,
+                "nadir_sec": nadir_sec,
+                "nadir_spo2": nadir_spo2,
+                "drop_percent": measured_drop,
+                "threshold_percent": float(drop_percent),
+            }
+        )
+
+    return events
+
+
 def _finalize_label(rule_label: str, ai_label: str | None, ai_confidence: float | None) -> str:
     if ai_label is None or ai_confidence is None:
         return rule_label
@@ -1014,11 +1165,10 @@ def detect_apnea_events_from_dataframe(
     time_sec = signal_df["time_sec"].to_numpy(dtype=float)
     airflow = signal_df["airflow"].to_numpy(dtype=float)
     spo2 = signal_df["spo2"].to_numpy(dtype=float)
-    # Sensor dropouts are stored as 0, and anything below ~50% is not
-    # physiological. Treat those as MISSING, never as a desaturation -- a gap
-    # right after an event would otherwise fake a huge "desat" (e.g. 97 -> 0)
-    # and falsely confirm every hypopnea.
-    spo2 = np.where(spo2 < 50.0, np.nan, spo2)
+    # 70, not 50: pulse oximeters are only validated down to about 70%, and
+    # report_metrics_calculator already rejects below 70. Two different floors
+    # meant the dashboard scored 16 desaturations where the report scored 14.
+    spo2 = np.where(~np.isfinite(spo2) | (spo2 < 70.0) | (spo2 > 100.0), np.nan, spo2)
     snoring = signal_df["snoring"].to_numpy(dtype=float)
     body_movement = signal_df["body_movement"].to_numpy(dtype=float)
     thorax = signal_df["thorax"].to_numpy(dtype=float) if "thorax" in signal_df.columns else None
@@ -1108,6 +1258,9 @@ def detect_apnea_events_from_dataframe(
     analysis_drop_percent = np.clip(np.nan_to_num(analysis_drop_percent, nan=0.0), 0.0, 100.0)
 
     spo2_usable = bool(np.any(np.isfinite(spo2)))
+    # Score desaturations independently (AASM reports these as ODI) so they can
+    # be drawn on the SpO2 channel and linked to the event they belong to.
+    desaturations = detect_desaturations(time_sec, spo2) if spo2_usable else []
 
     label_specs = [
         (
@@ -1240,24 +1393,39 @@ def detect_apnea_events_from_dataframe(
             drop_ratio = float(np.clip(drop_ratio, 0.0, 1.0))
             drop_percent = drop_ratio * 100.0
 
-            # AASM desaturation timing: SpO2 falls with a circulation delay,
-            # so search from event start until 60 s after the event ends.
-            # Only finite samples count; a dropout gap is "not measured" here,
-            # not "oxygen fell to zero".
-            pre_mask = (time_sec >= max(0.0, time_sec[start_index] - 60.0)) & (time_sec < time_sec[start_index])
-            pre_spo2 = spo2[pre_mask]
-            pre_spo2 = pre_spo2[np.isfinite(pre_spo2)]
+            # Attach the scored desaturation whose NADIR sits closest after this
+            # event. SpO2 falls with a circulation delay, so the nadir almost
+            # always lands after the event is over. Nearest -- not deepest --
+            # or one big dip gets claimed by every nearby event.
+            linked_desat = None
+            best_gap = None
+            for candidate in desaturations:
+                nadir_sec = float(candidate["nadir_sec"])
+                if not (
+                    time_sec[start_index]
+                    <= nadir_sec
+                    <= time_sec[end_index] + DESAT_LINK_WINDOW_SEC
+                ):
+                    continue
+                gap = abs(nadir_sec - time_sec[end_index])
+                if best_gap is None or gap < best_gap:
+                    best_gap = gap
+                    linked_desat = candidate
 
-            post_mask = (time_sec >= time_sec[start_index]) & (time_sec <= (time_sec[end_index] + 60.0))
-            post_spo2 = spo2[post_mask]
-            post_spo2 = post_spo2[np.isfinite(post_spo2)]
-
-            if len(pre_spo2) > 0 and len(post_spo2) > 0:
-                spo2_drop = float(np.max(pre_spo2) - np.min(post_spo2))
+            # The SCORED desaturation is the single source of truth. The old
+            # max-minus-min sweep over a 60 s window could span a slow drift or
+            # two unrelated plateaus and report a "drop" where no desaturation
+            # was ever scored -- confirming hypopneas that have no dip to point
+            # at. When SpO2 is usable, no linked desaturation means 0%.
+            if not spo2_usable:
+                spo2_drop = 0.0
+                spo2_measurable = False
+            elif linked_desat is not None:
+                spo2_drop = float(linked_desat["drop_percent"])
                 spo2_measurable = True
             else:
                 spo2_drop = 0.0
-                spo2_measurable = False
+                spo2_measurable = True
 
             snoring_mean = float(np.nanmean(event_snoring))
             movement_mean = float(np.nanmean(event_movement))
@@ -1323,6 +1491,15 @@ def detect_apnea_events_from_dataframe(
                         spo2_usable
                         and spo2_measurable
                         and spo2_drop >= AASM_HYPOPNEA_SPO2_DESAT_MIN
+                    ),
+                    "desat_nadir_sec": (
+                        float(linked_desat["nadir_sec"]) if linked_desat else None
+                    ),
+                    "desat_nadir_spo2": (
+                        float(linked_desat["nadir_spo2"]) if linked_desat else None
+                    ),
+                    "desat_baseline_spo2": (
+                        float(linked_desat["baseline_spo2"]) if linked_desat else None
                     ),
                 }
             )
@@ -1452,6 +1629,9 @@ def detect_apnea_events_from_dataframe(
                 variability_score=float(event["variability_score"]),
                 rule_label=str(event["rule_label"]),
                 spo2_confirmed=bool(event.get("spo2_confirmed", True)),
+                desat_nadir_sec=event.get("desat_nadir_sec"),
+                desat_nadir_spo2=event.get("desat_nadir_spo2"),
+                desat_baseline_spo2=event.get("desat_baseline_spo2"),
                 ai_label=ai_label,
                 ai_confidence=ai_confidence,
                 final_label=final_label,
@@ -1529,6 +1709,15 @@ def detect_apnea_events_from_dataframe(
         "debug_summary": debug_summary,
         "debug_events": debug_events,
         "events": [event.to_dict() for event in events],
+        "desaturations": desaturations,
+        "desaturation_count": len(desaturations),
+        "odi_per_hour": (
+            float(len(desaturations) / (float(time_sec[-1]) / 3600.0))
+            if (spo2_usable and len(time_sec) and time_sec[-1] > 0)
+            else None
+        ),
+        "spo2_channel_usable": bool(spo2_usable),
+        "desat_threshold_percent": float(DESAT_DROP_PERCENT),
     }
 
 

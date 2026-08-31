@@ -76,6 +76,7 @@ class DatabaseWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setModal(False)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("Patient Database")
         self.setFixedSize(1200, 800)
         self.db_manager = DatabaseManager()
@@ -602,6 +603,7 @@ class DatabaseWindow(QDialog):
         patient_code = patient.get("patient_id") or patient.get("id") or "Unknown"
 
         msg_box = QMessageBox(self)
+        msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         msg_box.setWindowTitle("Patient Selected")
         msg_box.setText(f"{display_name} with ID {patient_code} was selected successfully.")
         msg_box.setIcon(QMessageBox.Information)
@@ -916,12 +918,16 @@ class DatabaseWindow(QDialog):
         button.clicked.connect(lambda checked=False, btn=button: self.handle_edit_patient(btn))
         return button
 
-    def verify_edit_password(self):
-        """Ask for the password before editing. Return True only if it matches."""
+    def verify_edit_password(self, action="editing"):
+        """Ask for the password before a protected action.
+
+        `action` only changes the wording, e.g. "editing" or
+        "deleting this patient". Returns True only if the password matches.
+        """
         password, ok = QInputDialog.getText(
             self,
             "Password Required",
-            "Please enter the password before editing:",
+            f"Please enter the password before {action}:",
             QLineEdit.Password,
         )
         if not ok:
@@ -932,11 +938,48 @@ class DatabaseWindow(QDialog):
             QMessageBox.warning(
                 self,
                 "Wrong Password",
-                "The password is incorrect. These details cannot be edited.",
+                "The password is incorrect. Cannot continue.",
             )
             return False
 
         return True
+
+    def _count_patient_data(self, patient_db_id):
+        """How many recordings and reports are attached to this patient."""
+        session_count = 0
+        report_count = 0
+
+        try:
+            patient = self.db_manager.get_patient_by_id(patient_db_id)
+            if patient:
+                sessions = list_sessions(
+                    patient_id=(patient.get('patient_id') or None),
+                    patient_db_id=patient.get('id'),
+                )
+                session_count = len(sessions or [])
+        except Exception as error:
+            print(f"Could not count sessions for patient {patient_db_id}: {error}")
+
+        try:
+            reports = self.db_manager.get_patient_reports(patient_db_id)
+            report_count = len(reports or [])
+        except Exception as error:
+            print(f"Could not count reports for patient {patient_db_id}: {error}")
+
+        return session_count, report_count
+
+    def _clear_dashboard_if_showing(self, deleted_patient_db_id):
+        """Clear the dashboard if it is still showing the patient we deleted."""
+        parent = self.parent()
+        if parent is None:
+            return
+
+        if getattr(parent, "_last_selected_database_patient_id", None) == deleted_patient_db_id:
+            parent._last_selected_database_patient_id = None
+
+        if getattr(parent, "current_patient_db_id", None) == deleted_patient_db_id:
+            if hasattr(parent, "clear_current_patient"):
+                parent.clear_current_patient()
 
     def handle_edit_patient(self, cell_widget):
         """Edit button -> password -> prefilled patient form -> DB update."""
@@ -1030,6 +1073,7 @@ class DatabaseWindow(QDialog):
                 print("Error: Could not fetch patient data from the database")
         else:
             msg_box = QMessageBox(self)
+            msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
             msg_box.setWindowTitle("No Selection")
             msg_box.setText("Please select a patient first.")
             msg_box.setIcon(QMessageBox.Warning)
@@ -1113,6 +1157,7 @@ class DatabaseWindow(QDialog):
         row = self.patients_table.currentRow()
         if row < 0 or self.patients_table.isRowHidden(row):
             msg_box = QMessageBox(self)
+            msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
             msg_box.setWindowTitle("No Selection")
             msg_box.setText("Please select a patient first.")
             msg_box.setIcon(QMessageBox.Warning)
@@ -1178,11 +1223,32 @@ class DatabaseWindow(QDialog):
         patient_db_id = self.patients_table.item(row, 0).data(Qt.UserRole)
         last_name = self.patients_table.item(row, 0).text()
         first_name = self.patients_table.item(row, 1).text()
-        
+
+        # Deleting a patient is far more destructive than editing one, so it
+        # asks for the same password the Edit button already asks for.
+        if not self.verify_edit_password("deleting this patient"):
+            return
+
+        session_count, report_count = self._count_patient_data(patient_db_id)
+
+        confirm_lines = [
+            f'Are you sure you want to delete patient "{last_name} {first_name}"?'
+        ]
+        if session_count or report_count:
+            confirm_lines.append("")
+            confirm_lines.append(
+                f"This patient has {session_count} recording(s) and "
+                f"{report_count} report(s). After deleting the patient they "
+                f"will no longer be reachable from the Records and Reports lists."
+            )
+        confirm_lines.append("")
+        confirm_lines.append("This cannot be undone.")
+
         # Confirm deletion
         msg_box = QMessageBox(self)
+        msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         msg_box.setWindowTitle("Confirm Delete")
-        msg_box.setText(f'Are you sure you want to delete patient "{last_name} {first_name}"?')
+        msg_box.setText("\n".join(confirm_lines))
         msg_box.setIcon(QMessageBox.Warning)
         msg_box.setStyleSheet("""
             QMessageBox {
@@ -1273,6 +1339,10 @@ class DatabaseWindow(QDialog):
             success = self.db_manager.delete_patient(patient_db_id)
             if success:
                 print(f"Patient {last_name} {first_name} deleted successfully")
+                # The dashboard may still be showing this patient - clear it
+                # before refreshing, so nothing gets filed against a patient
+                # row that no longer exists.
+                self._clear_dashboard_if_showing(patient_db_id)
                 # Refresh the patients list (reports/records update inside this call)
                 self.load_patients_from_database()
             else:

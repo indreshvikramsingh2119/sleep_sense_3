@@ -22,23 +22,43 @@ Formula notes:
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 import numpy as np
+
+# The detector owns the single desaturation rule. Import it instead of scoring
+# desaturations a second time here so the dashboard and the report stay aligned.
+_APP_ROOT = Path(__file__).resolve().parents[2]
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
+
+DESAT_SCORER_IMPORT_ERROR = None
+try:
+    from ai_models.sleep_apnea.detect_apnea_from_airflow import detect_desaturations
+except Exception as import_error:  # pragma: no cover - defensive fallback
+    detect_desaturations = None
+    DESAT_SCORER_IMPORT_ERROR = str(import_error)
+
+from .sample_rate import DEFAULT_SAMPLE_RATE_HZ
 from .runtime_config import get_configured_path
 
-DEFAULT_SAMPLE_RATE_HZ = 10.0
 DEFAULT_SNORING_THRESHOLD = 5.0
 DEFAULT_ANALYSIS_JSON_DIR = get_configured_path("analysis_json_dir")
 HYPOXIC_BURDEN_BASELINE_SPO2 = 95.0
-DESATURATION_EVENT_DROP_PCT = 3.0
-DESATURATION_EVENT_THRESHOLD_SPO2 = HYPOXIC_BURDEN_BASELINE_SPO2 - DESATURATION_EVENT_DROP_PCT
+HYPOXIC_BURDEN_MIN_DROP_PCT = 3.0
+HYPOXIC_BURDEN_RECOVERY_THRESHOLD = HYPOXIC_BURDEN_BASELINE_SPO2 - HYPOXIC_BURDEN_MIN_DROP_PCT
+DESATURATION_EVENT_DROP_PCT = HYPOXIC_BURDEN_MIN_DROP_PCT
+DESATURATION_EVENT_THRESHOLD_SPO2 = HYPOXIC_BURDEN_RECOVERY_THRESHOLD
 MIN_VALID_SPO2_PCT = 70.0
 MAX_VALID_SPO2_PCT = 100.0
 MIN_VALID_SPO2_DURATION_SEC = 10.0
 MIN_VALID_SPO2_RATIO = 0.5
+ODI_BASELINE_WINDOW_SEC = 120.0
+ODI_DEFAULT_THRESHOLD_PCT = 3.0
+ODI_MIN_EVENT_DURATION_SEC = 10.0
 
 
 def _as_float_array(values: Any) -> np.ndarray:
@@ -53,6 +73,21 @@ def _first_signal(signals: Dict[str, Any], names: Iterable[str]) -> np.ndarray:
         if name in signals and signals[name] is not None:
             return _as_float_array(signals[name])
     return np.array([], dtype=float)
+
+
+def _aligned_sleep_mask(mask_values: Any, target_length: int) -> np.ndarray:
+    mask_array = np.asarray(mask_values if mask_values is not None else [], dtype=float).reshape(-1)
+    if target_length <= 0 or mask_array.size == 0:
+        return np.zeros(max(target_length, 0), dtype=bool)
+    if mask_array.size != target_length:
+        limit = min(mask_array.size, target_length)
+        aligned = np.zeros(target_length, dtype=float)
+        aligned[:limit] = mask_array[:limit]
+        mask_array = aligned
+    finite_mask = np.isfinite(mask_array)
+    sleep_mask = np.zeros(target_length, dtype=bool)
+    sleep_mask[finite_mask] = mask_array[finite_mask] > 0
+    return sleep_mask
 
 
 def _time_step_seconds(time_data: Any, fallback_sample_rate_hz: float) -> float:
@@ -155,6 +190,29 @@ def _severity_from_hb_index(hb_index_value: float) -> str:
     return "Severe"
 
 
+def _severity_from_odi(odi_value: float) -> str:
+    if odi_value < 5.0:
+        return "Normal"
+    if odi_value < 15.0:
+        return "Mild"
+    if odi_value < 30.0:
+        return "Moderate"
+    return "Severe"
+
+
+def _heart_rate_rhythm_label(highest_hr: Optional[float], lowest_hr: Optional[float]) -> str:
+    highest = float(highest_hr) if highest_hr is not None and np.isfinite(highest_hr) else None
+    lowest = float(lowest_hr) if lowest_hr is not None and np.isfinite(lowest_hr) else None
+    labels: list[str] = []
+    if highest is not None and highest > 100.0:
+        labels.append("Sinus Tachycardia")
+    if lowest is not None and lowest < 50.0:
+        labels.append("Sinus Bradycardia")
+    if labels:
+        return " / ".join(labels)
+    return "Normal Sinus Rhythm"
+
+
 def _body_position_name(value: Any) -> str | None:
     try:
         numeric_value = int(round(float(value)))
@@ -252,31 +310,85 @@ def calculate_hypoxic_burden_metrics(
     step_seconds: float,
     baseline_spo2: float = HYPOXIC_BURDEN_BASELINE_SPO2,
     event_threshold_spo2: float = DESATURATION_EVENT_THRESHOLD_SPO2,
+    recovery_threshold_spo2: float = HYPOXIC_BURDEN_RECOVERY_THRESHOLD,
 ) -> Dict[str, float]:
-    """Calculate real-time compatible hypoxic burden metrics from SpO2 samples."""
+    """Calculate event-based hypoxic burden metrics from SpO2 samples."""
     valid_spo2, quality = _filter_valid_spo2_samples(spo2_values, step_seconds)
     if quality["quality_status"] != "valid":
         return quality
 
     sample_interval_min = max(float(step_seconds), 0.0) / 60.0
-    below_baseline = valid_spo2 < float(baseline_spo2)
-    hypoxic_burden = float(
-        np.sum(np.maximum(float(baseline_spo2) - valid_spo2, 0.0) * below_baseline) * sample_interval_min
-    )
+    baseline_spo2 = float(baseline_spo2)
+    event_threshold_spo2 = float(event_threshold_spo2)
+    recovery_threshold_spo2 = float(recovery_threshold_spo2)
 
-    contiguous_below_baseline = _contiguous_segments(below_baseline)
+    # Hypoxic burden keeps its own published definition: area under the 95%
+    # baseline. It is not the desaturation count, so it stays independent.
+    hypoxic_burden = 0.0
+    total_count_event = 0
+    longest_duration_sec = 0.0
+    in_event = False
+    event_burden = 0.0
+    event_sample_count = 0
+
+    for spo2 in valid_spo2:
+        spo2_value = float(spo2)
+        deficit = max(baseline_spo2 - spo2_value, 0.0) * sample_interval_min
+
+        if not in_event:
+            if spo2_value < event_threshold_spo2:
+                in_event = True
+                event_burden = deficit
+                event_sample_count = 1
+            continue
+
+        if spo2_value < recovery_threshold_spo2:
+            event_burden += deficit
+            event_sample_count += 1
+            continue
+
+        hypoxic_burden += event_burden
+        total_count_event += 1
+        longest_duration_sec = max(longest_duration_sec, float(event_sample_count) * float(step_seconds))
+        event_burden = 0.0
+        event_sample_count = 0
+        in_event = False
+
+    if in_event and event_burden > 0.0:
+        hypoxic_burden += event_burden
+        total_count_event += 1
+        longest_duration_sec = max(longest_duration_sec, float(event_sample_count) * float(step_seconds))
+
+    # Desaturation count / index / longest come from the detector's single
+    # AASM rule (>=3% below the pre-event baseline). The old sweep counted
+    # "SpO2 below 92%" instead, which can miss real desaturations.
+    aligned = np.asarray(spo2_values if spo2_values is not None else [], dtype=float).reshape(-1)
+    aligned = aligned.astype(float)
+    aligned[
+        ~np.isfinite(aligned)
+        | (aligned < MIN_VALID_SPO2_PCT)
+        | (aligned > MAX_VALID_SPO2_PCT)
+    ] = np.nan
+    time_axis = np.arange(aligned.size, dtype=float) * float(step_seconds)
+
+    if detect_desaturations is not None:
+        desat_events = detect_desaturations(time_axis, aligned)
+    else:  # Detector unavailable - keep the old absolute-threshold fallback.
+        desat_events = [
+            {"duration_sec": float((end_index - start_index) * float(step_seconds))}
+            for start_index, end_index in _contiguous_segments(
+                np.nan_to_num(aligned, nan=100.0) < float(event_threshold_spo2)
+            )
+        ]
+
+    total_count_event = int(len(desat_events))
     longest_duration_sec = float(
-        max(
-            (((end - start) * float(step_seconds)) for start, end in contiguous_below_baseline),
-            default=0.0,
-        )
+        max((float(event.get("duration_sec", 0.0)) for event in desat_events), default=0.0)
     )
 
-    event_mask = valid_spo2 <= float(event_threshold_spo2)
-    event_segments = _contiguous_segments(event_mask)
-    total_count_event = int(len(event_segments))
-
-    sleep_duration_hours = float((valid_spo2.size * float(step_seconds)) / 3600.0) if step_seconds > 0 else 0.0
+    # aligned.size, not valid_spo2.size: valid_spo2 has artifact samples removed,
+    # and shrinking the denominator would inflate every per-hour index.
+    sleep_duration_hours = float((aligned.size * float(step_seconds)) / 3600.0) if step_seconds > 0 else 0.0
     desaturation_index = float(total_count_event / sleep_duration_hours) if sleep_duration_hours > 0 else 0.0
     hb_index = float(hypoxic_burden / sleep_duration_hours) if sleep_duration_hours > 0 else 0.0
 
@@ -296,6 +408,61 @@ def calculate_hypoxic_burden_metrics(
         "total_desats_display": str(total_count_event),
     })
     return quality
+
+
+def calculate_odi_metrics(
+    spo2_values: Any,
+    step_seconds: float,
+    threshold_pct: float = ODI_DEFAULT_THRESHOLD_PCT,
+    min_duration_sec: float = ODI_MIN_EVENT_DURATION_SEC,
+    baseline_window_sec: float = ODI_BASELINE_WINDOW_SEC,
+) -> Dict[str, Any]:
+    """Calculate ODI from valid SpO2 samples using a trailing rolling baseline."""
+    valid_spo2, quality = _filter_valid_spo2_samples(spo2_values, step_seconds)
+    result = {
+        "odi": 0.0,
+        "odi_display": "0.0 /h",
+        "odi_event_count": 0,
+        "odi_event_count_display": "0",
+        "odi_severity": "Normal",
+    }
+    if quality["quality_status"] != "valid":
+        return result
+
+    if step_seconds <= 0 or valid_spo2.size == 0:
+        return result
+
+    window_samples = max(1, int(round(float(baseline_window_sec) / float(step_seconds))))
+    min_event_samples = max(1, int(np.ceil(float(min_duration_sec) / float(step_seconds))))
+    threshold_pct = float(threshold_pct)
+
+    event_count = 0
+    index = 0
+    while index < valid_spo2.size:
+        start_window = max(0, index - window_samples)
+        baseline_window = valid_spo2[start_window:index]
+        baseline = float(np.median(baseline_window)) if baseline_window.size else float(valid_spo2[index])
+
+        if baseline - float(valid_spo2[index]) >= threshold_pct:
+            onset = index
+            while index < valid_spo2.size and baseline - float(valid_spo2[index]) >= threshold_pct:
+                index += 1
+            if (index - onset) >= min_event_samples:
+                event_count += 1
+            continue
+
+        index += 1
+
+    valid_hours = float(valid_spo2.size * float(step_seconds)) / 3600.0
+    odi_value = float(event_count / valid_hours) if valid_hours > 0 else 0.0
+    result.update({
+        "odi": odi_value,
+        "odi_display": f"{odi_value:.1f} /h",
+        "odi_event_count": int(event_count),
+        "odi_event_count_display": str(int(event_count)),
+        "odi_severity": _severity_from_odi(odi_value),
+    })
+    return result
 
 
 def _variability_label(std_dev: float) -> str:
@@ -342,9 +509,17 @@ def calculate_sleep_metrics(
 
     oximetry: Dict[str, Any] = {}
     hypoxic_metrics = _empty_hypoxic_metrics(reason="No SpO2 signal available.")
+    odi_metrics = {
+        "odi": 0.0,
+        "odi_display": "0.0 /h",
+        "odi_event_count": 0,
+        "odi_event_count_display": "0",
+        "odi_severity": "Normal",
+    }
     valid_spo2 = np.array([], dtype=float)
     if spo2.size:
         hypoxic_metrics = calculate_hypoxic_burden_metrics(spo2, step_seconds)
+        odi_metrics = calculate_odi_metrics(spo2, step_seconds, threshold_pct=ODI_DEFAULT_THRESHOLD_PCT)
         valid_spo2, _quality = _filter_valid_spo2_samples(spo2, step_seconds)
         if hypoxic_metrics["quality_status"] != "valid":
             valid_spo2 = np.array([], dtype=float)
@@ -365,6 +540,10 @@ def calculate_sleep_metrics(
         duration_below_90_sec = float(np.sum(below_90)) * step_seconds
         duration_below_85_sec = float(np.sum(below_85)) * step_seconds
         duration_below_80_sec = float(np.sum(below_80)) * step_seconds
+        valid_spo2_ratio_pct = float(hypoxic_metrics["valid_ratio"] * 100.0)
+        duration_below_90_pct = (duration_below_90_sec / sleep_duration_sec) * 100.0 if sleep_duration_sec > 0 else 0.0
+        duration_below_85_pct = (duration_below_85_sec / sleep_duration_sec) * 100.0 if sleep_duration_sec > 0 else 0.0
+        duration_below_80_pct = (duration_below_80_sec / sleep_duration_sec) * 100.0 if sleep_duration_sec > 0 else 0.0
 
         oximetry = {
             "mean_spo2": float(np.mean(valid_spo2)),
@@ -377,6 +556,11 @@ def calculate_sleep_metrics(
             "total_desats_display": hypoxic_metrics["total_desats_display"],
             "desaturation_index": hypoxic_metrics["desaturation_index"],
             "desaturation_index_display": hypoxic_metrics["desaturation_index_display"],
+            "odi3": odi_metrics["odi"],
+            "odi3_display": odi_metrics["odi_display"],
+            "odi3_event_count": odi_metrics["odi_event_count"],
+            "odi3_event_count_display": odi_metrics["odi_event_count_display"],
+            "odi3_severity": odi_metrics["odi_severity"],
             "desat_max_pct": max(0.0, baseline - minimum_value),
             "desat_max_pct_display": f"{max(0.0, baseline - minimum_value):.1f}",
             "hypoxic_burden": hypoxic_metrics["hypoxic_burden"],
@@ -387,7 +571,8 @@ def calculate_sleep_metrics(
             "oximetry_quality_status": hypoxic_metrics["quality_status"],
             "oximetry_quality_reason": hypoxic_metrics["quality_reason"],
             "valid_spo2_ratio": hypoxic_metrics["valid_ratio"],
-            "valid_spo2_ratio_display": f"{hypoxic_metrics['valid_ratio'] * 100.0:.0f}%",
+            "valid_spo2_ratio_pct": valid_spo2_ratio_pct,
+            "valid_spo2_ratio_display": f"{valid_spo2_ratio_pct:.0f}%",
             "valid_spo2_duration_sec": hypoxic_metrics["valid_duration_sec"],
             "valid_spo2_duration_display": _duration_text(hypoxic_metrics["valid_duration_sec"]),
             "desat_max_sec": desat_max_sec,
@@ -406,10 +591,16 @@ def calculate_sleep_metrics(
             "total_count_event_display": hypoxic_metrics["total_count_event_display"],
             "duration_below_90_sec": duration_below_90_sec,
             "duration_below_90_display": _duration_text(duration_below_90_sec),
+            "duration_below_90_pct": duration_below_90_pct,
+            "duration_below_90_pct_display": f"{duration_below_90_pct:.1f}%",
             "duration_below_85_sec": duration_below_85_sec,
             "duration_below_85_display": _duration_text(duration_below_85_sec),
+            "duration_below_85_pct": duration_below_85_pct,
+            "duration_below_85_pct_display": f"{duration_below_85_pct:.1f}%",
             "duration_below_80_sec": duration_below_80_sec,
             "duration_below_80_display": _duration_text(duration_below_80_sec),
+            "duration_below_80_pct": duration_below_80_pct,
+            "duration_below_80_pct_display": f"{duration_below_80_pct:.1f}%",
             "baseline_spo2": baseline,
             "baseline_spo2_display": f"{baseline:.1f}",
             "spo2_variability": _variability_label(float(np.std(valid_spo2))),
@@ -427,6 +618,11 @@ def calculate_sleep_metrics(
             "total_desats_display": "0",
             "desaturation_index": 0.0,
             "desaturation_index_display": "0.0",
+            "odi3": odi_metrics["odi"],
+            "odi3_display": odi_metrics["odi_display"],
+            "odi3_event_count": odi_metrics["odi_event_count"],
+            "odi3_event_count_display": odi_metrics["odi_event_count_display"],
+            "odi3_severity": odi_metrics["odi_severity"],
             "desat_max_pct": 0.0,
             "desat_max_pct_display": "0.0",
             "hypoxic_burden": 0.0,
@@ -437,6 +633,7 @@ def calculate_sleep_metrics(
             "oximetry_quality_status": hypoxic_metrics["quality_status"],
             "oximetry_quality_reason": hypoxic_metrics["quality_reason"],
             "valid_spo2_ratio": hypoxic_metrics["valid_ratio"],
+            "valid_spo2_ratio_pct": float(hypoxic_metrics["valid_ratio"] * 100.0),
             "valid_spo2_ratio_display": f"{hypoxic_metrics['valid_ratio'] * 100.0:.0f}%",
             "valid_spo2_duration_sec": hypoxic_metrics["valid_duration_sec"],
             "valid_spo2_duration_display": _duration_text(hypoxic_metrics["valid_duration_sec"]),
@@ -456,10 +653,16 @@ def calculate_sleep_metrics(
             "total_count_event_display": "0",
             "duration_below_90_sec": 0.0,
             "duration_below_90_display": "0.0 sec",
+            "duration_below_90_pct": 0.0,
+            "duration_below_90_pct_display": "0.0%",
             "duration_below_85_sec": 0.0,
             "duration_below_85_display": "0.0 sec",
+            "duration_below_85_pct": 0.0,
+            "duration_below_85_pct_display": "0.0%",
             "duration_below_80_sec": 0.0,
             "duration_below_80_display": "0.0 sec",
+            "duration_below_80_pct": 0.0,
+            "duration_below_80_pct_display": "0.0%",
             "baseline_spo2": None,
             "baseline_spo2_display": "-",
             "spo2_variability": "-",
@@ -468,17 +671,71 @@ def calculate_sleep_metrics(
 
     heart_rate: Dict[str, Any] = {}
     if pulse.size:
-        valid_hr = pulse[(np.isfinite(pulse)) & (pulse > 0)]
-        heart_rate = {
-            "mean_hr": float(np.mean(valid_hr)),
-            "mean_hr_display": f"{float(np.mean(valid_hr)):.1f} BPM",
-            "highest_hr": float(np.max(valid_hr)),
-            "highest_hr_display": f"{_number_text(float(np.max(valid_hr)))} BPM",
-            "lowest_hr": float(np.min(valid_hr)),
-            "lowest_hr_display": f"{_number_text(float(np.min(valid_hr)))} BPM",
-        }
+        tib_valid_mask = np.isfinite(pulse) & (pulse > 0)
+        tib_hr = pulse[tib_valid_mask]
+        sleep_hr = np.array([], dtype=float)
+        if tib_hr.size:
+            sleep_mask_array = _aligned_sleep_mask(sleep_mask, pulse.size)
+            sleep_valid_mask = tib_valid_mask & sleep_mask_array
+            sleep_hr = pulse[sleep_valid_mask]
+            if sleep_hr.size == 0:
+                sleep_hr = tib_hr
+
+        if tib_hr.size:
+            highest_hr_tib = float(np.max(tib_hr))
+            lowest_hr_tib = float(np.min(tib_hr))
+            highest_hr_sleep = float(np.max(sleep_hr)) if sleep_hr.size else None
+            lowest_hr_sleep = float(np.min(sleep_hr)) if sleep_hr.size else None
+            rhythm_label = _heart_rate_rhythm_label(highest_hr_tib, lowest_hr_tib)
+            heart_rate = {
+                "mean_hr_during_sleep": float(np.mean(sleep_hr)) if sleep_hr.size else None,
+                "mean_hr_during_sleep_display": f"{float(np.mean(sleep_hr)):.1f} BPM" if sleep_hr.size else "-",
+                "highest_hr_during_sleep": float(np.max(sleep_hr)) if sleep_hr.size else None,
+                "highest_hr_during_sleep_display": f"{_number_text(float(np.max(sleep_hr)))} BPM" if sleep_hr.size else "-",
+                "highest_hr_during_tib": float(np.max(tib_hr)),
+                "highest_hr_during_tib_display": f"{_number_text(float(np.max(tib_hr)))} BPM",
+                "lowest_hr_during_sleep": float(np.min(sleep_hr)) if sleep_hr.size else None,
+                "lowest_hr_during_sleep_display": f"{_number_text(float(np.min(sleep_hr)))} BPM" if sleep_hr.size else "-",
+                "lowest_hr_during_tib": float(np.min(tib_hr)),
+                "lowest_hr_during_tib_display": f"{_number_text(float(np.min(tib_hr)))} BPM",
+                "mean_hr": float(np.mean(sleep_hr)) if sleep_hr.size else float(np.mean(tib_hr)),
+                "mean_hr_display": f"{float(np.mean(sleep_hr)):.1f} BPM" if sleep_hr.size else f"{float(np.mean(tib_hr)):.1f} BPM",
+                "highest_hr": float(np.max(tib_hr)),
+                "highest_hr_display": f"{_number_text(float(np.max(tib_hr)))} BPM",
+                "lowest_hr": float(np.min(tib_hr)),
+                "lowest_hr_display": f"{_number_text(float(np.min(tib_hr)))} BPM",
+            }
+        else:
+            heart_rate = {
+                "mean_hr_during_sleep": None,
+                "mean_hr_during_sleep_display": "-",
+                "highest_hr_during_sleep": None,
+                "highest_hr_during_sleep_display": "-",
+                "highest_hr_during_tib": None,
+                "highest_hr_during_tib_display": "-",
+                "lowest_hr_during_sleep": None,
+                "lowest_hr_during_sleep_display": "-",
+                "lowest_hr_during_tib": None,
+                "lowest_hr_during_tib_display": "-",
+                "mean_hr": None,
+                "mean_hr_display": "-",
+                "highest_hr": None,
+                "highest_hr_display": "-",
+                "lowest_hr": None,
+                "lowest_hr_display": "-",
+            }
     else:
         heart_rate = {
+            "mean_hr_during_sleep": None,
+            "mean_hr_during_sleep_display": "-",
+            "highest_hr_during_sleep": None,
+            "highest_hr_during_sleep_display": "-",
+            "highest_hr_during_tib": None,
+            "highest_hr_during_tib_display": "-",
+            "lowest_hr_during_sleep": None,
+            "lowest_hr_during_sleep_display": "-",
+            "lowest_hr_during_tib": None,
+            "lowest_hr_during_tib_display": "-",
             "mean_hr": None,
             "mean_hr_display": "-",
             "highest_hr": None,
@@ -490,25 +747,41 @@ def calculate_sleep_metrics(
     snoring_summary: Dict[str, Any] = {}
     if snoring.size:
         valid_snoring = snoring[np.isfinite(snoring)]
-        segments = _snoring_segments(valid_snoring, threshold=snoring_threshold)
-        total_snore_duration_sec = float(sum((end - start) for start, end in segments)) * step_seconds
-        episode_count = int(len(segments))
-        mean_snore_duration_sec = total_snore_duration_sec / episode_count if episode_count else 0.0
-        snoring_percentage = (total_snore_duration_sec / sleep_duration_sec) * 100.0 if sleep_duration_sec > 0 else 0.0
-        snoring_summary = {
-            "snoring_threshold": snoring_threshold,
-            "total_snoring_episodes": episode_count,
-            "total_snoring_episodes_display": str(episode_count),
-            "total_snoring_duration_sec": total_snore_duration_sec,
-            "total_snoring_duration_display": _duration_text(total_snore_duration_sec),
-            "mean_snoring_duration_sec": mean_snore_duration_sec,
-            "mean_snoring_duration_display": _duration_text(mean_snore_duration_sec),
-            "snoring_percentage": snoring_percentage,
-            "snoring_percentage_display": f"{snoring_percentage:.1f} %",
-            "snoring_signal_min": float(np.min(valid_snoring)),
-            "snoring_signal_max": float(np.max(valid_snoring)),
-            "snoring_signal_mean": float(np.mean(valid_snoring)),
-        }
+        if valid_snoring.size:
+            segments = _snoring_segments(valid_snoring, threshold=snoring_threshold)
+            total_snore_duration_sec = float(sum((end - start) for start, end in segments)) * step_seconds
+            episode_count = int(len(segments))
+            mean_snore_duration_sec = total_snore_duration_sec / episode_count if episode_count else 0.0
+            snoring_percentage = (total_snore_duration_sec / sleep_duration_sec) * 100.0 if sleep_duration_sec > 0 else 0.0
+            snoring_summary = {
+                "snoring_threshold": snoring_threshold,
+                "total_snoring_episodes": episode_count,
+                "total_snoring_episodes_display": str(episode_count),
+                "total_snoring_duration_sec": total_snore_duration_sec,
+                "total_snoring_duration_display": _duration_text(total_snore_duration_sec),
+                "mean_snoring_duration_sec": mean_snore_duration_sec,
+                "mean_snoring_duration_display": _duration_text(mean_snore_duration_sec),
+                "snoring_percentage": snoring_percentage,
+                "snoring_percentage_display": f"{snoring_percentage:.1f} %",
+                "snoring_signal_min": float(np.min(valid_snoring)),
+                "snoring_signal_max": float(np.max(valid_snoring)),
+                "snoring_signal_mean": float(np.mean(valid_snoring)),
+            }
+        else:
+            snoring_summary = {
+                "snoring_threshold": snoring_threshold,
+                "total_snoring_episodes": 0,
+                "total_snoring_episodes_display": "0",
+                "total_snoring_duration_sec": 0.0,
+                "total_snoring_duration_display": "0.0 sec",
+                "mean_snoring_duration_sec": 0.0,
+                "mean_snoring_duration_display": "0.0 sec",
+                "snoring_percentage": 0.0,
+                "snoring_percentage_display": "0.0 %",
+                "snoring_signal_min": None,
+                "snoring_signal_max": None,
+                "snoring_signal_mean": None,
+            }
     else:
         snoring_summary = {
             "snoring_threshold": snoring_threshold,
@@ -551,22 +824,29 @@ def calculate_report_context(
     psg_data = psg_data or {}
     detected_events = detected_events or []
 
+    if isinstance(psg_data.get("signals"), dict):
+        signals = psg_data.get("signals", {}) or {}
+        time_axis = _as_float_array(psg_data.get("time"))
+    else:
+        signals = psg_data
+        time_axis = _as_float_array(psg_data.get("time")) if isinstance(psg_data, dict) else np.array([], dtype=float)
+
     sleep_duration_sec = float(metadata.get("sleep_duration_sec") or 0.0)
     sleep_hours = sleep_duration_sec / 3600.0 if sleep_duration_sec > 0 else 0.0
     sample_rate_hz = float(metadata.get("sample_rate_hz") or DEFAULT_SAMPLE_RATE_HZ)
     sample_count = int(metadata.get("sample_count") or 0)
-    if sample_count <= 0 and psg_data:
-        sample_count = max(len(np.asarray(values).reshape(-1)) for values in psg_data.values() if values is not None)
+    if sample_count <= 0 and signals:
+        sample_count = max((len(np.asarray(values).reshape(-1)) for values in signals.values() if values is not None), default=0)
     if sleep_duration_sec <= 0 and sample_count > 0 and sample_rate_hz > 0:
         sleep_duration_sec = float(sample_count / sample_rate_hz)
         sleep_hours = sleep_duration_sec / 3600.0 if sleep_duration_sec > 0 else 0.0
 
-    timestamp_raw = np.asarray(psg_data.get("timestamp_raw", []), dtype=float).reshape(-1)
+    timestamp_raw = np.asarray(signals.get("timestamp_raw", []), dtype=float).reshape(-1)
     lights_off = _clock_time_text(timestamp_raw[0]) if timestamp_raw.size else "-"
     lights_on = _clock_time_text(timestamp_raw[-1]) if timestamp_raw.size else "-"
     duration_display = _duration_text(sleep_duration_sec)
 
-    body_position = np.asarray(psg_data.get("body_position", []), dtype=float).reshape(-1)
+    body_position = np.asarray(signals.get("body_position", []), dtype=float).reshape(-1)
     position_names = ("Supine", "Prone", "Left", "Right", "Up")
     position_counts = {name: 0 for name in position_names}
     position_durations_sec = {name: 0.0 for name in position_names}
@@ -585,6 +865,8 @@ def calculate_report_context(
             else:
                 mask = np.isclose(body_position, 4)
             position_durations_sec[position_name] = float(np.sum(mask)) * sample_sec
+
+    total_position_time_sec = float(sum(position_durations_sec.values()))
 
     grouped_events = {
         "Central Apneas": [],
@@ -654,6 +936,93 @@ def calculate_report_context(
         if position_durations_sec[name] > 0 else "0.0"
         for name in position_names
     }
+    time_in_position = {
+        name: {
+            "duration_sec": float(position_durations_sec[name]),
+            "duration_display": _duration_text(position_durations_sec[name]),
+            "minutes_display": f"{position_durations_sec[name] / 60.0:.1f}",
+            "percentage": ((position_durations_sec[name] / total_position_time_sec) * 100.0) if total_position_time_sec > 0 else 0.0,
+            "percentage_display": (
+                f"{((position_durations_sec[name] / total_position_time_sec) * 100.0):.1f}%"
+                if total_position_time_sec > 0 else "0.0%"
+            ),
+            "rei_display": rei_in_position[name],
+            "event_count": int(position_counts[name]),
+        }
+        for name in position_names
+    }
+
+    group_counts = {
+        row["name"]: int(row.get("count_display", 0) or 0)
+        for row in respiratory_rows
+    }
+    dominant_group = max(group_counts, key=group_counts.get) if group_counts else "Obstructive Apneas"
+    if total_index < 5.0:
+        diagnosis = "No significant sleep-disordered breathing detected in the loaded recording."
+    elif group_counts.get("Obstructive Apneas", 0) >= max(
+        group_counts.get("Central Apneas", 0),
+        group_counts.get("Mixed Apneas", 0),
+        group_counts.get("Hypopneas", 0),
+    ):
+        diagnosis = f"{_severity_from_ahi(total_index)} obstructive sleep apnea pattern detected."
+    elif group_counts.get("Central Apneas", 0) >= max(
+        group_counts.get("Mixed Apneas", 0),
+        group_counts.get("Hypopneas", 0),
+    ):
+        diagnosis = f"{_severity_from_ahi(total_index)} central sleep apnea pattern detected."
+    elif group_counts.get("Mixed Apneas", 0) >= group_counts.get("Hypopneas", 0):
+        diagnosis = f"{_severity_from_ahi(total_index)} mixed sleep apnea pattern detected."
+    else:
+        diagnosis = f"{_severity_from_ahi(total_index)} hypopnea-dominant sleep-disordered breathing detected."
+
+    oximetry = analysis_results.get("oximetry", {}) or {}
+    snoring = analysis_results.get("snoring", {}) or {}
+    findings: list[str] = [
+        f"Respiratory event index is {total_index:.1f} events/hour ({_severity_from_ahi(total_index)} severity)."
+    ]
+    if total_events > 0:
+        findings.append(
+            f"{total_events} respiratory events were detected; dominant class: {dominant_group}."
+        )
+    if oximetry.get("lowest_spo2") is not None:
+        findings.append(
+            f"Lowest SpO2 was {oximetry.get('lowest_spo2_display', '-') }% with hypoxic burden {oximetry.get('hypoxic_burden_display', '0.00 %-min')}."
+        )
+    if float(oximetry.get("odi3") or 0.0) > 0.0:
+        findings.append(
+            f"ODI3 was {oximetry.get('odi3_display', '0.0 /h')} ({oximetry.get('odi3_severity', 'Normal')})."
+        )
+    if oximetry.get("duration_below_90_sec", 0.0) > 0:
+        findings.append(
+            f"Time below 90% SpO2: {oximetry.get('duration_below_90_display', '0.0 sec')} ({oximetry.get('duration_below_90_pct_display', '0.0%')})."
+        )
+    if snoring.get("total_snoring_episodes", 0) > 0:
+        findings.append(
+            f"Snoring occupied {snoring.get('snoring_percentage_display', '0.0 %')} of the recording across {snoring.get('total_snoring_episodes_display', '0')} episodes."
+        )
+
+    dominant_position = max(time_in_position, key=lambda name: time_in_position[name]["duration_sec"]) if time_in_position else None
+    recommendations: list[str] = []
+    if total_index >= 30.0:
+        recommendations.append("Prompt specialist review is recommended because the event burden is in the severe range.")
+    elif total_index >= 15.0:
+        recommendations.append("Sleep specialist follow-up is recommended because the event burden is in the moderate range.")
+    elif total_index >= 5.0:
+        recommendations.append("Clinical correlation and follow-up are recommended because a mild event burden is present.")
+    else:
+        recommendations.append("No high event burden is visible in the loaded recording; correlate with symptoms before deciding next steps.")
+    if oximetry.get("lowest_spo2") is not None and float(oximetry.get("lowest_spo2") or 0.0) < 88.0:
+        recommendations.append("Oxygen desaturation is significant; review this recording alongside clinical oxygenation history.")
+    if dominant_position and time_in_position[dominant_position]["event_count"] > 0:
+        recommendations.append(
+            f"Most events occurred while the patient was {dominant_position.lower()}; positional review may be useful."
+        )
+    if snoring.get("snoring_percentage", 0.0) >= 20.0:
+        recommendations.append("Snoring burden is elevated in this recording and should be reviewed with airway symptoms.")
+
+    urgency = "High" if total_index >= 30.0 or float(oximetry.get("lowest_spo2") or 100.0) < 80.0 else (
+        "Moderate" if total_index >= 15.0 or float(oximetry.get("lowest_spo2") or 100.0) < 88.0 else "Routine"
+    )
 
     summary = {
         "ahi_rei_display": f"{total_index:.1f}",
@@ -671,6 +1040,7 @@ def calculate_report_context(
             "positions": dict(position_counts),
         },
         "rei_in_position": rei_in_position,
+        "time_in_position": time_in_position,
     }
 
     return {
@@ -679,8 +1049,19 @@ def calculate_report_context(
             "lights_on": lights_on,
             "trt_display": duration_display,
             "tib_display": duration_display,
+            "sample_rate_display": f"{sample_rate_hz:.1f} Hz",
+            "sample_count_display": str(sample_count),
+            "recording_start_sec": float(time_axis[0]) if time_axis.size else 0.0,
+            "recording_end_sec": float(time_axis[-1]) if time_axis.size else sleep_duration_sec,
         },
         "respiratory_summary": summary,
+        "report_interpretation": {
+            "diagnosis": diagnosis,
+            "severity": _severity_from_ahi(total_index),
+            "urgency": urgency,
+            "findings": findings,
+            "recommendations": recommendations,
+        },
     }
 
 

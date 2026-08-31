@@ -252,6 +252,7 @@ class PatientRecordForm(QDialog):
     def __init__(self, parent=None, patient_data=None, edit_mode=None):
         super().__init__(parent)
         self.setModal(True)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("Patient Record Card")
         self.setFixedSize(750, 650)
         self.db_manager = DatabaseManager()

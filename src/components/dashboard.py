@@ -3,12 +3,13 @@ Sleep Sense Dashboard - Main Dashboard Component
 """
 
 import os
+import html
 import tempfile
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea,
-    QSplitterHandle, QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox, QCheckBox, QStyle, QGraphicsOpacityEffect
+    QSplitterHandle, QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox, QCheckBox, QStyle, QGraphicsOpacityEffect, QTextEdit
 )
 from PyQt5.QtCore import Qt, QSize, QPoint, QRect, pyqtSignal, QUrl, QEvent
 from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor, QPen, QDesktopServices
@@ -21,9 +22,270 @@ from .database_window import DatabaseWindow
 from ..utils.toolbar_utils import create_toolbar_button, get_icon_definitions, get_toolbar_qss_styles
 from ..utils.dialog_helpers import show_styled_warning
 from ..utils.database_manager import DatabaseManager
+from ..utils.sample_rate import DEFAULT_SAMPLE_RATE_HZ
 from src.utils.button_functions import ButtonFunctions
 from ..utils.app_paths import get_resource_path as get_asset_path
 from ..utils.report_metrics_calculator import calculate_report_context
+
+INTERPRETATION_DATA = {
+    "General Findings": [
+        {"text": "Findings are consistent with no SLEEP APNEA (REI < 5)", "highlight": False},
+        {"text": "Findings are consistent with MILD SLEEP APNEA (REI 5-14.9)", "highlight": True},
+        {"text": "Findings are consistent with MODERATE SLEEP APNEA (REI 15-29.9)", "highlight": False},
+        {"text": "Findings are consistent with SEVERE SLEEP APNEA (REI >= 30)", "highlight": False},
+    ],
+    "Therapeutic Options": [
+        {"text": "Initiate Auto PAP with pressure range 4 to 16 cm H2O with routine CPAP follow-up.", "highlight": False},
+        {"text": "Schedule an in-lab study or repeat the home sleep apnea test if clinically indicated.", "highlight": True},
+        {"text": "Evaluation by an Ear-Nose-Throat (ENT) specialist.", "highlight": False},
+        {"text": "Patient may benefit from nocturnal mandibular advancement device after dentist evaluation.", "highlight": False},
+    ],
+    "Sleep Hygiene & Lifestyle Advice": [
+        {"text": "Maintain good sleep hygiene: total sleep time of 6 to 7 hrs each night.", "highlight": False},
+        {"text": "Avoid alcohol and mobile phone usage before going to bed.", "highlight": False},
+        {"text": "Follow up with sleep physician. Regular exercise and healthy lifestyle to maintain weight.", "highlight": False},
+    ],
+}
+
+MILD_APNEA_TEXT = "Findings are consistent with MILD SLEEP APNEA (REI 5-14.9)"
+MILD_FOLLOWUP_TEXT = "Schedule an in-lab study or repeat the home sleep apnea test if clinically indicated."
+CHECKMARK_ICON_PATH = get_asset_path("icons/iconmonstr-check-mark-1.svg").replace("\\", "/")
+
+
+class InterpretationOptionRow(QWidget):
+    """Checkbox row with a wrapping label that can be clicked to toggle selection."""
+
+    def __init__(self, text, highlight=False, checked=False, parent=None):
+        super().__init__(parent)
+        self._highlight = bool(highlight)
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_effect)
+        self.checkbox = QCheckBox()
+        self.checkbox.setChecked(bool(checked))
+        self.checkbox.setCursor(Qt.PointingHandCursor)
+        self.checkbox.setStyleSheet("""
+            QCheckBox {
+                padding-top: 2px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1.5px solid #aaa;
+                border-radius: 3px;
+                background: white;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #185FA5;
+                border-color: #185FA5;
+                image: url("%s");
+            }
+        """ % CHECKMARK_ICON_PATH)
+
+        self.label = QLabel(text)
+        self.label.setWordWrap(True)
+        self.label.setCursor(Qt.PointingHandCursor)
+        self._base_text = text
+        self._apply_visual_state(enabled=True)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        layout.addWidget(self.checkbox, 0, Qt.AlignTop)
+        layout.addWidget(self.label, 1)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.checkbox.isEnabled():
+            self.checkbox.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def is_checked(self):
+        return self.checkbox.isChecked()
+
+    def text(self):
+        return self.label.text()
+
+    def set_row_enabled(self, enabled):
+        enabled = bool(enabled)
+        if not enabled and self.checkbox.isChecked():
+            self.checkbox.setChecked(False)
+        self.checkbox.setEnabled(enabled)
+        self.checkbox.setCursor(Qt.PointingHandCursor if enabled else Qt.ArrowCursor)
+        self.label.setCursor(Qt.PointingHandCursor if enabled else Qt.ArrowCursor)
+        self._apply_visual_state(enabled=enabled)
+
+    def _apply_visual_state(self, enabled):
+        text_color = "#A32D2D" if self._highlight else "#2c2c2c"
+        font_weight = "bold" if self._highlight else "normal"
+        if not enabled:
+            text_color = "#AEB8C4"
+        self.label.setText(self._base_text)
+        self.label.setStyleSheet(
+            f"font-size: 13px; color: {text_color}; "
+            f"font-weight: {font_weight}; padding: 4px 0;"
+        )
+        self._opacity_effect.setOpacity(1.0 if enabled else 0.45)
+
+
+class InterpretationDialog(QDialog):
+    """Selectable interpretation dialog that feeds manual notes into the report."""
+
+    def __init__(self, selected_items=None, custom_note="", parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.setWindowTitle("Level 3 HSAT - Interpretation")
+        self.setMinimumSize(680, 580)
+        self.selected_items = list(selected_items or [])
+        self.custom_note = str(custom_note or "")
+        self.option_rows = []
+        self.option_rows_by_text = {}
+        self.general_findings_rows = []
+        self._build_ui()
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        header = QWidget()
+        header.setFixedHeight(48)
+        header.setStyleSheet("background-color: #185FA5;")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 0, 20, 0)
+        title_label = QLabel("Level 3 HSAT - Interpretation")
+        title_label.setStyleSheet("color: white; font-size: 14px; font-weight: bold;")
+        header_layout.addWidget(title_label)
+        main_layout.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: white; }")
+        body = QWidget()
+        body.setStyleSheet("background: white;")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(20, 16, 20, 16)
+        body_layout.setSpacing(16)
+
+        selected_lookup = set(self.selected_items)
+        for section, items in INTERPRETATION_DATA.items():
+            section_label = QLabel(section)
+            section_label.setStyleSheet("""
+                color: #185FA5; font-size: 13px; font-weight: bold;
+                border-bottom: 1px solid #ddd; padding-bottom: 4px;
+            """)
+            body_layout.addWidget(section_label)
+
+            for item in items:
+                row = InterpretationOptionRow(
+                    text=item["text"],
+                    highlight=item["highlight"],
+                    checked=item["text"] in selected_lookup,
+                )
+                row.checkbox.stateChanged.connect(self._update_count)
+                self.option_rows.append(row)
+                self.option_rows_by_text[item["text"]] = row
+                if section == "General Findings":
+                    row.checkbox.stateChanged.connect(
+                        lambda state, current_row=row: self._handle_general_findings_change(current_row, state)
+                    )
+                    self.general_findings_rows.append(row)
+                body_layout.addWidget(row)
+
+        custom_label = QLabel("Custom note")
+        custom_label.setStyleSheet(
+            "color: #185FA5; font-size: 13px; font-weight: bold; "
+            "border-bottom: 1px solid #ddd; padding-bottom: 4px;"
+        )
+        body_layout.addWidget(custom_label)
+
+        self.custom_text = QTextEdit()
+        self.custom_text.setPlaceholderText("Type a custom interpretation note to add to the report...")
+        self.custom_text.setFixedHeight(70)
+        self.custom_text.setPlainText(self.custom_note)
+        self.custom_text.setStyleSheet(
+            "border: 1px solid #ddd; border-radius: 4px; padding: 6px; font-size: 13px;"
+        )
+        body_layout.addWidget(self.custom_text)
+        body_layout.addStretch()
+
+        scroll.setWidget(body)
+        main_layout.addWidget(scroll)
+
+        footer = QWidget()
+        footer.setFixedHeight(52)
+        footer.setStyleSheet("border-top: 1px solid #e0e0e0; background: white;")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(20, 0, 20, 0)
+
+        self.count_label = QLabel()
+        self.count_label.setStyleSheet("color: #555; font-size: 12px;")
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedHeight(32)
+        cancel_btn.setStyleSheet("border: 1px solid #ccc; border-radius: 4px; padding: 0 16px; font-size: 13px;")
+        cancel_btn.clicked.connect(self.reject)
+
+        add_btn = QPushButton("Add to report")
+        add_btn.setFixedHeight(32)
+        add_btn.setStyleSheet("""
+            QPushButton {
+                background: #185FA5;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 0 16px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #0C447C;
+            }
+        """)
+        add_btn.clicked.connect(self._collect_and_accept)
+
+        footer_layout.addWidget(self.count_label)
+        footer_layout.addStretch()
+        footer_layout.addWidget(cancel_btn)
+        footer_layout.addWidget(add_btn)
+        main_layout.addWidget(footer)
+
+        mild_row = self.option_rows_by_text.get(MILD_APNEA_TEXT)
+        if mild_row is not None:
+            mild_row.checkbox.stateChanged.connect(self._sync_conditional_options)
+        self._update_count()
+        self._sync_conditional_options()
+
+    def _update_count(self):
+        selected_count = sum(1 for row in self.option_rows if row.is_checked())
+        self.count_label.setText(f"{selected_count} items selected")
+
+    def _sync_conditional_options(self):
+        mild_row = self.option_rows_by_text.get(MILD_APNEA_TEXT)
+        followup_row = self.option_rows_by_text.get(MILD_FOLLOWUP_TEXT)
+        if mild_row is None or followup_row is None:
+            return
+        followup_row.set_row_enabled(mild_row.is_checked())
+
+    def _handle_general_findings_change(self, selected_row, state):
+        if state != Qt.Checked:
+            return
+        for row in self.general_findings_rows:
+            if row is selected_row:
+                continue
+            if row.checkbox.isChecked():
+                row.checkbox.setChecked(False)
+
+    def _collect_and_accept(self):
+        self.selected_items = [row.text() for row in self.option_rows if row.is_checked()]
+        self.custom_note = self.custom_text.toPlainText().strip()
+        self.accept()
+
+    def get_selected(self):
+        return list(self.selected_items)
+
+    def get_custom_note(self):
+        return self.custom_note
 
 
 class ScreenshotSelectionLabel(QLabel):
@@ -444,6 +706,7 @@ class ScreenshotOverlayWidget(QWidget):
             rect = self.source_selection_rect()
             if rect.isNull() or rect.width() <= 5 or rect.height() <= 5:
                 msg_box = QMessageBox(self)
+                msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
                 msg_box.setWindowTitle("Select Area")
                 msg_box.setText("Please drag to select a screenshot area first.")
                 msg_box.setIconPixmap(self._drag_drop_icon_pixmap())
@@ -550,6 +813,7 @@ class ScreenshotCropResultDialog(QDialog):
     def __init__(self, image_path, parent=None):
         super().__init__(parent)
         self.image_path = image_path
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("Screenshot Captured")
         self.setModal(True)
         self.setMinimumWidth(460)
@@ -706,6 +970,7 @@ class ScreenshotSelectorDialog(QDialog):
 
         self.setWindowTitle("Select Screenshot Area")
         self.setModal(True)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setMinimumSize(900, 600)
 
         self._build_ui()
@@ -824,6 +1089,7 @@ class ReportRequirementsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setModal(True)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("Report Requirements")
         self.setMinimumWidth(520)
         self.setStyleSheet("""
@@ -922,6 +1188,8 @@ class SleepSenseDashboard(QMainWindow):
         self.dashboard_screenshot_paths = []
         self.screenshot_overlay = None
         self.current_patient_db_id = None
+        self.report_interpretation_selected_items = []
+        self.report_interpretation_custom_note = ""
         
         # Global event navigation system
         self.current_event_index = -1  # Global pointer for event navigation
@@ -2023,13 +2291,45 @@ class SleepSenseDashboard(QMainWindow):
         self.action_patient_record.setEnabled(False)
         toolbar.addAction(self.action_patient_record)
                 
-        self.action_medical_report = QAction(QIcon(os.path.join(script_dir, "icons/medical_report.svg")), "Medical Report", self)
-        self.action_medical_report.setToolTip("Medical Report")
-        self.action_medical_report.setStatusTip("Open Medical Report Form")
+        self.action_medical_report = QAction(QIcon(os.path.join(script_dir, "icons/medical_report.svg")), "Report", self)
+        self.action_medical_report.setToolTip("Report")
+        self.action_medical_report.setStatusTip("Open Report Form")
         self.action_medical_report.triggered.connect(self.open_medical_report)
         self.action_medical_report.setVisible(True)
         self.action_medical_report.setEnabled(False)
         toolbar.addAction(self.action_medical_report)
+
+        self.interpretation_btn = QPushButton()
+        brain_icon_path = get_asset_path("icons/brain.png")
+        if brain_icon_path and QIcon(brain_icon_path).isNull() is False:
+            self.interpretation_btn.setIcon(QIcon(brain_icon_path))
+        self.interpretation_btn.setText("Interpretation")
+        self.interpretation_btn.setFixedHeight(30)
+        self.interpretation_btn.setCursor(Qt.PointingHandCursor)
+        self.interpretation_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #185FA5;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 14px;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #0C447C;
+            }
+            QPushButton:pressed {
+                background-color: #042C53;
+            }
+            QPushButton:disabled {
+                background-color: #9DB7D3;
+                color: #F3F7FB;
+            }
+        """)
+        self.interpretation_btn.clicked.connect(self.open_interpretation)
+        self.interpretation_btn.setEnabled(False)
+        toolbar.addWidget(self.interpretation_btn)
         
         # self.action_event_list = QAction(QIcon(os.path.join(script_dir, icons[7]["icon"])), "Event List", self)
         # self.action_event_list.setToolTip("Event List")
@@ -2125,6 +2425,12 @@ class SleepSenseDashboard(QMainWindow):
             fade_effect.setOpacity(1.0 if active else DATABASE_ICON_INACTIVE_OPACITY)
             tool_button.setCursor(Qt.PointingHandCursor if active else Qt.ArrowCursor)
 
+        interpretation_btn = getattr(self, "interpretation_btn", None)
+        if interpretation_btn is not None:
+            interpretation_btn.setVisible(True)
+            interpretation_btn.setEnabled(bool(active))
+            interpretation_btn.setCursor(Qt.PointingHandCursor if active else Qt.ArrowCursor)
+
     def show_database_menu_icons(self):
         """Enable the database extra icons and show them at full strength."""
         self._set_database_icons_active(True)
@@ -2165,6 +2471,34 @@ class SleepSenseDashboard(QMainWindow):
         self.patient_record_form = PatientRecordForm(self)
         self.patient_record_form.exec_()  # Modal dialog
 
+    def open_interpretation(self):
+        """Open the interpretation picker and store the selected notes."""
+        if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
+            return
+
+        dialog = InterpretationDialog(
+            selected_items=getattr(self, "report_interpretation_selected_items", []),
+            custom_note=getattr(self, "report_interpretation_custom_note", ""),
+            parent=self,
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        self.report_interpretation_selected_items = dialog.get_selected()
+        self.report_interpretation_custom_note = dialog.get_custom_note()
+        print("Interpretation updated")
+
+    def _apply_manual_interpretation_to_report_context(self, report_context):
+        """Attach interpretation selections to the report context."""
+        report_context = dict(report_context or {})
+        report_interpretation = dict(report_context.get("report_interpretation") or {})
+        report_interpretation["manual_items"] = list(getattr(self, "report_interpretation_selected_items", []) or [])
+        report_interpretation["custom_note"] = str(
+            getattr(self, "report_interpretation_custom_note", "") or ""
+        ).strip()
+        report_context["report_interpretation"] = report_interpretation
+        return report_context
+
     def _get_report_psg_payload(self):
         """Return the most report-friendly PSG payload available."""
         for attr_name in ("current_psg_data", "psg_full_data"):
@@ -2183,7 +2517,7 @@ class SleepSenseDashboard(QMainWindow):
         return {}
     
     def open_medical_report(self):
-        """Generate Medical Report and show in internal viewer"""
+        """Generate report and show in internal viewer"""
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
@@ -2193,7 +2527,7 @@ class SleepSenseDashboard(QMainWindow):
             dialog.exec_()
             return
         
-        print("Medical Report button clicked")
+        print("Report button clicked")
         # Import the medical report generation function and PDF viewer
         from .medical_report_form import generate_sleep_report, PDFViewerWidget
         from .full_psg_hypnogram import generate_full_psg_hypnogram
@@ -2214,11 +2548,19 @@ class SleepSenseDashboard(QMainWindow):
             screenshot_paths = list(getattr(self, 'dashboard_screenshot_paths', []))
             report_psg_payload = self._get_report_psg_payload()
             report_signals = report_psg_payload.get("signals", {})
+            current_report_events = []
+            if hasattr(self.monitor_chart, "get_available_navigation_events"):
+                current_report_events = list(self.monitor_chart.get_available_navigation_events())
+            elif getattr(self.monitor_chart, "auto_rule_ai_result", None):
+                current_report_events = list(self.monitor_chart.auto_rule_ai_result.get("events", []))
+
             report_context = calculate_report_context(
                 getattr(self.monitor_chart, "analysis_results", None),
                 report_signals,
-                getattr(getattr(self.monitor_chart, "auto_rule_ai_result", None), "get", lambda *_: [])("events", []),
+                current_report_events,
             )
+            report_context = self._apply_manual_interpretation_to_report_context(report_context)
+            analysis_results = getattr(self.monitor_chart, "analysis_results", None)
 
             hypnogram_path = None
             try:
@@ -2227,10 +2569,10 @@ class SleepSenseDashboard(QMainWindow):
                     hypnogram_path = generate_full_psg_hypnogram(
                         psg_data=report_psg_payload,
                         output_folder=str(output_folder),
-                        sampling_rate=10.0,
+                        sampling_rate=DEFAULT_SAMPLE_RATE_HZ,
                         patient_id=str(patient_data.get("patient_id") or patient_db_id or "patient") if patient_data else str(patient_db_id or "patient"),
                         study_id=Path(getattr(self.monitor_chart, "loaded_csv_path", "study")).stem if getattr(self.monitor_chart, "loaded_csv_path", None) else "study",
-                        detected_events=(getattr(self.monitor_chart, "auto_rule_ai_result", {}) or {}).get("events", []),
+                        detected_events=current_report_events,
                     )
                     print(f"✅ Full PSG hypnogram generated: {hypnogram_path}")
             except Exception as hypnogram_error:
@@ -2241,14 +2583,15 @@ class SleepSenseDashboard(QMainWindow):
 
             pdf_path = generate_sleep_report(
                 patient_data=patient_data,
+                analysis_results=analysis_results,
                 dashboard_screenshot_path=screenshot_paths if screenshot_paths else None,
                 report_context=report_context,
             )
-            print("✅ Medical report generated successfully!")
+            print("✅ Report generated successfully!")
 
             # Also save the report to the DB, otherwise nothing ever appears in
             # the Database window's "3. Reports" section.
-            self.save_generated_report_to_db(patient_data, patient_db_id, pdf_path)
+            self.save_generated_report_to_db(patient_data, patient_db_id, pdf_path, report_context)
             
             # Show PDF in internal viewer
             self.pdf_viewer = PDFViewerWidget(
@@ -2262,9 +2605,9 @@ class SleepSenseDashboard(QMainWindow):
             self.pdf_viewer.exec_()
 
         except Exception as e:
-            print(f"❌ Error generating medical report: {str(e)}")
+            print(f"❌ Error generating report: {str(e)}")
 
-    def save_generated_report_to_db(self, patient_data, patient_db_id, pdf_path):
+    def save_generated_report_to_db(self, patient_data, patient_db_id, pdf_path, report_context=None):
         """Insert the generated report into the reports table with its PDF path."""
         if not patient_db_id or not pdf_path:
             print("⚠️ Report was not saved to the DB - patient id or pdf path missing")
@@ -2273,6 +2616,23 @@ class SleepSenseDashboard(QMainWindow):
         from datetime import datetime
 
         patient_data = patient_data or {}
+        report_context = report_context or {}
+        report_interpretation = report_context.get("report_interpretation", {}) or {}
+        manual_items = report_interpretation.get("manual_items", []) or []
+        custom_note = str(report_interpretation.get("custom_note") or "").strip()
+        findings_text = "\n".join(report_interpretation.get("findings", []))
+        recommendations_text = "\n".join(report_interpretation.get("recommendations", []))
+        if manual_items:
+            manual_block = "\n".join(f"- {item}" for item in manual_items)
+            recommendations_text = (
+                f"{recommendations_text}\n\nSelected Notes:\n{manual_block}"
+                if recommendations_text else f"Selected Notes:\n{manual_block}"
+            )
+        if custom_note:
+            recommendations_text = (
+                f"{recommendations_text}\n\nCustom Note:\n{custom_note}"
+                if recommendations_text else f"Custom Note:\n{custom_note}"
+            )
         full_name = " ".join(
             part for part in [
                 str(patient_data.get('last_name') or '').strip(),
@@ -2308,6 +2668,8 @@ class SleepSenseDashboard(QMainWindow):
 
         # Keep the database primary key so report generation can fetch a fresh row later.
         self.current_patient_db_id = patient_data.get('id')
+        self.report_interpretation_selected_items = []
+        self.report_interpretation_custom_note = ""
         
         # Create patient ID string for display
         patient_id_str = patient_data.get('patient_id') or str(patient_data.get('id', '--------'))
@@ -2329,6 +2691,26 @@ class SleepSenseDashboard(QMainWindow):
             })
         
         print(f"Patient data loaded successfully in dashboard")
+
+    def clear_current_patient(self):
+        """Forget the currently selected patient, e.g. after deletion."""
+        print("Clearing current patient from dashboard")
+        self.current_patient_db_id = None
+        self._last_selected_database_patient_id = None
+
+        if hasattr(self, 'monitor_chart'):
+            self.monitor_chart.set_patient_id("--------")
+            self.monitor_chart.patient_db_id = None
+
+        if hasattr(self, 'patient_info'):
+            self.patient_info.set_patient_data({
+                'last_name': '',
+                'first_name': '',
+                'dob': '',
+                'patient_id': '--------',
+                'gender': '',
+                'age': '',
+            })
 
     def load_psg_data_from_path(self, file_path):
         """Load a previously saved PSG file directly from disk.
