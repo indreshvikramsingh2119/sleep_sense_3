@@ -64,6 +64,22 @@ CORE_MIN_SEC = 3.0
 # AASM: event continues as long as airflow stays below the hypopnea floor (30%).
 EVENT_BOUNDARY_DROP_PERCENT = 30.0
 MERGE_GAP_SEC = 0.0
+PULSE_FLATLINE_STD_BPM = 1.5
+PULSE_FLATLINE_MIN_UNIQUE_RATIO = 0.05
+
+
+def _pulse_looks_artifactual(pulse_segment: np.ndarray) -> bool:
+    """Return True when pulse data looks flat or unnaturally stepped."""
+    values = np.asarray(pulse_segment, dtype=float).reshape(-1)
+    values = values[np.isfinite(values) & (values > 0)]
+    if values.size < 10:
+        return False
+    standard_deviation = float(np.std(values))
+    unique_ratio = float(np.unique(values).size / values.size)
+    return (
+        standard_deviation < PULSE_FLATLINE_STD_BPM
+        or unique_ratio <= PULSE_FLATLINE_MIN_UNIQUE_RATIO
+    )
 
 # ---------------------------------------------------------------------------
 # AASM scoring rules
@@ -74,8 +90,8 @@ MERGE_GAP_SEC = 0.0
 # desaturation path is usable here.
 AASM_HYPOPNEA_DROP_PERCENT = 30.0
 AASM_HYPOPNEA_SPO2_DESAT_MIN = 3.0
-# Apnea (Obstructive/Central/Mixed): airflow reduced >=90%.
-AASM_APNEA_DROP_PERCENT = 90.0
+# Apnea (Obstructive/Central/Mixed): airflow reduced >=75%.
+AASM_APNEA_DROP_PERCENT = 75.0
 # Obstructive vs Central is decided by breathing effort (Thorax/Abdomen), not
 # by how deep the airflow drop is. ResMed-style two-threshold band: below
 # OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD, effort is "absent"; at/above
@@ -167,6 +183,7 @@ class DetectedApneaEvent:
     ai_confidence: float | None = None
     final_label: str | None = None
     image_path: str | None = None
+    evidence: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -413,6 +430,22 @@ EFFORT_MIN_BREATH_PEAKS = 2
 # belt drift does not masquerade as breathing.
 EFFORT_BREATH_WINDOW_SEC = 3.0
 
+# ---------------------------------------------------------------------------
+# Sensor-off / dislodged-cannula detection
+# ---------------------------------------------------------------------------
+# A dislodged/blocked nasal cannula kills airflow while the chest belt keeps
+# moving. A real central apnea silences both, so effort distinguishes them.
+SENSOR_OFF_MIN_SEC = 60.0
+SENSOR_OFF_AIRFLOW_RATIO = 0.12
+SENSOR_OFF_ERRATIC_RATIO = 1.75
+SENSOR_OFF_THORAX_MIN_RATIO = 0.20
+SENSOR_OFF_MIN_DEAD_CORE_SEC = 30.0
+SENSOR_OFF_RECOVERY_STABLE_SEC = 5.0
+SENSOR_OFF_NORMAL_RATIO_BAND = (0.5, 1.4)
+SENSOR_OFF_REFERENCE_PERCENTILE = 90.0
+SENSOR_OFF_EVENT_OVERLAP_RATIO = 0.5
+LONG_EVENT_SENSOR_SUSPECT_SEC = 90.0
+
 
 def _continuous_breath_amplitude(
     airflow: np.ndarray,
@@ -480,7 +513,7 @@ def _refine_apnea_core(
     drop_short: np.ndarray,
     drop_threshold: float = AASM_APNEA_DROP_PERCENT,
 ) -> tuple[int, int]:
-    """Re-measure a >=90% core using the SHORT-window drop array.
+    """Re-measure a >=75% core using the SHORT-window drop array.
 
     The core was found on the 5 s smoothed drop array, which loses ~2.5 s at
     each edge of a flat stretch. Expanding outward on the 1 s array recovers
@@ -512,6 +545,92 @@ def _effort_breath_rate(segment: np.ndarray | None, baseline_amp: float, fs: flo
     if len(peaks) < EFFORT_MIN_BREATH_PEAKS:
         return 0.0
     return float(len(peaks)) / duration_min
+
+
+def _global_amplitude_reference(
+    amplitude: np.ndarray,
+    fs: float,
+    exclude_first_sec: float = BASELINE_EXCLUDE_FIRST_SEC,
+    percentile: float = SENSOR_OFF_REFERENCE_PERCENTILE,
+) -> float:
+    """Return a fixed whole-recording amplitude reference."""
+    amp = np.asarray(amplitude, dtype=float)
+    n = len(amp)
+    if n == 0:
+        return 0.0
+    exclude_points = min(n, int(round(fs * exclude_first_sec)))
+    source = amp[exclude_points:]
+    source = source[np.isfinite(source)]
+    if source.size == 0:
+        source = amp[np.isfinite(amp)]
+    if source.size == 0:
+        return 0.0
+    return float(np.nanpercentile(source, percentile))
+
+
+def detect_sensor_off_segments(
+    airflow: np.ndarray,
+    thorax: np.ndarray | None,
+    fs: float,
+    time_sec: np.ndarray,
+    min_duration_sec: float = SENSOR_OFF_MIN_SEC,
+    airflow_dead_ratio: float = SENSOR_OFF_AIRFLOW_RATIO,
+    erratic_ratio: float = SENSOR_OFF_ERRATIC_RATIO,
+    thorax_min_ratio: float = SENSOR_OFF_THORAX_MIN_RATIO,
+    min_dead_core_sec: float = SENSOR_OFF_MIN_DEAD_CORE_SEC,
+) -> list[dict[str, Any]]:
+    """Find prolonged airflow dropouts while thorax effort continues."""
+    airflow = np.asarray(airflow, dtype=float)
+    n = len(airflow)
+    if n == 0 or thorax is None or len(thorax) != n:
+        return []
+
+    airflow_amp = _continuous_breath_amplitude(airflow, fs)
+    thorax_amp = _continuous_breath_amplitude(np.asarray(thorax, dtype=float), fs)
+    airflow_ref = _global_amplitude_reference(airflow_amp, fs)
+    thorax_ref = _global_amplitude_reference(thorax_amp, fs)
+    if airflow_ref <= 0:
+        return []
+
+    airflow_ratio = airflow_amp / max(airflow_ref, 1e-9)
+    thorax_ratio = (
+        thorax_amp / max(thorax_ref, 1e-9)
+        if thorax_ref > 0
+        else np.full(n, np.nan)
+    )
+    dead_mask = (airflow_ratio <= airflow_dead_ratio) & (thorax_ratio >= thorax_min_ratio)
+    unreliable_mask = (
+        (airflow_ratio <= airflow_dead_ratio) | (airflow_ratio >= erratic_ratio)
+    ) & (thorax_ratio >= thorax_min_ratio)
+    raw_segments = _segment_mask(unreliable_mask, time_sec, min_duration_sec)
+
+    results: list[dict[str, Any]] = []
+    for start_idx, end_idx, _duration_sec in raw_segments:
+        dead_sec = int(np.count_nonzero(dead_mask[start_idx:end_idx + 1])) / fs
+        if dead_sec < min_dead_core_sec:
+            continue
+        # Keep the segment limited to the genuinely dead/erratic range.
+        # Extending backward can swallow weak but real breathing into the
+        # sensor-off marker.
+        idx = start_idx
+        results.append({
+            "start_sec": float(time_sec[idx]),
+            "end_sec": float(time_sec[end_idx]),
+            "duration_sec": float(time_sec[end_idx] - time_sec[idx]),
+            "dead_core_sec": float(dead_sec),
+            "reason": "airflow_unreliable_effort_present",
+        })
+
+    results.sort(key=lambda item: item["start_sec"])
+    merged: list[dict[str, Any]] = []
+    for segment in results:
+        if merged and segment["start_sec"] <= merged[-1]["end_sec"] + 1.0:
+            merged[-1]["end_sec"] = max(merged[-1]["end_sec"], segment["end_sec"])
+            merged[-1]["duration_sec"] = merged[-1]["end_sec"] - merged[-1]["start_sec"]
+            merged[-1]["dead_core_sec"] += segment["dead_core_sec"]
+        else:
+            merged.append(segment)
+    return merged
 
 
 def _extend_boundary_through_flat(
@@ -558,15 +677,22 @@ def _extend_boundary_through_flat(
     return start, end
 
 
-def _thoracoabdominal_paradox(thorax_event: np.ndarray, abdomen_event: np.ndarray) -> bool:
+def _thoracoabdominal_paradox(
+    thorax_event: np.ndarray,
+    abdomen_event: np.ndarray,
+    fs: float = DEFAULT_SAMPLE_RATE_HZ,
+) -> bool:
     """True when thorax and abdomen move OUT of phase during the event
     (paradoxical breathing) -- the classic obstructive signature."""
     if len(thorax_event) < 10 or len(abdomen_event) < 10:
         return False
     t = np.asarray(thorax_event, dtype=float)
     a = np.asarray(abdomen_event, dtype=float)
-    t = t - np.nanmean(t)
-    a = a - np.nanmean(a)
+    # Remove slow belt drift so movement during the event, not belt sliding,
+    # determines the thorax/abdomen phase relationship.
+    window = max(3, int(round(fs * EFFORT_BREATH_WINDOW_SEC)))
+    t = t - pd.Series(t).rolling(window, center=True, min_periods=1).mean().to_numpy()
+    a = a - pd.Series(a).rolling(window, center=True, min_periods=1).mean().to_numpy()
     denom = float(np.sqrt(np.nansum(t * t) * np.nansum(a * a)))
     if denom <= 0:
         return False
@@ -786,7 +912,7 @@ def classify_apnea_effort_type(
     abdomen_baseline_amp: float,
     fs: float = DEFAULT_SAMPLE_RATE_HZ,
 ) -> str:
-    """Classify an apnea-tier event (>=90% airflow drop) as Obstructive (OSA),
+    """Classify an apnea-tier event (>=75% airflow drop) as Obstructive (OSA),
     Central (CSA), or Mixed (MSA) based on whether breathing effort
     (Thorax/Abdomen movement) continues during the event - the real AASM
     signal for this distinction (not how deep the airflow drop is).
@@ -797,7 +923,7 @@ def classify_apnea_effort_type(
     # Paradoxical (out-of-phase) thoraco-abdominal movement is the strongest
     # obstructive signature -- only checkable when BOTH belts exist.
     if thorax_event is not None and abdomen_event is not None:
-        if _thoracoabdominal_paradox(thorax_event, abdomen_event):
+        if _thoracoabdominal_paradox(thorax_event, abdomen_event, fs):
             return "OSA"
 
     sample_count = len(reference)
@@ -836,6 +962,49 @@ def classify_apnea_effort_type(
     if first_half_state == "absent":
         return "MSA"
     return "OSA"
+
+
+def _build_event_evidence(event: dict[str, Any]) -> list[str]:
+    """Build the detector evidence lines shown when an event is hovered."""
+    lines: list[str] = []
+
+    baseline_amp = float(event.get("baseline_airflow", 0.0) or 0.0)
+    event_amp = float(event.get("event_airflow_amplitude", 0.0) or 0.0)
+    drop = float(event.get("airflow_drop_percent", 0.0) or 0.0)
+    if drop >= AASM_APNEA_DROP_PERCENT:
+        tier = "apnea tier (>=75%)"
+    elif drop >= AASM_HYPOPNEA_DROP_PERCENT:
+        tier = "hypopnea tier (30-75%)"
+    else:
+        tier = "below hypopnea tier"
+    lines.append(
+        f"Airflow   drop {drop:.0f}%   amplitude {baseline_amp:.1f} -> {event_amp:.1f}   {tier}"
+    )
+
+    nadir_sec = event.get("desat_nadir_sec")
+    base_spo2 = event.get("desat_baseline_spo2")
+    nadir_spo2 = event.get("desat_nadir_spo2")
+    if nadir_sec is not None and base_spo2 is not None and nadir_spo2 is not None:
+        base_spo2 = float(base_spo2)
+        nadir_spo2 = float(nadir_spo2)
+        delay = float(nadir_sec) - float(event.get("end_sec", 0.0))
+        spo2_drop = float(event.get("spo2_drop", 0.0) or 0.0)
+        mark = "OK" if spo2_drop >= AASM_HYPOPNEA_SPO2_DESAT_MIN else "below 3%"
+        lines.append(
+            f"SpO2      {base_spo2:.0f} -> {nadir_spo2:.0f}  (-{base_spo2 - nadir_spo2:.0f}%)   "
+            f"nadir {delay:+.0f} s from event end   {mark}"
+        )
+    else:
+        lines.append("SpO2      no desaturation linked   no")
+
+    if event.get("pulse_artifact"):
+        lines.append("Pulse     trace looked artifactual during event (probe disturbed)   no")
+
+    reason = event.get("sensor_off_reason")
+    if reason:
+        lines.append(f"Sensor    reassigned to SENSOR_OFF: {reason}")
+
+    return lines
 
 
 def _build_debug_summary(
@@ -991,11 +1160,9 @@ def classify_rule_event(
         return "APNEA_CANDIDATE"
 
     if drop_percent >= AASM_HYPOPNEA_DROP_PERCENT:
-        if not spo2_usable:
-            # SpO2 channel missing/dead: keep the event but it is flagged
-            # unconfirmed via 'spo2_confirmed' on the event record.
-            return "HYPOPNEA"
-        if spo2_drop >= AASM_HYPOPNEA_SPO2_DESAT_MIN:
+        # AASM hypopnea requires both the airflow drop and a confirmed SpO2
+        # desaturation; do not score an unconfirmed hypopnea.
+        if spo2_usable and spo2_drop >= AASM_HYPOPNEA_SPO2_DESAT_MIN:
             return "HYPOPNEA"
         return "NO_EVENT"
 
@@ -1165,6 +1332,7 @@ def detect_apnea_events_from_dataframe(
     time_sec = signal_df["time_sec"].to_numpy(dtype=float)
     airflow = signal_df["airflow"].to_numpy(dtype=float)
     spo2 = signal_df["spo2"].to_numpy(dtype=float)
+    pulse = signal_df["pulse"].to_numpy(dtype=float) if "pulse" in signal_df.columns else None
     # 70, not 50: pulse oximeters are only validated down to about 70%, and
     # report_metrics_calculator already rejects below 70. Two different floors
     # meant the dashboard scored 16 desaturations where the report scored 14.
@@ -1238,6 +1406,12 @@ def detect_apnea_events_from_dataframe(
     # ------------------------------------------------------------------
     amplitude_all = _continuous_breath_amplitude(airflow, estimated_fs)
     rolling_baseline_all = _rolling_aasm_baseline(amplitude_all, estimated_fs)
+    sensor_off_segments = detect_sensor_off_segments(
+        airflow=airflow,
+        thorax=thorax,
+        fs=estimated_fs,
+        time_sec=time_sec,
+    )
 
     analysis_amplitude = amplitude_all[analysis_mask]
     analysis_window_baseline = rolling_baseline_all[analysis_mask]
@@ -1264,7 +1438,7 @@ def detect_apnea_events_from_dataframe(
 
     label_specs = [
         (
-            # AASM: apnea needs the >=90% drop itself to last >=10 s. The 10 s
+            # AASM: apnea needs the >=75% drop itself to last >=10 s. The 10 s
             # test is applied AFTER _refine_apnea_core re-measures the core.
             "APNEA_CANDIDATE",
             lambda x: x >= AASM_APNEA_DROP_PERCENT,
@@ -1296,7 +1470,7 @@ def detect_apnea_events_from_dataframe(
 
     for expected_label, label_mask_fn, label_min_sec in label_specs:
         label_mask = label_mask_fn(analysis_drop_percent)
-        # APNEA: the >=90% core itself must last >=10 s (AASM). HYPOPNEA: a
+        # APNEA: the >=75% core itself must last >=10 s (AASM). HYPOPNEA: a
         # short core is allowed because the 30% boundary expansion below
         # defines the true event extent, then the 10 s rule is applied.
         label_segments = _segment_mask(label_mask, analysis_time, label_min_sec)
@@ -1304,7 +1478,7 @@ def detect_apnea_events_from_dataframe(
 
         for core_start, core_end, _core_duration_sec in label_segments:
             if expected_label == "APNEA_CANDIDATE":
-                # Re-measure the >=90% core on the short window, then apply the
+                # Re-measure the >=75% core on the short window, then apply the
                 # AASM 10 s rule to the TRUE length.
                 core_start, core_end = _refine_apnea_core(
                     core_start, core_end, analysis_drop_short, AASM_APNEA_DROP_PERCENT
@@ -1314,7 +1488,7 @@ def detect_apnea_events_from_dataframe(
                 )
                 if core_duration_sec < MIN_EVENT_SEC:
                     continue
-                # AASM: an apnea's duration IS the >=90% stretch. Do NOT widen
+                # AASM: an apnea's duration IS the >=75% stretch. Do NOT widen
                 # it out to the 30% hypopnea boundary, or the box swallows the
                 # normal-looking ramp breaths on either side.
                 local_start, local_end = core_start, core_end
@@ -1567,6 +1741,60 @@ def detect_apnea_events_from_dataframe(
 
         merged_events.append(dict(event))
 
+    for event in merged_events:
+        event_start = float(event["start_sec"])
+        event_end = float(event["end_sec"])
+        event_duration = max(0.0, event_end - event_start)
+        if event_duration <= 0:
+            continue
+        trust_spo2 = False
+        if event.get("spo2_confirmed"):
+            trust_spo2 = True
+            if pulse is not None and len(pulse) == len(time_sec):
+                event_mask = (time_sec >= event_start) & (time_sec <= event_end)
+                event_pulse = pulse[event_mask]
+                if _pulse_looks_artifactual(event_pulse):
+                    trust_spo2 = False
+                    event["pulse_artifact"] = True
+                    print(
+                        f"Pulse artifact during {event_start:.0f}s-{event_end:.0f}s; "
+                        "SpO2 confirmation will not block SENSOR_OFF reassignment"
+                    )
+            if trust_spo2:
+                continue
+
+        reassign = False
+        reason = ""
+        for segment in sensor_off_segments:
+            overlap = min(event_end, float(segment["end_sec"])) - max(
+                event_start, float(segment["start_sec"])
+            )
+            if overlap / event_duration >= SENSOR_OFF_EVENT_OVERLAP_RATIO:
+                reassign = True
+                reason = "overlaps detected sensor-off segment"
+                break
+
+        # Long unconfirmed events near the scoring ceiling are more consistent
+        # with a cannula dropout than a genuine sustained apnea.
+        if (
+            not reassign
+            and event_duration >= LONG_EVENT_SENSOR_SUSPECT_SEC
+            and not trust_spo2
+        ):
+            reassign = True
+            reason = (
+                f"duration {event_duration:.0f}s close to {MAX_EVENT_SEC:.0f}s cap, "
+                "no confirmed desaturation"
+            )
+
+        if reassign and event["rule_label"] in {"OSA", "CSA", "MSA", "HYPOPNEA"}:
+            event["rule_label"] = "SENSOR_OFF"
+            event["sensor_off_reason"] = reason
+            print(
+                f"Reassigned {event_start:.0f}s-{event_end:.0f}s to SENSOR_OFF "
+                f"({reason})"
+            )
+
     events: list[DetectedApneaEvent] = []
     ai_candidates_processed = 0
 
@@ -1636,6 +1864,7 @@ def detect_apnea_events_from_dataframe(
                 ai_confidence=ai_confidence,
                 final_label=final_label,
                 image_path=image_path,
+                evidence=_build_event_evidence(event),
             )
         )
 
@@ -1710,6 +1939,8 @@ def detect_apnea_events_from_dataframe(
         "debug_events": debug_events,
         "events": [event.to_dict() for event in events],
         "desaturations": desaturations,
+        "sensor_off_segments": sensor_off_segments,
+        "sensor_off_total_sec": float(sum(item["duration_sec"] for item in sensor_off_segments)),
         "desaturation_count": len(desaturations),
         "odi_per_hour": (
             float(len(desaturations) / (float(time_sec[-1]) / 3600.0))

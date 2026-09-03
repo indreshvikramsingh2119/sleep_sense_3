@@ -2,4 +2,4 @@
 
 from __future__ import annotations
 
-DEFAULT_SAMPLE_RATE_HZ = 10.0
+DEFAULT_SAMPLE_RATE_HZ = 10.2

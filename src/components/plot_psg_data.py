@@ -26,7 +26,6 @@ SIGNAL_COLUMNS = {
     "airflow": 5,
     "thorax": 6,
     "snoring": 7,
-    "abdomen": 10,
 }
 
 CSV_SIGNAL_NAMES = tuple(name for name in SIGNAL_COLUMNS if name != "timestamp")
@@ -180,4 +179,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

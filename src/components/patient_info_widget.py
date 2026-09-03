@@ -135,8 +135,13 @@ class PatientInfoWidget(QWidget):
         
         container_layout.addWidget(raw_container)
 
+        # Detected Events Section Container
         events_container = QFrame()
         events_container.setObjectName("autoEventsContainer")
+        events_container.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Expanding
+        )
         events_container.setStyleSheet("""
             QFrame#autoEventsContainer {
                 background-color: rgba(255, 255, 255, 0.9);
@@ -153,9 +158,13 @@ class PatientInfoWidget(QWidget):
         events_layout = QVBoxLayout(events_container)
         events_layout.setContentsMargins(8, 8, 8, 8)
         events_layout.setSpacing(8)
-        events_layout.addWidget(self.create_detected_events_section())
-        container_layout.addWidget(events_container)
-        container_layout.addStretch()
+        detected_section = self.create_detected_events_section()
+        detected_section.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Expanding
+        )
+        events_layout.addWidget(detected_section, 1)
+        container_layout.addWidget(events_container, 1)
         
         scroll = QScrollArea()
         scroll.setObjectName("patientInfoScrollArea")
@@ -548,7 +557,11 @@ class PatientInfoWidget(QWidget):
         """Auto detected apnea events list with jump support."""
         frame = QFrame()
         frame.setObjectName("detectedEventsSection")
-        frame.setMinimumHeight(250)
+        frame.setMinimumHeight(350)
+        frame.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Expanding
+        )
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(12, 12, 12, 12)
         frame_layout.setSpacing(12)
@@ -574,6 +587,11 @@ class PatientInfoWidget(QWidget):
         self.detected_filter_dropdown.addItems(["All", "HSA", "CSA", "OSA", "MSA"])
         self.detected_filter_dropdown.setVisible(False)
         self.detected_filter_dropdown.currentTextChanged.connect(self.apply_detected_events_filter)
+        dropdown_arrow_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "assets",
+            "dropdown-arrow.svg",
+        )
         self.detected_filter_dropdown.setStyleSheet("""
             QComboBox {
                 background-color: white;
@@ -590,15 +608,24 @@ class PatientInfoWidget(QWidget):
                 border: 1px solid #3b82f6;
             }
             QComboBox::drop-down {
-                border: none;
+                border: 1px solid #cbd5e1;
                 width: 24px;
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                border-radius: 0px 6px 6px 0px;
+                background-color: #f0f4f8;
             }
-        """)
+            QComboBox::down-arrow {
+                image: url(__ARROW_PATH__);
+                width: 12px;
+                height: 8px;
+            }
+        """.replace("__ARROW_PATH__", dropdown_arrow_path))
         frame_layout.addWidget(self.detected_filter_dropdown)
 
         self.detected_events_list = QListWidget()
         self.detected_events_list.setMinimumHeight(0)
-        self.detected_events_list.setMaximumHeight(180)
+        self.detected_events_list.setMaximumHeight(500)
         self.detected_events_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.detected_events_list.setVisible(False)
         self.detected_events_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -838,7 +865,7 @@ class PatientInfoWidget(QWidget):
         item_count = self.detected_events_list.count()
         if item_count == 0:
             self.detected_events_list.setFixedHeight(0)
-            self.detected_events_list.setMaximumHeight(180)
+            self.detected_events_list.setMaximumHeight(500)
             return
 
         row_height = self.detected_events_list.sizeHintForRow(0)
@@ -846,7 +873,7 @@ class PatientInfoWidget(QWidget):
             row_height = 44
         frame_height = (self.detected_events_list.frameWidth() * 2) + 8
         total_height = (row_height * item_count) + frame_height
-        max_height = 180
+        max_height = 500
         capped_height = min(total_height, max_height)
         self.detected_events_list.setMaximumHeight(max_height)
         self.detected_events_list.setFixedHeight(capped_height)

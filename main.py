@@ -105,9 +105,9 @@ class AnimatedSplash(QSplashScreen):
         # --- Made by (subtitle ke neeche) ---
         painter.setFont(QFont("Segoe UI", 10, QFont.Medium))
         painter.setPen(QColor("#2dd4bf"))
-        painter.drawText(QRectF(0, cy + r + 78, w, 22),
+        painter.drawText(QRectF(0, cy + r + 78, w, 22),  
                          Qt.AlignCenter,
-                         "Developed by Deckmont Medical Technologies")
+                         "Developed by Deckmount Electronics Pvt. Ltd.")
 
         # --- Loading message ---
         painter.setFont(QFont("Segoe UI", 9))
@@ -214,15 +214,16 @@ def main():
 
     SleepSenseDashboard = dashboard_holder[0]
     window = SleepSenseDashboard()
-
+  
     if os.path.exists(app_icon_path):
         window.setWindowIcon(QIcon(app_icon_path))
 
     window.showMaximized()
     splash.finish(window)
-
+ 
     sys.exit(app.exec_())
 
 
 if __name__ == '__main__':
     main()
+ 

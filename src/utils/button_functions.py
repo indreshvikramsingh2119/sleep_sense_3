@@ -2108,7 +2108,7 @@ class AnalysisParametersDialog(QDialog):
         layout.addWidget(subtitle)
 
         hypopnea_percent = current.get("AASM_HYPOPNEA_DROP_PERCENT", 30.0)
-        apnea_percent = current.get("AASM_APNEA_DROP_PERCENT", 90.0)
+        apnea_percent = current.get("AASM_APNEA_DROP_PERCENT", 75.0)
         obstructive_effort_percent = float(current.get("OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD", 0.20)) * 100.0
         central_effort_percent = float(current.get("CENTRAL_APNEA_EFFORT_THRESHOLD", 0.60)) * 100.0
         central_amplitude_percent = float(current.get("CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO", 0.08)) * 100.0
@@ -2605,7 +2605,7 @@ class AnalysisParametersDialog(QDialog):
                 defaults = {}
 
         hypopnea_percent = defaults.get("AASM_HYPOPNEA_DROP_PERCENT", 30.0)
-        apnea_percent = defaults.get("AASM_APNEA_DROP_PERCENT", 90.0)
+        apnea_percent = defaults.get("AASM_APNEA_DROP_PERCENT", 75.0)
         obstructive_effort_percent = float(defaults.get("OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD", 0.20)) * 100.0
         central_effort_percent = float(defaults.get("CENTRAL_APNEA_EFFORT_THRESHOLD", 0.60)) * 100.0
         central_amplitude_percent = float(defaults.get("CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO", 0.08)) * 100.0

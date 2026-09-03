@@ -54,7 +54,7 @@ from .plot_psg_data import (  # noqa: E402
 ACTIVE_SIGNAL_CONFIGS = [
     ("Body Position", "#3b82f6", 0.5, 10, 50, 0, 5),
     ("Airflow", "#8b5cf6", 0.3, 15, 50, 0, 1500),
-    ("Snoring", "#ef4444", 1.0, 8, 50, 0, 100),
+    ("Snoring", "#ef4444", 1.0, 8, 50, 0, 1000),
     ("Thorax", "#f59e0b", 0.2, 5, 50, 0, 4095),
     # ("Abdomen", "#10b981", 0.1, 2, 90, 0, 80),
     ("SpO2", "#06b6d4", 1.5, 12, 50, 60, 110),
@@ -228,6 +228,7 @@ class SleepMonitorChart(QWidget):
         self.current_psg_data = None  # Report-friendly full-channel PSG payload
         self.current_time_offset = 0  # Current starting time for window
         self.all_psg_mode = False  # When True, render the entire recording in one view
+        self.current_csv_path = None
         self.analysis_results = None
         self.analysis_json_path = None
         self._save_in_progress = False
@@ -1360,21 +1361,24 @@ class SleepMonitorChart(QWidget):
                                 properties = plot_widget.axis_properties
                                 low_value = properties.get('low_value', 35.0)
                                 high_value = properties.get('high_value', 100.0)
+                                finite_spo2 = y[np.isfinite(y)]
+                                has_zero_dropout = bool(
+                                    finite_spo2.size and np.nanmin(finite_spo2) <= 0.0
+                                )
+                                if has_zero_dropout:
+                                    low_value = 0.0
+                                    high_value = max(float(high_value), 100.0)
                                 try:
                                     plot_widget.setYRange(low_value, high_value, padding=0)
                                 except TypeError:
                                     plot_widget.setRange(yRange=[low_value, high_value], padding=0)
+                                if has_zero_dropout:
+                                    try:
+                                        plot_widget.setLimits(yMin=0.0, yMax=high_value)
+                                    except TypeError:
+                                        plot_widget.setLimits(yMin=0.0, yMax=high_value)
                             else:
-                                if plot_widget.zoom_y_range is not None:
-                                    new_y_min, new_y_max = plot_widget.zoom_y_range
-                                    dbg(f"Preserving zoom range during playback: {new_y_min} - {new_y_max}")
-                                else:
-                                    new_y_min, new_y_max = 60, 100
-
-                                try:
-                                    plot_widget.setYRange(new_y_min, new_y_max)
-                                except TypeError:
-                                  plot_widget.setRange(yRange=[new_y_min, new_y_max])
+                                self._apply_dropout_axis(plot_widget, "SpO2", y)
 
                             # Labels on every window - raw samples on short ones,
                             # bucket averages on long ones.
@@ -1426,6 +1430,8 @@ class SleepMonitorChart(QWidget):
                                 plot_widget.setYRange(low_value, high_value, padding=0)
                             except TypeError:
                                 plot_widget.setRange(yRange=[low_value, high_value], padding=0)
+                        elif chart_name.strip() == "Pulse":
+                            self._apply_dropout_axis(plot_widget, "Pulse", y)
                         elif chart_name.strip() == "Airflow":
                             self._apply_windowed_auto_axis(plot_widget, chart_name.strip(), y)
                             _event_x, detection_y = self.get_airflow_detection_data_for_window(
@@ -1871,7 +1877,7 @@ class SleepMonitorChart(QWidget):
         variant_map = {
             "raw": signals.get("airflow_raw"),
             "enhanced": signals.get("airflow_enhanced"),
-            "display": signals.get("airflow_enhanced", signals.get("airflow_display")),
+            "display": signals.get("airflow_display", signals.get("airflow_enhanced")),
             "detection": signals.get("airflow_enhanced", signals.get("airflow_detection")),
         }
         selected = variant_map.get(variant)
@@ -2418,6 +2424,37 @@ class SleepMonitorChart(QWidget):
         except Exception:
             pass
 
+    def _apply_dropout_axis(self, plot_widget, chart_name, y_values):
+        """Show zero-valued SpO2/Pulse dropouts without hiding them below limits."""
+        default_min, default_max = SIGNAL_Y_RANGES.get(chart_name, (0.0, 100.0))
+        values = np.asarray(y_values, dtype=float).reshape(-1)
+        finite = values[np.isfinite(values)]
+        has_zero_dropout = bool(finite.size and np.nanmin(finite) <= 0.0)
+
+        limit_min = 0.0 if has_zero_dropout else float(default_min)
+        limit_max = float(default_max)
+        edge_margin = max(limit_max - limit_min, 1e-6) * 0.06
+        limit_min -= edge_margin
+        limit_max += edge_margin
+        try:
+            plot_widget.setLimits(yMin=limit_min, yMax=limit_max)
+        except TypeError:
+            plot_widget.setLimits(yMin=limit_min, yMax=limit_max)
+
+        zoom_range = getattr(plot_widget, "zoom_y_range", None)
+        if zoom_range is not None:
+            y_min, y_max = float(zoom_range[0]), float(zoom_range[1])
+            dbg(f"Preserving zoom range during playback: {y_min} - {y_max}")
+            if has_zero_dropout and y_min > 0.0:
+                y_min = limit_min
+        else:
+            y_min, y_max = limit_min, limit_max
+
+        try:
+            plot_widget.setYRange(y_min, y_max, padding=0)
+        except TypeError:
+            plot_widget.setRange(yRange=[y_min, y_max], padding=0)
+
     def _apply_windowed_auto_axis(self, plot_widget, chart_name, y_values):
         """Data-driven Y-axis for one chart, held steady between refreshes."""
         if hasattr(plot_widget, "axis_properties"):
@@ -2523,6 +2560,7 @@ class SleepMonitorChart(QWidget):
                 np.asarray(signals.get("spo2", []), dtype=float),
             )
             self.loaded_csv_path = str(csv_path)
+            self.current_csv_path = str(csv_path)
             # A fresh load resets session tracking; if this CSV came from a
             # Records row, database_window.py calls set_current_session()
             # right after this returns to re-link it.
@@ -2578,6 +2616,7 @@ class SleepMonitorChart(QWidget):
                 self.analysis_results = None
                 self.analysis_json_path = None
                 dbg(f"⚠️ Could not calculate/save PSG metrics JSON: {analysis_error}")
+
             global_events = self._build_airflow_navigation_events(enhanced_airflow)
             windowed_events = self._build_windowed_airflow_navigation_events(
                 enhanced_airflow,
@@ -3028,6 +3067,59 @@ class SleepMonitorChart(QWidget):
         self.manual_label_overrides.pop(key, None)
         return True
 
+    def _mark_overlapping_auto_events_for_manual_selection(self, chart_name: str, start_sec: float, end_sec: float) -> bool:
+        """Mark overlapping auto-detected events as deleted for the active chart."""
+        if not self.auto_rule_ai_result:
+            return False
+
+        try:
+            selection_start, selection_end = self._ordered_span(start_sec, end_sec)
+        except Exception:
+            return False
+
+        changed = False
+        if chart_name == "Airflow":
+            for event in self.auto_rule_ai_result.get("events", []) or []:
+                try:
+                    event_start = float(event.get("start_sec", 0.0))
+                    event_end = float(event.get("end_sec", event_start))
+                except (TypeError, ValueError):
+                    continue
+
+                event_start, event_end = self._ordered_span(event_start, event_end)
+                overlap = min(selection_end, event_end) - max(selection_start, event_start)
+                if overlap <= 0:
+                    continue
+
+                if self._mark_deleted_auto_event({
+                    "source": "auto_rule_ai",
+                    "start_sec": event_start,
+                    "end_sec": event_end,
+                }):
+                    changed = True
+
+        elif chart_name == "SpO2":
+            for desat in self.auto_rule_ai_result.get("desaturations", []) or []:
+                try:
+                    desat_start = float(desat.get("start_sec", 0.0))
+                    desat_end = float(desat.get("end_sec", desat_start))
+                except (TypeError, ValueError):
+                    continue
+
+                desat_start, desat_end = self._ordered_span(desat_start, desat_end)
+                overlap = min(selection_end, desat_end) - max(selection_start, desat_start)
+                if overlap <= 0:
+                    continue
+
+                if self._mark_deleted_auto_event({
+                    "source": "auto_rule_ai",
+                    "start_sec": desat_start,
+                    "end_sec": desat_end,
+                }):
+                    changed = True
+
+        return changed
+
     def _apply_deleted_auto_event_filters_to_auto_result(self) -> bool:
         """Drop deleted auto events from the current detector result."""
         result = getattr(self, "auto_rule_ai_result", None)
@@ -3260,6 +3352,7 @@ class SleepMonitorChart(QWidget):
                 f"✅ Auto rule-only apnea detection complete: "
                 f"{len(self.auto_rule_ai_result.get('events', []))} events"
             )
+            self._apply_sensor_off_masking_after_detection()
             self.refresh_charts()
             self._sync_auto_detected_selections_into_overlays()
             self.render_dynamic_selections()
@@ -3282,6 +3375,7 @@ class SleepMonitorChart(QWidget):
                     f"✅ Fallback rule-only apnea detection complete: "
                     f"{len(self.auto_rule_ai_result.get('events', []))} events"
                 )
+                self._apply_sensor_off_masking_after_detection()
                 self.refresh_charts()
                 self._sync_auto_detected_selections_into_overlays()
                 self.render_dynamic_selections()
@@ -3352,6 +3446,7 @@ class SleepMonitorChart(QWidget):
                     "source": "auto_rule_ai",
                     "is_manually_edited": bool(event.get("is_manually_edited")),
                     "original_label": event.get("original_label"),
+                    "evidence": list(event.get("evidence") or []),
                 }
                 dynamic_data = {
                     "label": final_label,
@@ -3361,6 +3456,7 @@ class SleepMonitorChart(QWidget):
                     "source": "auto_rule_ai",
                     "is_manually_edited": bool(event.get("is_manually_edited")),
                     "original_label": event.get("original_label"),
+                    "evidence": list(event.get("evidence") or []),
                 }
                 self.selection_labels[chart_name].append(selection_data)
                 self.dynamic_selections[chart_name].append(dynamic_data)
@@ -3380,6 +3476,9 @@ class SleepMonitorChart(QWidget):
                 except (KeyError, TypeError, ValueError):
                     continue
                 if not (end_time > start_time):
+                    continue
+
+                if self._selection_time_key(start_time, end_time) in self.deleted_auto_event_keys:
                     continue
 
                 desat_color = self.get_label_color("DE-SATURATION")
@@ -3682,8 +3781,9 @@ class SleepMonitorChart(QWidget):
             )
 
         if signal_col in SIGNAL_NO_GAP_FILL:
-            window_time, window_signal = self._extend_edge_signal_values(window_time, window_signal)
-            window_signal = self._fill_display_gaps(window_signal, window_size=5)
+            # Sensor dropout: show the raw zero reading. Do not edge-fill;
+            # edge filling would paint the dropout with the last real value.
+            window_signal = np.where(np.isfinite(window_signal), window_signal, 0.0)
 
         if len(window_signal) == 0:
             return np.array([]), np.array([])
@@ -3756,8 +3856,9 @@ class SleepMonitorChart(QWidget):
                 time_window_seconds,
             )
 
-            window_time, window_spo2 = self._extend_edge_signal_values(window_time, window_spo2)
-            window_spo2 = self._fill_display_gaps(window_spo2, window_size=5)
+            # Sensor dropout: show the raw zero reading. Do not edge-fill;
+            # edge filling would paint the dropout with the last real value.
+            window_spo2 = np.where(np.isfinite(window_spo2), window_spo2, 0.0)
 
         num_samples = len(window_spo2)
         if num_samples == 0:
@@ -4357,7 +4458,8 @@ class SleepMonitorChart(QWidget):
 
         GRIP_HEIGHT = 12
         GRIP_WIDTH = 84
-        MIN_HEIGHT = 82
+        # Double-click compact mode should match the normal startup height.
+        MIN_HEIGHT = 128
         MAX_HEIGHT = 220
 
         resize_grip = QWidget(container)
@@ -5316,6 +5418,8 @@ class SleepMonitorChart(QWidget):
         x_displayed = np.asarray(x_displayed, dtype=float)[:n]
         y_displayed = np.asarray(y_displayed, dtype=float)[:n]
         y_values = np.asarray(y_values, dtype=float)[:n]
+        # Zero is the oximeter's no-signal value, not a measured SpO2 reading.
+        spo2_floor = float(SIGNAL_VALID_RANGES.get("spo2", (50.0, 100.0))[0])
 
         # --- raw per-sample labels ------------------------------------------
         if mode == "raw":
@@ -5374,6 +5478,18 @@ class SleepMonitorChart(QWidget):
             values = values[usable]
             drawn = drawn[usable]
             times = times[usable]
+
+            # Average real readings only, so a bucket straddling a dropout edge
+            # shows its real value rather than a mixed value. An all-dropout
+            # bucket is labelled 0, the honest no-signal reading.
+            real = values >= spo2_floor
+            if not real.any():
+                middle = int((values.size - 1) // 2)
+                points.append((float(times[middle]), float(drawn[middle]), "0"))
+                continue
+            values = values[real]
+            drawn = drawn[real]
+            times = times[real]
 
             mean_value = float(np.mean(values))
 
@@ -5480,7 +5596,8 @@ class SleepMonitorChart(QWidget):
                     color=(122, 29, 29),
                     anchor=(0.5, 1.0),
                     border=pg.mkPen((255, 255, 255, 0)),
-                    fill=pg.mkBrush(255, 255, 255, 210),
+                    # Keep the trace visible underneath the label.
+                    fill=pg.mkBrush(255, 255, 255, 0),
                 )
                 
                 # Set font for better visibility while maintaining positioning
@@ -6273,20 +6390,27 @@ class SleepMonitorChart(QWidget):
         self.selection_labels[chart_name].append(selection_data)
         self.dynamic_selections[chart_name].append(dynamic_selection_data)
 
+        auto_overlap_deleted = self._mark_overlapping_auto_events_for_manual_selection(
+            chart_name,
+            start_time_abs,
+            end_time_abs,
+        )
+
         # Persist this freely-drawn manual box to the sidecar JSON right
         # away, same as a relabeled auto-event does - so it survives a
         # Current-report re-analyze and is available to archive if this
         # session is later saved as a New report.
         self._save_manual_label_overrides()
 
-     
         if hasattr(plot_widget, 'selection_overlay'):
             plot_widget.selection_overlay.setVisible(False)
 
-       
-        self.render_dynamic_selections()
-        self.emit_detected_events_panel()
-        self.update_detection_summary_label()
+        if auto_overlap_deleted:
+            self._refresh_auto_rule_ai_views()
+        else:
+            self.render_dynamic_selections()
+            self.emit_detected_events_panel()
+            self.update_detection_summary_label()
 
         print(f"Label '{label_type}' added (persistent)")
 
@@ -6909,9 +7033,13 @@ class SleepMonitorChart(QWidget):
                         display_label = str(selection_data['label'])
                         if selection_data.get("is_manually_edited"):
                             display_label = f"{display_label} *"
-                        full_text = f"{display_label}\n{start_str}\n{duration_str}"
-
-                        if 'spo2_info' in selection_data and selection_data['spo2_info']:
+                        if display_label.strip().upper() == "SENSOR_OFF":
+                            # Sensor-off is not a scored AASM event; show the
+                            # flattened trace without an event badge.
+                            overlay.hide()
+                            overlay.setGeometry(-1000, -1000, 1, 1)
+                            continue
+                        elif 'spo2_info' in selection_data and selection_data['spo2_info']:
                             full_text = f"""
 {display_label}
 
@@ -6920,6 +7048,8 @@ class SleepMonitorChart(QWidget):
 
 {selection_data['spo2_info']}
 """
+                        else:
+                            full_text = f"{display_label}\n{start_str}\n{duration_str}"
                         overlay.setText(full_text)
                         overlay_style = f"""
                             background-color: {selection_data['color']};
@@ -7062,3 +7192,194 @@ Events <=92: {self.spo2_statistics['desaturation_events']}
         super().resizeEvent(event)
         if hasattr(self, 'watermark'):
             self.watermark.setGeometry(self.charts_widget.rect()) 
+
+    def _get_analysis_json_path(self):
+        """Find the analysis JSON file for the current session."""
+        try:
+            csv_path = getattr(self, "current_csv_path", None) or getattr(
+                self, "loaded_csv_path", None
+            )
+            if not csv_path:
+                return None
+
+            csv_filename = os.path.basename(csv_path)
+            csv_base = os.path.splitext(csv_filename)[0]
+            import glob
+            analysis_dirs = [
+                Path(csv_path).parent.parent / "analysis_json",
+                get_configured_path("analysis_json_dir"),
+            ]
+            files = []
+            for analysis_dir in analysis_dirs:
+                if analysis_dir.exists():
+                    files.extend(glob.glob(str(analysis_dir / f"{csv_base}_analysis_*.json")))
+            if files:
+                return max(set(files), key=os.path.getctime)
+            return None
+        except Exception as error:
+            dbg(f"Error finding analysis JSON: {error}")
+            return None
+
+    def _load_sensor_off_segments(self, analysis_json_path):
+        """Load sensor-off segments from an analysis results JSON file."""
+        try:
+            if not analysis_json_path or not os.path.exists(analysis_json_path):
+                return []
+
+            with open(analysis_json_path, "r", encoding="utf-8") as file_handle:
+                analysis_data = json.load(file_handle)
+            return analysis_data.get("sensor_off_segments", []) or []
+        except Exception as error:
+            dbg(f"Error loading sensor_off_segments: {error}")
+            return []
+
+    def _mask_airflow_during_sensor_off(self, airflow, time_array, sensor_off_segments):
+        """Replace sensor-off airflow samples with a flat baseline for display."""
+        if not sensor_off_segments or len(airflow) == 0:
+            return airflow
+
+        masked_airflow = np.array(airflow, dtype=float, copy=True)
+        baseline_end = max(1, int(len(masked_airflow) * 0.1))
+        baseline = float(np.nanmedian(masked_airflow[:baseline_end]))
+        if np.isnan(baseline) or baseline == 0:
+            baseline = float(np.nanmean(masked_airflow))
+        if np.isnan(baseline):
+            baseline = 0.0
+
+        time_values = np.asarray(time_array, dtype=float)
+        if time_values.size:
+            dbg(
+                f"Sensor-off masking time range: min={float(np.nanmin(time_values)):.1f}s, "
+                f"max={float(np.nanmax(time_values)):.1f}s, len={len(time_values)}"
+            )
+            dbg(f"Airflow samples available for masking: len={len(masked_airflow)}")
+
+        for segment in sensor_off_segments:
+            start_sec = float(segment.get("start_sec", 0.0))
+            end_sec = float(segment.get("end_sec", 0.0))
+            if not time_values.size:
+                continue
+
+            direct_mask = (time_values >= start_sec) & (time_values <= end_sec)
+            if np.any(direct_mask):
+                masked_airflow[direct_mask] = baseline
+                dbg(
+                    f"Mask segment {start_sec:.1f}s-{end_sec:.1f}s -> "
+                    f"{int(np.count_nonzero(direct_mask))} samples (direct)"
+                )
+                continue
+
+            # If the supplied time array is offset from the segment clock,
+            # fall back to a zero-based view for debugging and masking.
+            shifted_time_values = time_values - float(time_values[0])
+            shifted_mask = (shifted_time_values >= start_sec) & (shifted_time_values <= end_sec)
+            if np.any(shifted_mask):
+                masked_airflow[shifted_mask] = baseline
+                dbg(
+                    f"Mask segment {start_sec:.1f}s-{end_sec:.1f}s -> "
+                    f"{int(np.count_nonzero(shifted_mask))} samples (shifted by "
+                    f"{float(time_values[0]):.1f}s)"
+                )
+            else:
+                dbg(
+                    f"Mask segment {start_sec:.1f}s-{end_sec:.1f}s -> 0 samples "
+                    f"(direct and shifted)"
+                )
+        return masked_airflow
+
+    def _detect_breathing_stopped_periods(self, min_duration_sec=60):
+        """Return detected apnea/hypopnea events that are long enough to flatten."""
+        segments = []
+        try:
+            result = getattr(self, "auto_rule_ai_result", None)
+            events = (result.get("events", []) if result else []) or []
+            for event in events:
+                try:
+                    start_sec = float(event.get("start_sec"))
+                    end_sec = float(event.get("end_sec"))
+                except (TypeError, ValueError):
+                    continue
+                if not (end_sec > start_sec):
+                    continue
+
+                label = canonical_event_label(
+                    event.get("final_label") or event.get("rule_label") or "REVIEW"
+                )
+                if label in ("REVIEW", "DE-SATURATION", "SATURATION"):
+                    continue
+
+                duration = end_sec - start_sec
+                if duration < min_duration_sec:
+                    continue
+
+                segments.append({
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "duration_sec": duration,
+                    "reason": f"breathing_stopped ({label})",
+                })
+                dbg(
+                    f"Breathing stopped [{label}]: {start_sec:.0f}s-{end_sec:.0f}s "
+                    f"({duration:.0f}s)"
+                )
+            dbg(f"TOTAL breathing-stopped periods found: {len(segments)}")
+        except Exception as error:
+            dbg(f"Breathing-stopped detection error: {error}")
+        return segments
+
+    def _apply_sensor_off_masking_after_detection(self):
+        """Apply sensor-off and breathing-stopped ranges to the airflow display."""
+        try:
+            result = getattr(self, "auto_rule_ai_result", None)
+            sensor_off_segments = result.get("sensor_off_segments", []) if result else []
+            breathing_stopped_segments = self._detect_breathing_stopped_periods(
+                min_duration_sec=60,
+            )
+            all_segments = sensor_off_segments + breathing_stopped_segments
+
+            dbg("\n" + "=" * 60)
+            dbg("AIRFLOW MASKING DEBUG:")
+            dbg(f"  Sensor-off segments: {len(sensor_off_segments)}")
+            dbg(f"  Breathing-stopped: {len(breathing_stopped_segments)}")
+            dbg(f"  TOTAL to mask: {len(all_segments)}")
+            for index, segment in enumerate(sensor_off_segments[:5]):
+                start_value = float(segment.get("start_sec", 0.0))
+                end_value = float(segment.get("end_sec", 0.0))
+                duration_value = float(
+                    segment.get("duration_sec", end_value - start_value)
+                )
+                start_min, start_rem = divmod(int(start_value), 60)
+                end_min, end_rem = divmod(int(end_value), 60)
+                dbg(
+                    f"  Sensor-off [{index}] {start_min}:{start_rem:02d} - "
+                    f"{end_min}:{end_rem:02d} "
+                    f"(Duration: {duration_value:.0f}s)"
+                )
+            dbg("=" * 60 + "\n")
+
+            if not all_segments:
+                return
+
+            current_psg_data = getattr(self, "current_psg_data", None)
+            if not isinstance(current_psg_data, dict):
+                return
+
+            time_data = current_psg_data.get("time", [])
+            signals = current_psg_data.get("signals", {})
+            if "airflow_display" not in signals or len(signals["airflow_display"]) == 0:
+                return
+
+            # Always start from the enhanced signal so repeated detection does
+            # not calculate a new baseline from an already masked trace.
+            display_source = signals.get("airflow_enhanced", signals["airflow_display"])
+            original_length = len(display_source)
+            signals["airflow_display"] = self._mask_airflow_during_sensor_off(
+                display_source, time_data, all_segments
+            )
+            dbg(
+                f"Applied masking: {len(sensor_off_segments)} sensor-off + "
+                f"{len(breathing_stopped_segments)} breathing-stopped = "
+                f"{len(all_segments)} total, airflow length: {original_length}"
+            )
+        except Exception as error:
+            dbg(f"Error applying sensor-off masking: {error}")
