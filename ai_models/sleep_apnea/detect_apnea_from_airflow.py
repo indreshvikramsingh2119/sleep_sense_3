@@ -66,20 +66,23 @@ EVENT_BOUNDARY_DROP_PERCENT = 30.0
 MERGE_GAP_SEC = 0.0
 PULSE_FLATLINE_STD_BPM = 1.5
 PULSE_FLATLINE_MIN_UNIQUE_RATIO = 0.05
+PULSE_HOLD_INTERVAL_SEC = 16.0
+PULSE_FLATLINE_MIN_HELD_VALUES = 3
 
 
-def _pulse_looks_artifactual(pulse_segment: np.ndarray) -> bool:
-    """Return True when pulse data looks flat or unnaturally stepped."""
+def _pulse_looks_artifactual(
+    pulse_segment: np.ndarray, fs: float = DEFAULT_SAMPLE_RATE_HZ
+) -> bool:
+    """Detect flat pulse updates without mistaking normal sample-and-hold data."""
     values = np.asarray(pulse_segment, dtype=float).reshape(-1)
     values = values[np.isfinite(values) & (values > 0)]
     if values.size < 10:
         return False
-    standard_deviation = float(np.std(values))
-    unique_ratio = float(np.unique(values).size / values.size)
-    return (
-        standard_deviation < PULSE_FLATLINE_STD_BPM
-        or unique_ratio <= PULSE_FLATLINE_MIN_UNIQUE_RATIO
-    )
+    held = values[np.r_[True, np.diff(values) != 0]]
+    if held.size >= PULSE_FLATLINE_MIN_HELD_VALUES:
+        return float(np.std(held)) < PULSE_FLATLINE_STD_BPM
+    expected_updates = (values.size / max(fs, 1e-9)) / PULSE_HOLD_INTERVAL_SEC
+    return held.size == 1 and expected_updates >= PULSE_FLATLINE_MIN_HELD_VALUES
 
 # ---------------------------------------------------------------------------
 # AASM scoring rules
@@ -105,6 +108,10 @@ CENTRAL_APNEA_EFFORT_THRESHOLD = 0.60
 CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO = 0.08
 DESAT_DROP_PERCENT = 3.0
 DESAT_LINK_WINDOW_SEC = 30.0
+# SpO2 sensor dropout handling. A short no-signal interval makes a linked
+# desaturation unknown rather than proving that no desaturation occurred.
+SPO2_DROPOUT_MIN_SEC = 3.0
+SPO2_DROPOUT_EFFORT_MAX_RATIO = 0.60
 DESAT_BASELINE_LOOKBACK_SEC = 60.0   # how far back the pre-desat baseline is taken
 # The fall must also be a fall against the RECENT level, not just against the
 # best value in the last minute. On a slow drift (99 -> 98 -> 97 -> 96 over a
@@ -184,6 +191,10 @@ class DetectedApneaEvent:
     final_label: str | None = None
     image_path: str | None = None
     evidence: list[str] | None = None
+    confidence: float | None = None
+    confidence_parts: dict[str, float] | None = None
+    flags: list[str] | None = None
+    review_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -445,6 +456,156 @@ SENSOR_OFF_NORMAL_RATIO_BAND = (0.5, 1.4)
 SENSOR_OFF_REFERENCE_PERCENTILE = 90.0
 SENSOR_OFF_EVENT_OVERLAP_RATIO = 0.5
 LONG_EVENT_SENSOR_SUSPECT_SEC = 90.0
+# --- Absolute amplitude sanity gate -----------------------------------------
+# Relative drops can be inflated by a sigh or arousal burst in the baseline.
+NIGHT_REFERENCE_WINDOW_SEC = 1800.0
+NIGHT_REFERENCE_MIN_SEC = 300.0
+NIGHT_REFERENCE_FLAT_RATIO = 0.15
+APNEA_MAX_NIGHT_REF_RATIO = 0.25
+HYPOPNEA_MAX_NIGHT_REF_RATIO = 0.70
+NIGHT_REFERENCE_MIN_COVERAGE = 0.30
+
+# Secondary evidence and review-tier settings. These support review and
+# ranking; they do not replace the AASM event gates.
+PULSE_RISE_PRE_SEC = 30.0
+PULSE_RISE_POST_SEC = 30.0
+PULSE_RISE_AROUSAL_BPM = 15.0
+PULSE_VALID_MIN_BPM = 40.0
+PULSE_VALID_MAX_BPM = 180.0
+SNORE_PRE_SEC = 30.0
+SNORE_POST_SEC = 10.0
+SNORE_BURST_RATIO = 1.30
+SNORE_SPREAD_WINDOW_SEC = 1.0
+SNORE_INFORMATIVE_MAX_ACTIVE_FRACTION = 0.80
+EFFORT_TREND_CRESCENDO_RATIO = 1.30
+EFFORT_TREND_DECRESCENDO_RATIO = 0.70
+MOVEMENT_PAD_SEC = 5.0
+POSITION_FLICKER_MIN_CHANGES = 3
+MOVEMENT_MIN_OVERLAP_RATIO = 0.30
+REVIEW_CLUSTER_GAP_SEC = 60.0
+REVIEW_HYPOPNEA_MIN_DROP_PERCENT = 50.0
+REVIEW_SUSTAINED_SEC = 30.0
+SENSOR_OFF_ADJACENT_SEC = 60.0
+
+
+def _pulse_response(pulse, time_sec, start_index, end_index):
+    result = {"usable": False, "pre_median": None, "post_max": None, "rise_bpm": None}
+    if pulse is None or len(pulse) != len(time_sec):
+        return result
+    start_sec, end_sec = float(time_sec[start_index]), float(time_sec[end_index])
+    pre_mask = (time_sec >= start_sec - PULSE_RISE_PRE_SEC) & (time_sec < start_sec)
+    post_mask = (time_sec > end_sec) & (time_sec <= end_sec + PULSE_RISE_POST_SEC)
+    valid = np.isfinite(pulse) & (pulse >= PULSE_VALID_MIN_BPM) & (pulse <= PULSE_VALID_MAX_BPM)
+    pre, post = pulse[pre_mask & valid], pulse[post_mask & valid]
+    if pre.size < 0.5 * max(1, int(pre_mask.sum())) or post.size < 0.5 * max(1, int(post_mask.sum())):
+        return result
+    pre_median, post_max = float(np.median(pre)), float(np.max(post))
+    return {"usable": True, "pre_median": pre_median, "post_max": post_max, "rise_bpm": post_max - pre_median}
+
+
+def _snore_spread(snoring, fs):
+    return _continuous_breath_amplitude(np.nan_to_num(snoring, nan=0.0), fs, SNORE_SPREAD_WINDOW_SEC)
+
+
+def _snore_channel_informative(snore_spread, analysis_mask):
+    values = snore_spread[analysis_mask]
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return False, 0.0
+    floor = float(np.nanpercentile(values, 10))
+    active_fraction = float(np.mean(values > 2.0 * max(floor, 1e-9)))
+    return active_fraction <= SNORE_INFORMATIVE_MAX_ACTIVE_FRACTION, active_fraction
+
+
+def _snore_context(snore_spread, time_sec, start_index, end_index):
+    start_sec, end_sec = float(time_sec[start_index]), float(time_sec[end_index])
+    pre = snore_spread[(time_sec >= start_sec - SNORE_PRE_SEC) & (time_sec < start_sec)]
+    post = snore_spread[(time_sec > end_sec) & (time_sec <= end_sec + SNORE_POST_SEC)]
+    during = snore_spread[start_index:end_index + 1]
+
+    def mean(values):
+        values = values[np.isfinite(values)]
+        return float(np.mean(values)) if values.size else None
+
+    def peak(values):
+        values = values[np.isfinite(values)]
+        return float(np.max(values)) if values.size else None
+
+    pre_peak, post_peak = peak(pre), peak(post)
+    burst_ratio = post_peak / pre_peak if post_peak is not None and pre_peak and pre_peak > 0 else None
+    return {
+        "pre_mean": mean(pre), "pre_peak": pre_peak, "during_mean": mean(during),
+        "post_peak": post_peak, "burst_ratio": burst_ratio,
+        "resumption_burst": bool(burst_ratio is not None and burst_ratio >= SNORE_BURST_RATIO),
+    }
+
+
+def _effort_trend(thorax_event, abdomen_event, thorax_baseline_amp, abdomen_baseline_amp, fs):
+    candidates = []
+    for segment, baseline in ((thorax_event, thorax_baseline_amp), (abdomen_event, abdomen_baseline_amp)):
+        if segment is not None and baseline > 0:
+            candidates.append((segment, baseline, _effort_amplitude(segment, fs) / baseline))
+    if not candidates:
+        return {"shape": "unknown", "ratio": None, "first_ratio": None, "last_ratio": None}
+    reference, baseline, _ = max(candidates, key=lambda item: item[2])
+    if len(reference) < int(fs * 6):
+        return {"shape": "unknown", "ratio": None, "first_ratio": None, "last_ratio": None}
+    third = len(reference) // 3
+    first = _effort_amplitude(reference[:third], fs) / baseline
+    last = _effort_amplitude(reference[-third:], fs) / baseline
+    ratio = (last + 1e-6) / (first + 1e-6)
+    shape = "crescendo" if ratio >= EFFORT_TREND_CRESCENDO_RATIO else "decrescendo" if ratio <= EFFORT_TREND_DECRESCENDO_RATIO else "flat"
+    return {"shape": shape, "ratio": float(ratio), "first_ratio": float(first), "last_ratio": float(last)}
+
+
+def _movement_overlap(body_movement, body_position, time_sec, start_index, end_index):
+    start_sec = float(time_sec[start_index]) - MOVEMENT_PAD_SEC
+    end_sec = float(time_sec[end_index]) + MOVEMENT_PAD_SEC
+    window = (time_sec >= start_sec) & (time_sec <= end_sec)
+    if not np.any(window):
+        return {"source": "none", "overlap_ratio": 0.0, "position_changes": 0, "flag": False}
+    if body_movement is not None and np.any(np.nan_to_num(body_movement, nan=0.0) != 0):
+        ratio = float(np.mean(np.nan_to_num(body_movement[window], nan=0.0) != 0))
+        return {"source": "movement_channel", "overlap_ratio": ratio, "position_changes": 0, "flag": ratio >= MOVEMENT_MIN_OVERLAP_RATIO}
+    if body_position is not None and len(body_position) == len(time_sec):
+        changes = int(np.sum(np.diff(body_position[window]) != 0))
+        return {"source": "position_flicker", "overlap_ratio": 0.0, "position_changes": changes, "flag": changes >= POSITION_FLICKER_MIN_CHANGES}
+    return {"source": "none", "overlap_ratio": 0.0, "position_changes": 0, "flag": False}
+
+
+def _event_confidence(event):
+    """Return a review-oriented confidence score and supporting flags."""
+    drop = float(event.get("airflow_drop_percent", 0.0) or 0.0)
+    duration = float(event.get("duration_sec", 0.0) or 0.0)
+    label = str(event.get("rule_label", ""))
+    apnea = label in {"OSA", "CSA", "MSA", "APNEA", "APNEA_CANDIDATE"}
+    parts = {
+        "airflow_drop": float(np.clip((drop - (75.0 if apnea else 30.0)) / 25.0, 0.0, 1.0)),
+        "duration": float(np.clip((duration - MIN_EVENT_SEC) / 10.0, 0.3, 1.0)),
+        "spo2": (
+            0.8 if event.get("spo2_confirmed")
+            else 0.5 if event.get("spo2_dropout_corroborated")
+            else 0.3
+        ),
+    }
+    flags = []
+    dropout_sec = float(event.get("spo2_dropout_sec") or 0.0)
+    if event.get("spo2_dropout_corroborated"):
+        flags.append(
+            f"SpO2 sensor dropout {dropout_sec:.0f}s during event; kept on reduced effort"
+        )
+    elif dropout_sec >= SPO2_DROPOUT_MIN_SEC:
+        flags.append(f"SpO2 sensor dropout {dropout_sec:.0f}s near event")
+    if event.get("pulse_artifact"):
+        flags.append("pulse trace artifactual")
+    if event.get("movement", {}).get("flag"):
+        flags.append("body movement during event")
+    if event.get("sensor_off_reason"):
+        flags.append("sensor-off overlap")
+    score = sum(parts.values()) / len(parts)
+    if event.get("spo2_dropout_corroborated"):
+        score = min(score, 0.6)
+    return float(np.clip(score, 0.0, 1.0)), parts, flags
 
 
 def _continuous_breath_amplitude(
@@ -977,8 +1138,16 @@ def _build_event_evidence(event: dict[str, Any]) -> list[str]:
         tier = "hypopnea tier (30-75%)"
     else:
         tier = "below hypopnea tier"
+    ref_amp = event.get("night_reference_amplitude")
+    ratio = event.get("night_amplitude_ratio")
+    typical = (
+        f"   = {float(ratio) * 100:.0f}% of typical breathing ({float(ref_amp):.0f})"
+        if ref_amp and ratio is not None
+        else ""
+    )
     lines.append(
-        f"Airflow   drop {drop:.0f}%   amplitude {baseline_amp:.1f} -> {event_amp:.1f}   {tier}"
+        f"Airflow   drop {drop:.0f}%   amplitude {baseline_amp:.1f} -> "
+        f"{event_amp:.1f}{typical}   {tier}"
     )
 
     nadir_sec = event.get("desat_nadir_sec")
@@ -995,14 +1164,98 @@ def _build_event_evidence(event: dict[str, Any]) -> list[str]:
             f"nadir {delay:+.0f} s from event end   {mark}"
         )
     else:
-        lines.append("SpO2      no desaturation linked   no")
+        dropout_sec = float(event.get("spo2_dropout_sec") or 0.0)
+        if dropout_sec >= SPO2_DROPOUT_MIN_SEC:
+            kept = (
+                "   kept: effort belt corroborates"
+                if event.get("spo2_dropout_corroborated")
+                else ""
+            )
+            lines.append(
+                f"SpO2      probe had no signal for {dropout_sec:.0f} s in/after event; "
+                f"desaturation unknowable{kept}"
+            )
+        else:
+            claimed_by = event.get("desat_claimed_by_sec")
+            if claimed_by is not None:
+                lines.append(
+                    f"SpO2      nearby dip already belongs to event at {claimed_by:.0f} s   no"
+                )
+            else:
+                lines.append("SpO2      no desaturation linked   no")
 
     if event.get("pulse_artifact"):
         lines.append("Pulse     trace looked artifactual during event (probe disturbed)   no")
 
+    effort = event.get("effort_summary") or {}
+    if effort:
+        trend = str(effort.get("trend", "unknown"))
+        trend_note = {
+            "crescendo": "effort building through event (obstructive shape)",
+            "decrescendo": "effort fading through event",
+            "flat": "effort level steady through event",
+            "unknown": "effort trend not measurable",
+        }.get(trend, trend)
+        ratio = effort.get("whole_ratio")
+        breaths = effort.get("breaths_per_min")
+        detail = (
+            f"   belt {float(ratio) * 100:.0f}% of baseline, "
+            f"{float(breaths):.0f} breaths/min"
+            if ratio is not None and breaths is not None
+            else ""
+        )
+        lines.append(f"Effort    {trend_note}{detail}")
+
+    pulse = event.get("pulse_response") or {}
+    if pulse.get("usable"):
+        rise = float(pulse.get("rise_bpm") or 0.0)
+        mark = "arousal-type rise" if rise >= PULSE_RISE_AROUSAL_BPM else "no clear rise"
+        lines.append(
+            f"Pulse     {float(pulse['pre_median']):.0f} -> "
+            f"{float(pulse['post_max']):.0f} bpm ({rise:+.0f}) after event   {mark}"
+        )
+    elif pulse:
+        lines.append("Pulse     not usable around event (probe off)")
+
+    snore = event.get("snore_context") or {}
+    if snore and snore.get("during_mean") is not None:
+        pre = snore.get("pre_mean")
+        post = snore.get("post_peak")
+        mark = (
+            "resumption burst after event"
+            if snore.get("resumption_burst")
+            else "no resumption burst"
+        )
+        if not event.get("snore_informative"):
+            mark = "channel continuous all night, not weighted"
+        lines.append(
+            f"Snore     pre {float(pre):.0f}  during {float(snore['during_mean']):.0f}  "
+            f"post peak {float(post):.0f}   {mark}"
+            if pre is not None and post is not None
+            else f"Snore     during {float(snore['during_mean']):.0f}   {mark}"
+        )
+
+    movement = event.get("movement") or {}
+    if movement.get("flag"):
+        lines.append(
+            f"Movement  {float(movement.get('overlap_ratio', 0.0)) * 100:.0f}% "
+            "of padded event moving   artifact risk"
+        )
+    coverage = event.get("signal_coverage")
+    if coverage is not None and float(coverage) < NIGHT_REFERENCE_MIN_COVERAGE:
+        lines.append(f"Quality   only {float(coverage) * 100:.0f}% usable airflow nearby")
+
     reason = event.get("sensor_off_reason")
     if reason:
         lines.append(f"Sensor    reassigned to SENSOR_OFF: {reason}")
+
+    if event.get("review_reason"):
+        lines.append(f"Review    {event['review_reason']}")
+
+    if event.get("confidence") is not None:
+        flags = event.get("flags") or []
+        suffix = f"   flags: {', '.join(flags)}" if flags else ""
+        lines.append(f"Confidence {float(event['confidence']) * 100:.0f}%{suffix}")
 
     return lines
 
@@ -1413,6 +1666,56 @@ def detect_apnea_events_from_dataframe(
         time_sec=time_sec,
     )
 
+    # Patient-level typical breathing reference for the absolute sanity gate.
+    reference_source = np.asarray(amplitude_all, dtype=float).copy()
+    reference_source[~analysis_mask] = np.nan
+    finite_amp = reference_source[np.isfinite(reference_source)]
+    amp_p90 = float(np.nanpercentile(finite_amp, 90)) if finite_amp.size else 0.0
+    reference_source[amplitude_all < NIGHT_REFERENCE_FLAT_RATIO * amp_p90] = np.nan
+    for segment in sensor_off_segments:
+        dead = (time_sec >= float(segment["start_sec"])) & (
+            time_sec <= float(segment["end_sec"])
+        )
+        reference_source[dead] = np.nan
+    night_median_amplitude = (
+        float(np.nanmedian(reference_source))
+        if np.any(np.isfinite(reference_source))
+        else 0.0
+    )
+    rolling_reference = (
+        pd.Series(reference_source)
+        .rolling(
+            window=max(1, int(round(estimated_fs * NIGHT_REFERENCE_WINDOW_SEC))),
+            center=True,
+            min_periods=max(1, int(round(estimated_fs * NIGHT_REFERENCE_MIN_SEC))),
+        )
+        .median()
+        .to_numpy(dtype=float)
+    )
+    rolling_reference = np.where(
+        np.isfinite(rolling_reference), rolling_reference, night_median_amplitude
+    )
+    valid_fraction = (
+        pd.Series(np.isfinite(reference_source).astype(float))
+        .rolling(
+            window=max(1, int(round(estimated_fs * NIGHT_REFERENCE_WINDOW_SEC))),
+            center=True,
+            min_periods=1,
+        )
+        .mean()
+        .to_numpy(dtype=float)
+    )
+    rolling_reference = np.where(
+        valid_fraction >= NIGHT_REFERENCE_MIN_COVERAGE,
+        rolling_reference,
+        night_median_amplitude,
+    )
+    night_reference_all = np.maximum(rolling_reference, 0.5 * night_median_amplitude)
+    print(
+        f"Typical breathing amplitude (night median, flat excluded): "
+        f"{night_median_amplitude:.1f}"
+    )
+
     analysis_amplitude = amplitude_all[analysis_mask]
     analysis_window_baseline = rolling_baseline_all[analysis_mask]
     if len(analysis_window_baseline) != len(analysis_time) or not np.any(analysis_window_baseline > 0):
@@ -1435,6 +1738,78 @@ def detect_apnea_events_from_dataframe(
     # Score desaturations independently (AASM reports these as ODI) so they can
     # be drawn on the SpO2 channel and linked to the event they belong to.
     desaturations = detect_desaturations(time_sec, spo2) if spo2_usable else []
+
+    body_position = (
+        signal_df["body_position"].to_numpy(dtype=float)
+        if "body_position" in signal_df.columns else None
+    )
+    snore_spread_all = _snore_spread(snoring, estimated_fs)
+    snore_informative, snore_active_fraction = _snore_channel_informative(
+        snore_spread_all, analysis_mask
+    )
+    print(
+        f"Snore channel active {snore_active_fraction * 100:.0f}% of the night -> "
+        f"{'informative' if snore_informative else 'continuous noise, not weighted'}"
+    )
+    review_candidates: list[dict[str, Any]] = []
+
+    def _secondary_evidence(start_index, end_index, core_start_index, core_end_index):
+        pulse_info = _pulse_response(pulse, time_sec, start_index, end_index)
+        snore_info = _snore_context(snore_spread_all, time_sec, start_index, end_index)
+        movement_info = _movement_overlap(
+            body_movement, body_position, time_sec, start_index, end_index
+        )
+        link_end = float(time_sec[end_index]) + DESAT_LINK_WINDOW_SEC
+        link_mask = (time_sec >= float(time_sec[start_index])) & (time_sec <= link_end)
+        spo2_missing = (
+            not spo2_usable
+            or float(np.mean(np.isfinite(spo2[link_mask]))) < 0.5
+            if np.any(link_mask) else True
+        )
+        spo2_dropout_sec = 0.0
+        if spo2_usable and np.any(link_mask):
+            spo2_dropout_sec = float(
+                np.sum(~np.isfinite(spo2[link_mask])) / max(float(estimated_fs), 1e-9)
+            )
+        mid = (core_start_index + core_end_index) // 2
+        return {
+            "pulse_response": pulse_info,
+            "snore_context": snore_info,
+            "snore_informative": bool(snore_informative),
+            "movement": movement_info,
+            "spo2_missing": bool(spo2_missing),
+            "spo2_dropout_sec": float(spo2_dropout_sec),
+            "signal_coverage": float(valid_fraction[mid]) if 0 <= mid < len(valid_fraction) else None,
+        }
+
+    def _effort_summary_for(label, start_index, end_index):
+        if effort_baseline is None:
+            return {}
+        thorax_baseline_amp, abdomen_baseline_amp = effort_baseline
+        thorax_event = thorax[start_index:end_index + 1] if thorax is not None else None
+        abdomen_event = abdomen[start_index:end_index + 1] if abdomen is not None else None
+        whole_ratio = _effort_ratios(
+            thorax_event, abdomen_event, thorax_baseline_amp, abdomen_baseline_amp, estimated_fs
+        )
+        breaths = max(
+            _effort_breath_rate(thorax_event, thorax_baseline_amp, estimated_fs),
+            _effort_breath_rate(abdomen_event, abdomen_baseline_amp, estimated_fs),
+        )
+        trend = _effort_trend(
+            thorax_event, abdomen_event, thorax_baseline_amp, abdomen_baseline_amp, estimated_fs
+        )
+        if label == "CSA":
+            gone, silent = whole_ratio < CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO, breaths < EFFORT_MIN_BREATH_RATE_PER_MIN
+            agreement = 1.0 if gone and silent else 0.7 if gone or silent else 0.4
+        elif label == "OSA":
+            agreement = 1.0 if breaths >= EFFORT_MIN_BREATH_RATE_PER_MIN else 0.8 if whole_ratio >= CENTRAL_APNEA_EFFORT_THRESHOLD else 0.6 if whole_ratio >= OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD else 0.3
+        else:
+            agreement = 0.7 if breaths >= EFFORT_MIN_BREATH_RATE_PER_MIN else 0.5
+        return {
+            "whole_ratio": float(whole_ratio), "breaths_per_min": float(breaths),
+            "trend": str(trend["shape"]), "trend_ratio": trend["ratio"],
+            "agreement": float(agreement),
+        }
 
     label_specs = [
         (
@@ -1500,6 +1875,13 @@ def detect_apnea_events_from_dataframe(
                     analysis_drop_percent,
                     analysis_time,
                 )
+                # If expansion reaches the 120 s cap, score the tightly
+                # detected core instead of losing the whole event to the cap.
+                capped_duration = float(
+                    analysis_time[local_end] - analysis_time[local_start] + sample_dt
+                )
+                if capped_duration >= MAX_EVENT_SEC:
+                    local_start, local_end = core_start, core_end
                 # Tighten both edges: cover flat slivers the centered amplitude
                 # window smeared out of the event (up to ~2.5 s per side).
                 # local_start, local_end = _extend_boundary_through_flat(
@@ -1560,6 +1942,34 @@ def detect_apnea_events_from_dataframe(
                 if event_baseline_airflow
                 else 0.0
             )
+            event_reference_amplitude = float(
+                np.nanmedian(night_reference_all[core_start_index:core_end_index + 1])
+            )
+            night_amplitude_ratio = (
+                event_airflow_amplitude / event_reference_amplitude
+                if event_reference_amplitude > 0
+                else 0.0
+            )
+            effort_corroborated = False
+            core_effort_ratio = None
+            if effort_baseline is not None:
+                thorax_baseline_amp, abdomen_baseline_amp = effort_baseline
+                core_thorax = thorax[core_start_index:core_end_index + 1] if thorax is not None else None
+                core_abdomen = abdomen[core_start_index:core_end_index + 1] if abdomen is not None else None
+                core_effort_state = _effort_state(
+                    core_thorax,
+                    core_abdomen,
+                    thorax_baseline_amp,
+                    abdomen_baseline_amp,
+                    estimated_fs,
+                )
+                effort_corroborated = core_effort_state != "present"
+                core_effort_ratio = float(
+                    _effort_ratios(
+                        core_thorax, core_abdomen,
+                        thorax_baseline_amp, abdomen_baseline_amp, estimated_fs,
+                    )
+                )
 
             # AASM drop%%: how far the breathing amplitude fell vs baseline
             # amplitude (NOT raw peak values -- those break on offset sensors).
@@ -1617,10 +2027,126 @@ def detect_apnea_events_from_dataframe(
                 airflow_amplitude_ratio=float(airflow_amplitude_ratio),
                 spo2_usable=spo2_usable and spo2_measurable,
             )
+            secondary = _secondary_evidence(
+                start_index, end_index, core_start_index, core_end_index
+            )
+            candidate_record = {
+                "start_index": start_index,
+                "end_index": end_index,
+                "start_sec": float(time_sec[start_index]),
+                "end_sec": float(time_sec[end_index]),
+                "duration_sec": float(duration_sec),
+                "baseline_airflow": float(event_baseline_airflow),
+                "event_min_airflow": event_min_airflow,
+                "event_mean_airflow": event_mean_airflow,
+                "event_peak_airflow": event_peak_airflow,
+                "event_airflow_amplitude": float(event_airflow_amplitude),
+                "airflow_amplitude_ratio": float(airflow_amplitude_ratio),
+                "airflow_drop_percent": float(drop_percent),
+                "night_reference_amplitude": float(event_reference_amplitude),
+                "night_amplitude_ratio": float(night_amplitude_ratio),
+                "effort_corroborated": bool(effort_corroborated),
+                "core_effort_ratio": core_effort_ratio,
+                "spo2_drop": spo2_drop,
+                "snoring_mean": snoring_mean,
+                "movement_mean": movement_mean,
+                "variability_score": float(variability_score),
+                "spo2_confirmed": bool(
+                    spo2_usable and spo2_measurable
+                    and spo2_drop >= AASM_HYPOPNEA_SPO2_DESAT_MIN
+                ),
+                "desat_nadir_sec": float(linked_desat["nadir_sec"]) if linked_desat else None,
+                "desat_nadir_spo2": float(linked_desat["nadir_spo2"]) if linked_desat else None,
+                "desat_baseline_spo2": float(linked_desat["baseline_spo2"]) if linked_desat else None,
+                "desat_start_sec": float(linked_desat["start_sec"]) if linked_desat else None,
+                **secondary,
+            }
+            if detected_rule_label == "NO_EVENT":
+                spo2_dropout_hit = (
+                    secondary["spo2_dropout_sec"] >= SPO2_DROPOUT_MIN_SEC
+                )
+                if (
+                    expected_label == "HYPOPNEA"
+                    and drop_percent >= AASM_HYPOPNEA_DROP_PERCENT
+                    and night_amplitude_ratio <= HYPOPNEA_MAX_NIGHT_REF_RATIO
+                    and (secondary["spo2_missing"] or spo2_dropout_hit)
+                    and (secondary["pulse_response"].get("rise_bpm", 0.0) >= PULSE_RISE_AROUSAL_BPM
+                         or drop_percent >= REVIEW_HYPOPNEA_MIN_DROP_PERCENT)
+                ):
+                    candidate_record["rule_label"] = "HYPOPNEA"
+                    candidate_record["review_reason"] = (
+                        "hypopnea-range drop but SpO2 was missing"
+                        if secondary["spo2_missing"]
+                        else (
+                            "hypopnea-range drop but SpO2 probe had no signal for "
+                            f"{secondary['spo2_dropout_sec']:.0f}s in/after the event"
+                        )
+                    )
+                    review_candidates.append(candidate_record)
+                continue
+
+            demoted = False
+            if (
+                detected_rule_label == "APNEA_CANDIDATE"
+                and night_amplitude_ratio > APNEA_MAX_NIGHT_REF_RATIO
+            ):
+                if effort_corroborated:
+                    print(
+                        f"Kept apnea {time_sec[start_index]:.0f}s-"
+                        f"{time_sec[end_index]:.0f}s despite amplitude "
+                        f"{night_amplitude_ratio * 100:.0f}% of typical breathing: "
+                        "effort belt also dropped (periodic-breathing pattern)"
+                    )
+                elif (
+                    night_amplitude_ratio <= HYPOPNEA_MAX_NIGHT_REF_RATIO
+                    and spo2_usable
+                    and spo2_measurable
+                    and spo2_drop >= AASM_HYPOPNEA_SPO2_DESAT_MIN
+                ):
+                    detected_rule_label = "HYPOPNEA"
+                    demoted = True
+                elif (
+                    night_amplitude_ratio <= HYPOPNEA_MAX_NIGHT_REF_RATIO
+                    and spo2_usable
+                    and secondary["spo2_dropout_sec"] >= SPO2_DROPOUT_MIN_SEC
+                    and core_effort_ratio is not None
+                    and core_effort_ratio <= SPO2_DROPOUT_EFFORT_MAX_RATIO
+                ):
+                    detected_rule_label = "HYPOPNEA"
+                    demoted = True
+                    candidate_record["spo2_dropout_corroborated"] = True
+                    print(
+                        f"Kept {time_sec[start_index]:.0f}s-{time_sec[end_index]:.0f}s "
+                        f"as hypopnea despite SpO2 probe dropout "
+                        f"({secondary['spo2_dropout_sec']:.1f}s no signal): amplitude "
+                        f"{night_amplitude_ratio * 100:.0f}% of typical breathing and "
+                        f"effort belt fell to {core_effort_ratio * 100:.0f}% of baseline"
+                    )
+                else:
+                    print(
+                        f"Rejected apnea {time_sec[start_index]:.0f}s-"
+                        f"{time_sec[end_index]:.0f}s: amplitude "
+                        f"{event_airflow_amplitude:.1f} is "
+                        f"{night_amplitude_ratio * 100:.0f}% of typical breathing "
+                        f"({event_reference_amplitude:.1f})"
+                    )
+                    continue
+            elif (
+                detected_rule_label == "HYPOPNEA"
+                and night_amplitude_ratio > HYPOPNEA_MAX_NIGHT_REF_RATIO
+            ):
+                print(
+                    f"Rejected hypopnea {time_sec[start_index]:.0f}s-"
+                    f"{time_sec[end_index]:.0f}s: amplitude "
+                    f"{event_airflow_amplitude:.1f} is "
+                    f"{night_amplitude_ratio * 100:.0f}% of typical breathing"
+                )
+                continue
+
             if detected_rule_label == "NO_EVENT":
                 continue
 
-            if detected_rule_label != expected_label:
+            if detected_rule_label != expected_label and not demoted:
                 continue
 
             rule_label = detected_rule_label
@@ -1642,41 +2168,11 @@ def detect_apnea_events_from_dataframe(
                 else:
                     rule_label = "OSA"
 
-            preliminary_events.append(
-                {
-                    "start_index": start_index,
-                    "end_index": end_index,
-                    "start_sec": float(time_sec[start_index]),
-                    "end_sec": float(time_sec[end_index]),
-                    "duration_sec": float(duration_sec),
-                    "baseline_airflow": float(event_baseline_airflow),
-                    "event_min_airflow": event_min_airflow,
-                    "event_mean_airflow": event_mean_airflow,
-                    "event_peak_airflow": event_peak_airflow,
-                    "event_airflow_amplitude": float(event_airflow_amplitude),
-                    "airflow_amplitude_ratio": float(airflow_amplitude_ratio),
-                    "airflow_drop_percent": float(drop_percent),
-                    "spo2_drop": spo2_drop,
-                    "snoring_mean": snoring_mean,
-                    "movement_mean": movement_mean,
-                    "variability_score": float(variability_score),
-                    "rule_label": rule_label,
-                    "spo2_confirmed": bool(
-                        spo2_usable
-                        and spo2_measurable
-                        and spo2_drop >= AASM_HYPOPNEA_SPO2_DESAT_MIN
-                    ),
-                    "desat_nadir_sec": (
-                        float(linked_desat["nadir_sec"]) if linked_desat else None
-                    ),
-                    "desat_nadir_spo2": (
-                        float(linked_desat["nadir_spo2"]) if linked_desat else None
-                    ),
-                    "desat_baseline_spo2": (
-                        float(linked_desat["baseline_spo2"]) if linked_desat else None
-                    ),
-                }
+            candidate_record["rule_label"] = rule_label
+            candidate_record["effort_summary"] = _effort_summary_for(
+                rule_label, start_index, end_index
             )
+            preliminary_events.append(candidate_record)
 
     filtered_events = sorted(
         preliminary_events,
@@ -1741,6 +2237,76 @@ def detect_apnea_events_from_dataframe(
 
         merged_events.append(dict(event))
 
+    # One desaturation should confirm only one event. If multiple events point
+    # to the same nadir, keep the event whose end is closest to the dip onset.
+    claims: dict[float, list[dict[str, Any]]] = {}
+    long_events_for_review: list[dict[str, Any]] = []
+    for event in merged_events:
+        nadir_sec = event.get("desat_nadir_sec")
+        if nadir_sec is None:
+            continue
+        claims.setdefault(float(nadir_sec), []).append(event)
+
+    for nadir_sec, claimants in claims.items():
+        if len(claimants) < 2:
+            continue
+
+        def _onset_gap(item: dict[str, Any]) -> float:
+            onset = item.get("desat_start_sec")
+            anchor = float(onset) if onset is not None else float(nadir_sec)
+            return abs(anchor - float(item["end_sec"]))
+
+        winner = min(claimants, key=_onset_gap)
+        for loser in claimants:
+            if loser is winner:
+                continue
+            loser["desat_claimed_by_sec"] = float(winner["start_sec"])
+            loser["spo2_drop"] = 0.0
+            loser["spo2_confirmed"] = False
+            loser["desat_nadir_sec"] = None
+            loser["desat_nadir_spo2"] = None
+            loser["desat_baseline_spo2"] = None
+            loser["desat_start_sec"] = None
+            print(
+                f"Desaturation at {nadir_sec:.0f}s claimed by event "
+                f"{winner['start_sec']:.0f}s; event {loser['start_sec']:.0f}s "
+                "loses its SpO2 confirmation"
+            )
+
+    # AASM: an unconfirmed hypopnea is not scored, except when the SpO2
+    # verdict is unknown because of probe dropout and the effort belt
+    # independently corroborates the reduced breathing.
+    kept_events: list[dict[str, Any]] = []
+    for event in merged_events:
+        if (
+            event["rule_label"] == "HYPOPNEA"
+            and not event.get("spo2_confirmed")
+            and not event.get("spo2_dropout_corroborated")
+        ):
+            claimed_by = event.get("desat_claimed_by_sec")
+            if claimed_by is not None:
+                claimed_clock = (
+                    f"{int(float(claimed_by) // 3600):02d}:"
+                    f"{int(float(claimed_by) % 3600 // 60):02d}:"
+                    f"{int(float(claimed_by) % 60):02d}"
+                )
+                event["review_reason"] = (
+                    f"{float(event['airflow_drop_percent']):.0f}% drop for "
+                    f"{float(event['duration_sec']):.0f}s, but the desaturation it "
+                    f"points at is already claimed by the event at "
+                    f"{claimed_clock} -- not scored, confirm manually"
+                )
+                review_candidates.append(event)
+                print(
+                    f"Review {float(event['start_sec']):.0f}s-"
+                    f"{float(event['end_sec']):.0f}s: hypopnea lost its shared "
+                    f"desaturation to the event at {float(claimed_by):.0f}s, "
+                    "sent to review instead of being dropped"
+                )
+            continue
+        kept_events.append(event)
+    merged_events = kept_events
+
     for event in merged_events:
         event_start = float(event["start_sec"])
         event_end = float(event["end_sec"])
@@ -1753,7 +2319,7 @@ def detect_apnea_events_from_dataframe(
             if pulse is not None and len(pulse) == len(time_sec):
                 event_mask = (time_sec >= event_start) & (time_sec <= event_end)
                 event_pulse = pulse[event_mask]
-                if _pulse_looks_artifactual(event_pulse):
+                if _pulse_looks_artifactual(event_pulse, estimated_fs):
                     trust_spo2 = False
                     event["pulse_artifact"] = True
                     print(
@@ -1761,6 +2327,16 @@ def detect_apnea_events_from_dataframe(
                         "SpO2 confirmation will not block SENSOR_OFF reassignment"
                     )
             if trust_spo2:
+                if event_duration >= LONG_EVENT_SENSOR_SUSPECT_SEC:
+                    event["review_reason"] = (
+                        f"{event_duration:.0f}s event close to the {MAX_EVENT_SEC:.0f}s cap; "
+                        f"kept alive by a {float(event.get('spo2_drop', 0.0)):.0f}% desaturation"
+                    )
+                    long_events_for_review.append(event)
+                    print(
+                        f"Review {event_start:.0f}s-{event_end:.0f}s: long event with "
+                        "desaturation, not scored automatically"
+                    )
                 continue
 
         reassign = False
@@ -1794,6 +2370,23 @@ def detect_apnea_events_from_dataframe(
                 f"Reassigned {event_start:.0f}s-{event_end:.0f}s to SENSOR_OFF "
                 f"({reason})"
             )
+
+    if long_events_for_review:
+        merged_events = [
+            event for event in merged_events if event not in long_events_for_review
+        ]
+        review_candidates.extend(long_events_for_review)
+
+    # Confidence is a review aid only; it does not alter AASM scoring.
+    for event in merged_events:
+        event["sensor_off_adjacent"] = any(
+            0.0 <= float(segment["start_sec"]) - float(event["end_sec"]) <= SENSOR_OFF_ADJACENT_SEC
+            for segment in sensor_off_segments
+        )
+        confidence, confidence_parts, flags = _event_confidence(event)
+        event["confidence"] = confidence
+        event["confidence_parts"] = confidence_parts
+        event["flags"] = flags
 
     events: list[DetectedApneaEvent] = []
     ai_candidates_processed = 0
@@ -1865,6 +2458,9 @@ def detect_apnea_events_from_dataframe(
                 final_label=final_label,
                 image_path=image_path,
                 evidence=_build_event_evidence(event),
+                confidence=event.get("confidence"),
+                confidence_parts=event.get("confidence_parts"),
+                flags=event.get("flags"),
             )
         )
 
@@ -1938,6 +2534,17 @@ def detect_apnea_events_from_dataframe(
         "debug_summary": debug_summary,
         "debug_events": debug_events,
         "events": [event.to_dict() for event in events],
+        "review_events": [
+            {
+                **item,
+                "rule_label": "REVIEW",
+                "final_label": "REVIEW",
+                "evidence": _build_event_evidence(item),
+            }
+            for item in review_candidates
+        ],
+        "snore_channel_informative": bool(snore_informative),
+        "snore_channel_active_fraction": float(snore_active_fraction),
         "desaturations": desaturations,
         "sensor_off_segments": sensor_off_segments,
         "sensor_off_total_sec": float(sum(item["duration_sec"] for item in sensor_off_segments)),

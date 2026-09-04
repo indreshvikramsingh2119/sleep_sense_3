@@ -106,31 +106,6 @@ class ButtonFunctions:
         # edit_btn.clicked.connect(lambda: self.show_menu_popup(edit_btn, 'edit'))
         # layout.addWidget(edit_btn)
         
-        # View Menu Button
-        view_btn = QPushButton('View')
-        view_btn.setObjectName("menuButton")
-        view_btn.setMinimumWidth(80)
-        view_btn.setMinimumHeight(35)
-        view_btn.setStyleSheet("""
-            QPushButton#menuButton {
-                padding: 8px 16px;
-                font-size: 13px;
-                font-weight: 500;
-                border: 1px solid #ccc;
-                border-radius: 6px;
-                background-color: #f8f9fa;
-            }
-            QPushButton#menuButton:hover {
-                background-color: #e9ecef;
-                border-color: #adb5bd;
-            }
-            QPushButton#menuButton:pressed {
-                background-color: #dee2e6;
-            }
-        """)
-        view_btn.clicked.connect(lambda: self.show_menu_popup(view_btn, 'view'))
-        layout.addWidget(view_btn)
-        
         # Tools Menu Button
         tools_btn = QPushButton('Tools')
         tools_btn.setObjectName("menuButton")
@@ -244,7 +219,6 @@ class ButtonFunctions:
             # menu.addAction('Print report', self.file_print_report)
             
             menu.addSeparator()
-            # menu.addAction('View external data', self.file_view_external_data)
             # dup_action = menu.addAction('Duplicate', self.file_duplicate)
             # dup_action.setEnabled(True)  # will validate inside handler
             # Export submenu
@@ -268,14 +242,6 @@ class ButtonFunctions:
         #     menu.addSeparator()
         #     
         #     
-        elif menu_type == 'view':
-            # Add Quick start with house icon
-            quick_start_action = menu.addAction('Quick start', self.view_quick_start)
-            # Load and set icon
-            from PyQt5.QtGui import QIcon
-            icon_path = get_asset_path("icons/home.svg")
-            quick_start_action.setIcon(QIcon(icon_path))
-            
         elif menu_type == 'tools':
             menu.addAction('Re-analyze', self.tools_reanalyze)
             menu.addAction('Analysis parameters', self.tools_settings_analysis_parameters)
@@ -304,7 +270,7 @@ class ButtonFunctions:
         menu.exec_(global_pos)
     
     def create_menu_bar(self):
-        """Create application menu bar with File, Edit, View, Tools, Help menus"""
+        """Create application menu bar with File and Help menus"""
         menubar = self.parent.menuBar()
         
         # File Menu
@@ -373,60 +339,6 @@ class ButtonFunctions:
         # paste_action.triggered.connect(self.edit_paste)
         # edit_menu.addAction(paste_action)
         # 
-        # View Menu
-        view_menu = menubar.addMenu('View')
-        # 
-        fullscreen_action = QAction('Fullscreen', self.parent)
-        fullscreen_action.setShortcut('F11')
-        fullscreen_action.setStatusTip('Toggle fullscreen mode')
-        fullscreen_action.setCheckable(True)
-        fullscreen_action.triggered.connect(self.view_fullscreen)
-        view_menu.addAction(fullscreen_action)
-        # 
-        # view_menu.addSeparator()
-        # 
-        zoom_in_action = QAction('Zoom In', self.parent)
-        zoom_in_action.setShortcut('Ctrl++')
-        zoom_in_action.setStatusTip('Zoom in charts')
-        zoom_in_action.triggered.connect(self.view_zoom_in)
-        view_menu.addAction(zoom_in_action)
-        # 
-        zoom_out_action = QAction('Zoom Out', self.parent)
-        zoom_out_action.setShortcut('Ctrl+-')
-        zoom_out_action.setStatusTip('Zoom out charts')
-        zoom_out_action.triggered.connect(self.view_zoom_out)
-        view_menu.addAction(zoom_out_action)
-        # 
-        reset_zoom_action = QAction('Reset Zoom', self.parent)
-        reset_zoom_action.setShortcut('Ctrl+0')
-        reset_zoom_action.setStatusTip('Reset chart zoom')
-        reset_zoom_action.triggered.connect(self.view_reset_zoom)
-        view_menu.addAction(reset_zoom_action)
-        # 
-        # # Add the new view items to menubar View menu
-        view_menu.addSeparator()
-        report_view_action = QAction('Report view', self.parent)
-        report_view_action.setStatusTip('Show report view')
-        report_view_action.triggered.connect(self.view_report_view)
-        view_menu.addAction(report_view_action)
-        
-        
-        
-        signal_view_action = QAction('Signal view', self.parent)
-        signal_view_action.setStatusTip('Show signal view')
-        signal_view_action.triggered.connect(self.view_signal_view)
-        view_menu.addAction(signal_view_action)
-        
-        event_list_action = QAction('Event list', self.parent)
-        event_list_action.setStatusTip('Show event list')
-        event_list_action.triggered.connect(self.view_event_list)
-        view_menu.addAction(event_list_action)
-        
-        quick_start_action = QAction('Quick start', self.parent)
-        quick_start_action.setStatusTip('Show quick start')
-        quick_start_action.triggered.connect(self.view_quick_start)
-        view_menu.addAction(quick_start_action)
-        #  
         # Tools Menu
         # tools_menu = menubar.addMenu('Tools')
         # 
@@ -502,26 +414,6 @@ class ButtonFunctions:
     # def edit_paste(self):
     #     print("Edit -> Paste clicked")
     #     # TODO: Implement paste functionality
-    
-    # View Menu Actions
-    # def view_fullscreen(self, checked):
-    #     if checked:
-    #         self.parent.showFullScreen()
-    #     else:
-    #         self.parent.showNormal()
-    #     print(f"View -> Fullscreen {'enabled' if checked else 'disabled'}")
-    
-    # def view_zoom_in(self):
-    #     print("View -> Zoom In clicked")
-    #     # TODO: Implement zoom in functionality
-    
-    # def view_zoom_out(self):
-    #     print("View -> Zoom Out clicked")
-    #     # TODO: Implement zoom out functionality
-    
-    # def view_reset_zoom(self):
-    #     print("View -> Reset Zoom clicked")
-    #     # TODO: Implement reset zoom functionality
     
     # Tools Menu Actions
     # def tools_settings(self):
@@ -1296,21 +1188,6 @@ class ButtonFunctions:
             doc.print_(printer)
             QMessageBox.information(self.parent, "Print", "Instructions sent to printer.")
     
-    # def file_view_external_data(self):
-    #     """Open an external data file with the system default application"""
-    #     path, _ = QFileDialog.getOpenFileName(self.parent, "Open external data", os.path.expanduser("~"))
-    #     if not path:
-    #         return
-    #     try:
-    #         if platform.system() == "Darwin":
-    #             subprocess.run(["open", path])
-    #         elif platform.system() == "Windows":
-    #             os.startfile(path)
-    #         else:
-    #             subprocess.run(["xdg-open", path])
-    #     except Exception as e:
-    #         QMessageBox.warning(self.parent, "Open File", f"Could not open file:\n{e}")
-    
     def file_duplicate(self):
         """Duplicate a chosen file next to the original with a timestamp suffix"""
         path, _ = QFileDialog.getOpenFileName(self.parent, "Select file to duplicate", os.path.expanduser("~"))
@@ -1486,111 +1363,6 @@ class ButtonFunctions:
     #     body = "Please find the recording attached."
     #     self._open_gmail_compose(subject, body, path)
 
-    def _activate_view(self, key, friendly_name):
-        """Try multiple ways to ask the parent dashboard to show a named view/tab/page.
-        Tries common handler names, pages dicts, stacked widgets and findChild fallback.
-        """
-        # 1) Common explicit methods
-        candidates = [
-            f"show_{key}_view", f"show_{key}", f"open_{key}_view", f"open_{key}",
-            "open_view", "show_page", "navigate_to", "set_current_view", "set_view"
-        ]
-        for name in candidates:
-            if hasattr(self.parent, name):
-                try:
-                    func = getattr(self.parent, name)
-                    # try calling with common signature options
-                    try:
-                        func()
-                    except TypeError:
-                        try:
-                            func(key)
-                        except TypeError:
-                            func(friendly_name)
-                    return True
-                except Exception:
-                    # continue trying other methods
-                    pass
-
-        # 2) pages dict or attribute
-        pages = getattr(self.parent, "pages", None)
-        if isinstance(pages, dict):
-            page = pages.get(key) or pages.get(friendly_name) or pages.get(key.lower())
-            if page:
-                try:
-                    page.show()
-                    try:
-                        page.setFocus()
-                    except Exception:
-                        pass
-                    return True
-                except Exception:
-                    pass
-
-        # 3) stacked widget patterns (common names)
-        stacked = getattr(self.parent, "stacked_widget", None) or getattr(self.parent, "stacked", None) or getattr(self.parent, "central_stack", None)
-        if stacked is not None:
-            try:
-                # try to find a child page by objectName
-                for i in range(stacked.count()):
-                    w = stacked.widget(i)
-                    if w.objectName().lower() in (key.lower(), friendly_name.lower()):
-                        stacked.setCurrentIndex(i)
-                        return True
-                    # also check readable windowTitle / accessibleName
-                    if getattr(w, "windowTitle", None) and w.windowTitle().lower() in (key.lower(), friendly_name.lower()):
-                        stacked.setCurrentIndex(i)
-                        return True
-                # fallback: if stacked has setCurrentWidget and parent has attribute named key
-                target = getattr(self.parent, key, None)
-                if target is not None:
-                    stacked.setCurrentWidget(target)
-                    return True
-            except Exception:
-                pass
-
-        # 4) try findChild on parent
-        try:
-            found = None
-            try:
-                found = self.parent.findChild(QWidget, key)
-            except Exception:
-                found = None
-            if not found:
-                try:
-                    found = self.parent.findChild(QWidget, friendly_name)
-                except Exception:
-                    found = None
-            if found:
-                found.show()
-                try:
-                    found.setFocus()
-                except Exception:
-                    pass
-                return True
-        except Exception:
-            pass
-
-        # Nothing worked
-        QMessageBox.information(self.parent, friendly_name, f"Could not locate '{friendly_name}' view in the current UI.")
-        return False
-
-    # New view handlers
-    def view_report_view(self):
-        self._activate_view('report', 'Report view')
-
-    def view_signal_view(self):
-        self._activate_view('signal', 'Signal view')
-
-    # def view_event_list(self):
-    #     self._activate_view('event_list', 'Event list')
-
-    def view_quick_start(self):
-        self._activate_view('quick_start', 'Quick start')
-
-
-
-    
     def get_settings(self):
         """Get current settings"""
         return {

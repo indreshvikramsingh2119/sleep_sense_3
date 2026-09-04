@@ -1293,7 +1293,23 @@ class SleepMonitorChart(QWidget):
                 if hasattr(vb, 'setLimits'):
                     vb.setLimits(xMin=0, xMax=window_seconds, 
                                 yMin=None, yMax=None)
-    
+
+    def _apply_all_psg_mode_range_fixup(self, plot_widget, vb, x, window_seconds):
+        """Clamp all-PSG charts to the last finite sample on every axis."""
+        finite_x = x[np.isfinite(x)] if len(x) else np.array([])
+        plot_end = float(finite_x[-1]) if len(finite_x) > 0 else float(window_seconds)
+        plot_widget.setXRange(0, plot_end, padding=0)
+        bottom_axis = plot_widget.getAxis('bottom')
+        bottom_axis.setRange(0, plot_end)
+        if hasattr(vb, 'set_time_window_limits'):
+            vb.set_time_window_limits(0, plot_end)
+        if hasattr(vb, 'setRange'):
+            try:
+                vb.setRange(x=[0, plot_end], padding=0)
+            except Exception:
+                plot_widget.setXRange(0, plot_end, padding=0)
+        plot_widget.fixed_range = [0, plot_end]
+
     def refresh_charts(self):
         """Refresh all charts with current time window and offset."""
         window_seconds = self.get_effective_time_window_seconds()
@@ -1343,19 +1359,7 @@ class SleepMonitorChart(QWidget):
                             plot_widget.plot_curve.opts['fill'] = None
 
                             if self.is_all_psg_mode():
-                                finite_x = x[np.isfinite(x)] if len(x) else np.array([])
-                                plot_end = float(finite_x[-1]) if len(finite_x) > 0 else float(window_seconds)
-                                plot_widget.setXRange(0, plot_end, padding=0)
-                                bottom_axis = plot_widget.getAxis('bottom')
-                                bottom_axis.setRange(0, plot_end)
-                                if hasattr(vb, 'set_time_window_limits'):
-                                    vb.set_time_window_limits(0, plot_end)
-                                if hasattr(vb, 'setRange'):
-                                    try:
-                                        vb.setRange(x=[0, plot_end], padding=0)
-                                    except Exception:
-                                        plot_widget.setXRange(0, plot_end, padding=0)
-                                plot_widget.fixed_range = [0, plot_end]
+                                self._apply_all_psg_mode_range_fixup(plot_widget, vb, x, window_seconds)
 
                             if hasattr(plot_widget, 'axis_properties'):
                                 properties = plot_widget.axis_properties
@@ -1397,19 +1401,7 @@ class SleepMonitorChart(QWidget):
                         
                         if len(x) > 0 and len(y) > 0:
                             if self.is_all_psg_mode():
-                                finite_x = x[np.isfinite(x)] if len(x) else np.array([])
-                                plot_end = float(finite_x[-1]) if len(finite_x) > 0 else float(window_seconds)
-                                plot_widget.setXRange(0, plot_end, padding=0)
-                                bottom_axis = plot_widget.getAxis('bottom')
-                                bottom_axis.setRange(0, plot_end)
-                                if hasattr(vb, 'set_time_window_limits'):
-                                    vb.set_time_window_limits(0, plot_end)
-                                if hasattr(vb, 'setRange'):
-                                    try:
-                                        vb.setRange(x=[0, plot_end], padding=0)
-                                    except Exception:
-                                        plot_widget.setXRange(0, plot_end, padding=0)
-                                plot_widget.fixed_range = [0, plot_end]
+                                self._apply_all_psg_mode_range_fixup(plot_widget, vb, x, window_seconds)
                             # Use real data from CSV
                             if chart_name.strip() == "Body Position":
                                 self._configure_body_position_axis(plot_widget)
@@ -3876,9 +3868,14 @@ class SleepMonitorChart(QWidget):
                 remaining_items.append((item, owner_plot))
                 continue
             try:
-                if hasattr(owner_plot, "removeItem"):
-                    owner_plot.removeItem(item)
-                else:
+                if isinstance(item, pg.LinearRegionItem):
+                    if hasattr(owner_plot, "removeItem"):
+                        owner_plot.removeItem(item)
+                elif isinstance(item, QLabel):
+                    if not sip.isdeleted(item):
+                        item.hide()
+                        item.setGeometry(-1000, -1000, 1, 1)
+                elif hasattr(item, "hide"):
                     item.hide()
                     item.setParent(None)
                     item.deleteLater()

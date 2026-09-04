@@ -88,39 +88,11 @@ def get_icon_definitions():
             "callback_name": "go_to_next"
         },
         {
-            "name": "prepare_device",
-            "icon": get_asset_path("icons/prepare_device.svg"),
-            "tooltip": "Prepare Device",
-            "status_tip": "Initialize and connect device",
-            "callback_name": "prepare_device"
-        },
-        {
-            "name": "download_data",
-            "icon": get_asset_path("icons/download_data.svg"),
-            "tooltip": "Download Data",
-            "status_tip": "Download data from device",
-            "callback_name": "download_data"
-        },
-        {
             "name": "database",
             "icon": get_asset_path("icons/database.svg"),
             "tooltip": "Database",
             "status_tip": "Open patient database",
             "callback_name": "open_database"
-        },
-        {
-            "name": "report_view",
-            "icon": get_asset_path("icons/report_view.svg"),
-            "tooltip": "Report View",
-            "status_tip": "View ECG/Sleep reports",
-            "callback_name": "open_report_view"
-        },
-        {
-            "name": "signal_view",
-            "icon": get_asset_path("icons/signal_view.svg"),
-            "tooltip": "Signal View",
-            "status_tip": "View live physiological signals",
-            "callback_name": "open_signal_view"
         },
         # {
         #     "name": "event_list",

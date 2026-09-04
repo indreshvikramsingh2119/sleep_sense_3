@@ -2239,32 +2239,12 @@ class SleepSenseDashboard(QMainWindow):
         self.set_toolbar_navigation_enabled(False)
         
         toolbar.addSeparator()
-        
-        # Device Group: Prepare / Download
-        self.btn_prepare_device = create_toolbar_button(
+
+        # Data Group: Database
+        self.btn_database = create_toolbar_button(
             os.path.join(script_dir, icons[2]["icon"]),
             icons[2]["tooltip"],
             icons[2]["status_tip"],
-            self.prepare_device
-        )
-        toolbar.addWidget(self.btn_prepare_device)
-        
-        # Download Data button temporarily disabled.
-        # self.btn_download_data = create_toolbar_button(
-        #     os.path.join(script_dir, icons[3]["icon"]),
-        #     icons[3]["tooltip"],
-        #     icons[3]["status_tip"], 
-        #     self.download_data
-        # )  
-        # self.btn_download_data.setEnabled(False)  
-        # toolbar.addWidget(self.btn_download_data)
-        
-        
-        # Data Group: Database / Archive
-        self.btn_database = create_toolbar_button(
-            os.path.join(script_dir, icons[4]["icon"]),
-            icons[4]["tooltip"],
-            icons[4]["status_tip"],
             self.open_database
         )
         toolbar.addWidget(self.btn_database)
@@ -2352,23 +2332,6 @@ class SleepSenseDashboard(QMainWindow):
                 continue
             button.setEnabled(bool(enabled))
             button.setToolTip(label if enabled else "Pehle Database button dabaayein")
-    
-    def prepare_device(self):
-        """Initialize and connect device"""
-        print("Prepare Device button clicked")
-        self.hide_extended_buttons()
-        # TODO: Implement device preparation logic
-   
-        # self.btn_download_data.setEnabled(True)
-    
-    # def download_data(self):
-    #     """Download data from device"""
-    #     # Check if monitor chart has selection active and block if needed
-    #     if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
-    #         return
-    #
-    #     print("Download Data button clicked")
-    #     # TODO: Implement data download logic
     
     def open_database(self):
         """Open patient database as modeless window and toggle extended buttons"""
@@ -2909,52 +2872,12 @@ class SleepSenseDashboard(QMainWindow):
                 pass
     
     def create_menubar(self):
-        """Create menubar with File and View menus"""
+        """Create menubar with File menu"""
         menubar = self.menuBar()
         menubar.setObjectName("mainMenuBar")
         
         # File menu
         file_menu = menubar.addMenu('File')
-        
-        # View menu and wire to handlers in button_functions
-        view_menu = menubar.addMenu('View')
-
-        fullscreen_action = QAction('Fullscreen', self)
-        fullscreen_action.setCheckable(True)
-        fullscreen_action.setStatusTip('Toggle fullscreen')
-        fullscreen_action.triggered.connect(self.button_functions.view_fullscreen)
-        view_menu.addAction(fullscreen_action)
-
-        view_menu.addSeparator()
-
-        zoom_in_action = QAction('Zoom In', self)
-        zoom_in_action.setShortcut('Ctrl++')
-        zoom_in_action.triggered.connect(self.button_functions.view_zoom_in)
-        view_menu.addAction(zoom_in_action)
-
-        zoom_out_action = QAction('Zoom Out', self)
-        zoom_out_action.setShortcut('Ctrl+-')
-        zoom_out_action.triggered.connect(self.button_functions.view_zoom_out)
-        view_menu.addAction(zoom_out_action)
-
-        reset_zoom_action = QAction('Reset Zoom', self)
-        reset_zoom_action.setShortcut('Ctrl+0')
-        reset_zoom_action.triggered.connect(self.button_functions.view_reset_zoom)
-        view_menu.addAction(reset_zoom_action)
-
-        view_menu.addSeparator()
-
-        report_view_action = QAction('Report view', self)
-        report_view_action.triggered.connect(self.button_functions.view_report_view)
-        view_menu.addAction(report_view_action)
-
-        signal_view_action = QAction('Signal view', self)
-        signal_view_action.triggered.connect(self.button_functions.view_signal_view)
-        view_menu.addAction(signal_view_action)
-
-        # event_list_action = QAction('Event list', self)
-        # event_list_action.triggered.connect(self.button_functions.view_event_list)
-        # view_menu.addAction(event_list_action)
     
     def start_auto_playback(self):
         """Playback is intentionally manual only."""
