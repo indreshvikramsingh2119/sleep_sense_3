@@ -10,7 +10,8 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QFileDialog, QListWidget, QListWidgetItem, QScrollArea,
-    QMessageBox, QSizePolicy, QComboBox, QStyle
+    QMessageBox, QSizePolicy, QComboBox, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem
 )
 from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QDesktopServices, QPainter, QPixmap, QColor
@@ -20,6 +21,47 @@ try:
     from src.utils.db_utils import get_visible_raw_csv_dir
 except ImportError:
     get_visible_raw_csv_dir = None
+
+
+class _DetectedEventDelegate(QStyledItemDelegate):
+    """Keep event rows compact while coloring only the manual marker."""
+
+    def paint(self, painter, option, index):
+        style_option = QStyleOptionViewItem(option)
+        style_option.text = ""
+        if option.widget is not None:
+            option.widget.style().drawControl(
+                QStyle.CE_ItemViewItem, style_option, painter, option.widget
+            )
+
+        rect = option.rect.adjusted(8, 4, -8, -4)
+        lines = str(index.data(Qt.DisplayRole) or "").split("\n", 1)
+        normal_color = (
+            option.palette.highlightedText().color()
+            if option.state & QStyle.State_Selected
+            else option.palette.text().color()
+        )
+        painter.setPen(normal_color)
+        painter.drawText(rect.left(), rect.top(), rect.width(), rect.height(), Qt.AlignTop, lines[0])
+
+        if len(lines) < 2:
+            return
+        detail = lines[1]
+        marker = "  (M)"
+        base = detail[:-len(marker)] if detail.endswith(marker) else detail
+        y = rect.top() + painter.fontMetrics().height()
+        painter.drawText(rect.left(), y, rect.width(), painter.fontMetrics().height(), Qt.AlignTop, base)
+        if detail.endswith(marker):
+            base_width = painter.fontMetrics().horizontalAdvance(base)
+            painter.setPen(QColor("#dc2626"))
+            painter.drawText(
+                rect.left() + base_width,
+                y,
+                rect.width() - base_width,
+                painter.fontMetrics().height(),
+                Qt.AlignTop,
+                marker,
+            )
 
 
 class PatientInfoWidget(QWidget):
@@ -633,6 +675,9 @@ class PatientInfoWidget(QWidget):
         self.detected_events_list.setWordWrap(True)
         self.detected_events_list.setTextElideMode(Qt.ElideNone)
         self.detected_events_list.itemClicked.connect(self.jump_to_detected_event)
+        self.detected_events_list.setItemDelegate(
+            _DetectedEventDelegate(self.detected_events_list)
+        )
         self.detected_events_list.setStyleSheet("""
             QListWidget {
                 background-color: #f8fafc;
@@ -854,7 +899,14 @@ class PatientInfoWidget(QWidget):
             end_text = self._format_timestamp(float(event["end_sec"]))
             label = str(event.get("final_label") or event.get("rule_label") or "REVIEW")
             duration = float(event.get("duration_sec", 0.0))
-            item = QListWidgetItem(f"{start_text} - {end_text}\n{label} | {duration:.1f}s")
+            is_manual = (
+                bool(event.get("is_manually_edited"))
+                or str(event.get("source", "")).strip().lower() == "manual"
+            )
+            manual_mark = "  (M)" if is_manual else ""
+            item = QListWidgetItem(
+                f"{start_text} - {end_text}\n{label} | {duration:.1f}s{manual_mark}"
+            )
             item.setData(Qt.UserRole, event)
             self.detected_events_list.addItem(item)
 

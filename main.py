@@ -190,7 +190,7 @@ def main():
         (screen.width()  - splash.width())  // 2,
         (screen.height() - splash.height()) // 2
     )
-
+ 
     splash.show()
     app.processEvents()
 

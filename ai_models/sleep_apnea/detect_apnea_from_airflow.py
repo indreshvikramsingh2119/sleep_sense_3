@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, welch
 
 CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
@@ -456,6 +456,18 @@ SENSOR_OFF_NORMAL_RATIO_BAND = (0.5, 1.4)
 SENSOR_OFF_REFERENCE_PERCENTILE = 90.0
 SENSOR_OFF_EVENT_OVERLAP_RATIO = 0.5
 LONG_EVENT_SENSOR_SUSPECT_SEC = 90.0
+LONG_EVENT_SPO2_LAG_CHECK_SEC = 45.0
+SPO2_CIRCULATION_DELAY_SEC = 20.0
+LONG_EVENT_SPO2_MIN_FALL = 2.0
+LONG_EVENT_SPO2_END_MARGIN_SEC = 5.0
+# --- Cannula-out by loss of breath periodicity ------------------------------
+PERIODICITY_WINDOW_SEC = 60.0
+PERIODICITY_STEP_SEC = 10.0
+PERIODICITY_BREATH_BAND_HZ = (0.12, 0.50)
+PERIODICITY_AIRFLOW_MAX_FRAC = 0.15
+PERIODICITY_THORAX_MIN_FRAC = 0.30
+PERIODICITY_MIN_SEC = 180.0
+SENSOR_OFF_REASON_NO_PERIODICITY = "airflow_no_breath_periodicity_effort_present"
 # --- Absolute amplitude sanity gate -----------------------------------------
 # Relative drops can be inflated by a sigh or arousal burst in the baseline.
 NIGHT_REFERENCE_WINDOW_SEC = 1800.0
@@ -463,6 +475,10 @@ NIGHT_REFERENCE_MIN_SEC = 300.0
 NIGHT_REFERENCE_FLAT_RATIO = 0.15
 APNEA_MAX_NIGHT_REF_RATIO = 0.25
 HYPOPNEA_MAX_NIGHT_REF_RATIO = 0.70
+# Promotion gate: a hypopnea at the sensor noise floor with a weak local
+# baseline is treated as an apnea candidate because the weak reference makes
+# the measured drop look smaller than it is.
+DEGRADED_BASELINE_NIGHT_RATIO = 0.50
 NIGHT_REFERENCE_MIN_COVERAGE = 0.30
 
 # Secondary evidence and review-tier settings. These support review and
@@ -789,6 +805,96 @@ def detect_sensor_off_segments(
             merged[-1]["end_sec"] = max(merged[-1]["end_sec"], segment["end_sec"])
             merged[-1]["duration_sec"] = merged[-1]["end_sec"] - merged[-1]["start_sec"]
             merged[-1]["dead_core_sec"] += segment["dead_core_sec"]
+        else:
+            merged.append(segment)
+    return merged
+
+
+def _breath_band_power_fraction(segment: np.ndarray, fs: float) -> float:
+    """Return the fraction of spectral power in the breathing band."""
+    x = np.asarray(segment, dtype=float)
+    x = x[np.isfinite(x)]
+    if len(x) < 8:
+        return 0.0
+    x = x - np.mean(x)
+    drift_window = max(3, int(round(fs * 6.0)))
+    x = x - pd.Series(x).rolling(drift_window, center=True, min_periods=1).mean().to_numpy()
+    if float(np.std(x)) <= 0.0:
+        return 0.0
+    freqs, power = welch(
+        x, fs=fs, nperseg=min(len(x), max(8, int(round(fs * 40.0))))
+    )
+    total = float(np.sum(power[freqs > 0.02]))
+    if total <= 0.0:
+        return 0.0
+    low, high = PERIODICITY_BREATH_BAND_HZ
+    band = (freqs >= low) & (freqs <= high)
+    return float(np.sum(power[band]) / total)
+
+
+def detect_periodicity_loss_segments(
+    airflow: np.ndarray,
+    thorax: np.ndarray | None,
+    fs: float,
+    time_sec: np.ndarray,
+    window_sec: float = PERIODICITY_WINDOW_SEC,
+    step_sec: float = PERIODICITY_STEP_SEC,
+    airflow_max_frac: float = PERIODICITY_AIRFLOW_MAX_FRAC,
+    thorax_min_frac: float = PERIODICITY_THORAX_MIN_FRAC,
+    min_duration_sec: float = PERIODICITY_MIN_SEC,
+) -> list[dict[str, Any]]:
+    """Find sustained airflow rhythm loss while thorax keeps breathing."""
+    airflow = np.asarray(airflow, dtype=float)
+    n = len(airflow)
+    if n == 0 or thorax is None or len(thorax) != n:
+        return []
+    thorax = np.asarray(thorax, dtype=float)
+    win = max(8, int(round(fs * window_sec)))
+    step = max(1, int(round(fs * step_sec)))
+    if n < win:
+        return []
+    flagged = np.zeros(n, dtype=bool)
+    for start in range(0, n - win + 1, step):
+        stop = start + win
+        airflow_frac = _breath_band_power_fraction(airflow[start:stop], fs)
+        if airflow_frac >= airflow_max_frac:
+            continue
+        thorax_frac = _breath_band_power_fraction(thorax[start:stop], fs)
+        if thorax_frac >= thorax_min_frac:
+            flagged[start:stop] = True
+    results: list[dict[str, Any]] = []
+    for start_idx, end_idx, duration_sec in _segment_mask(flagged, time_sec, min_duration_sec):
+        results.append({
+            "start_sec": float(time_sec[start_idx]),
+            "end_sec": float(time_sec[end_idx]),
+            "duration_sec": float(duration_sec),
+            "dead_core_sec": float(duration_sec),
+            "reason": SENSOR_OFF_REASON_NO_PERIODICITY,
+        })
+    return results
+
+
+def _merge_sensor_off_lists(
+    primary: list[dict[str, Any]], extra: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Union sensor-off lists and preserve all contributing reasons."""
+    combined = sorted(
+        [dict(item) for item in primary] + [dict(item) for item in extra],
+        key=lambda item: float(item["start_sec"]),
+    )
+    merged: list[dict[str, Any]] = []
+    for segment in combined:
+        if merged and float(segment["start_sec"]) <= float(merged[-1]["end_sec"]) + 1.0:
+            last = merged[-1]
+            last["end_sec"] = max(float(last["end_sec"]), float(segment["end_sec"]))
+            last["duration_sec"] = float(last["end_sec"]) - float(last["start_sec"])
+            last["dead_core_sec"] = float(last.get("dead_core_sec", 0.0)) + float(
+                segment.get("dead_core_sec", 0.0)
+            )
+            reasons = set(str(last.get("reason", "")).split("+")) | set(
+                str(segment.get("reason", "")).split("+")
+            )
+            last["reason"] = "+".join(sorted(reason for reason in reasons if reason))
         else:
             merged.append(segment)
     return merged
@@ -1138,6 +1244,8 @@ def _build_event_evidence(event: dict[str, Any]) -> list[str]:
         tier = "hypopnea tier (30-75%)"
     else:
         tier = "below hypopnea tier"
+    if event.get("promoted_from_hypopnea"):
+        tier = "apnea tier (flow at noise floor, local baseline degraded)"
     ref_amp = event.get("night_reference_amplitude")
     ratio = event.get("night_amplitude_ratio")
     typical = (
@@ -1563,6 +1671,11 @@ def detect_apnea_events_from_dataframe(
     enable_ai: bool = False,
 ) -> dict[str, Any]:
     signal_df = signal_df.copy()
+    # Preserve the unenhanced airflow for the periodicity-loss test.
+    unenhanced_airflow = (
+        signal_df["airflow"].to_numpy(dtype=float).copy()
+        if "airflow" in signal_df.columns else None
+    )
     airflow_enhancement_applied = False
     if enhance_airflow_for_graph_and_detection is not None and "airflow" in signal_df.columns:
         enhanced_airflow = enhance_airflow_for_graph_and_detection(
@@ -1664,6 +1777,20 @@ def detect_apnea_events_from_dataframe(
         thorax=thorax,
         fs=estimated_fs,
         time_sec=time_sec,
+    )
+    periodicity_loss_segments = detect_periodicity_loss_segments(
+        airflow=unenhanced_airflow if unenhanced_airflow is not None else airflow,
+        thorax=thorax,
+        fs=estimated_fs,
+        time_sec=time_sec,
+    )
+    for segment in periodicity_loss_segments:
+        print(
+            f"Cannula-out suspected {segment['start_sec']:.0f}s-{segment['end_sec']:.0f}s "
+            f"({segment['duration_sec']:.0f}s): airflow has no breathing rhythm, belt does"
+        )
+    sensor_off_segments = _merge_sensor_off_lists(
+        sensor_off_segments, periodicity_loss_segments
     )
 
     # Patient-level typical breathing reference for the absolute sanity gate.
@@ -2027,6 +2154,25 @@ def detect_apnea_events_from_dataframe(
                 airflow_amplitude_ratio=float(airflow_amplitude_ratio),
                 spo2_usable=spo2_usable and spo2_measurable,
             )
+            promoted = False
+            if (
+                expected_label == "HYPOPNEA"
+                and detected_rule_label == "HYPOPNEA"
+                and event_reference_amplitude > 0
+                and night_amplitude_ratio <= APNEA_MAX_NIGHT_REF_RATIO
+                and event_baseline_airflow
+                < DEGRADED_BASELINE_NIGHT_RATIO * event_reference_amplitude
+                and float(duration_sec) >= MIN_EVENT_SEC
+            ):
+                print(
+                    f"Promoted {time_sec[start_index]:.0f}s-{time_sec[end_index]:.0f}s "
+                    f"hypopnea -> apnea: airflow {event_airflow_amplitude:.1f} is at the "
+                    f"noise floor ({night_amplitude_ratio * 100:.0f}% of typical breathing "
+                    f"{event_reference_amplitude:.0f}); local baseline {event_baseline_airflow:.1f} "
+                    "was already degraded"
+                )
+                detected_rule_label = "APNEA_CANDIDATE"
+                promoted = True
             secondary = _secondary_evidence(
                 start_index, end_index, core_start_index, core_end_index
             )
@@ -2048,6 +2194,7 @@ def detect_apnea_events_from_dataframe(
                 "effort_corroborated": bool(effort_corroborated),
                 "core_effort_ratio": core_effort_ratio,
                 "spo2_drop": spo2_drop,
+                "promoted_from_hypopnea": bool(promoted),
                 "snoring_mean": snoring_mean,
                 "movement_mean": movement_mean,
                 "variability_score": float(variability_score),
@@ -2146,7 +2293,7 @@ def detect_apnea_events_from_dataframe(
             if detected_rule_label == "NO_EVENT":
                 continue
 
-            if detected_rule_label != expected_label and not demoted:
+            if detected_rule_label != expected_label and not (demoted or promoted):
                 continue
 
             rule_label = detected_rule_label
@@ -2313,6 +2460,25 @@ def detect_apnea_events_from_dataframe(
         event_duration = max(0.0, event_end - event_start)
         if event_duration <= 0:
             continue
+        noise_overlap = 0.0
+        for segment in periodicity_loss_segments:
+            overlap = min(event_end, float(segment["end_sec"])) - max(
+                event_start, float(segment["start_sec"])
+            )
+            noise_overlap = max(noise_overlap, overlap / event_duration)
+        if noise_overlap >= SENSOR_OFF_EVENT_OVERLAP_RATIO and event["rule_label"] in {
+            "OSA", "CSA", "MSA", "HYPOPNEA"
+        }:
+            event["rule_label"] = "SENSOR_OFF"
+            event["sensor_off_reason"] = (
+                f"{noise_overlap * 100:.0f}% of event inside a stretch where airflow had "
+                "no breathing rhythm while the effort belt did (cannula displaced/blocked)"
+            )
+            print(
+                f"Reassigned {event_start:.0f}s-{event_end:.0f}s to SENSOR_OFF "
+                "(airflow was sensor noise, not breathing)"
+            )
+            continue
         trust_spo2 = False
         if event.get("spo2_confirmed"):
             trust_spo2 = True
@@ -2326,6 +2492,45 @@ def detect_apnea_events_from_dataframe(
                         f"Pulse artifact during {event_start:.0f}s-{event_end:.0f}s; "
                         "SpO2 confirmation will not block SENSOR_OFF reassignment"
                     )
+            if (
+                trust_spo2
+                and event_duration >= LONG_EVENT_SPO2_LAG_CHECK_SEC
+                and spo2 is not None
+                and event.get("desat_baseline_spo2") is not None
+            ):
+                lag_mask = (
+                    (time_sec >= event_start + SPO2_CIRCULATION_DELAY_SEC)
+                    & (time_sec <= event_end + LONG_EVENT_SPO2_END_MARGIN_SEC)
+                    & np.isfinite(spo2)
+                    & (spo2 > 0)
+                )
+                if np.any(lag_mask):
+                    in_event_min = float(np.nanmin(spo2[lag_mask]))
+                    base_spo2 = float(event["desat_baseline_spo2"])
+                    if base_spo2 - in_event_min < LONG_EVENT_SPO2_MIN_FALL:
+                        nadir_gap = (
+                            float(event["desat_nadir_sec"]) - event_end
+                            if event.get("desat_nadir_sec") is not None
+                            else float("nan")
+                        )
+                        event["review_reason"] = (
+                            f"airflow flat for {event_duration:.0f}s but SpO2 never fell "
+                            f"below {in_event_min:.0f} during the event (baseline "
+                            f"{base_spo2:.0f}); the {base_spo2:.0f}->"
+                            f"{float(event.get('desat_nadir_spo2', 0.0)):.0f} reading came "
+                            f"{nadir_gap:.0f}s after the event ended -- a real {event_duration:.0f}s "
+                            "apnea would desaturate during the event; suspect cannula "
+                            "displacement / mouth breathing with an oximeter artifact"
+                        )
+                        event["spo2_timing_implausible"] = True
+                        long_events_for_review.append(event)
+                        print(
+                            f"Review {event_start:.0f}s-{event_end:.0f}s: {event_duration:.0f}s "
+                            f"event but SpO2 stayed >= {in_event_min:.0f} throughout; "
+                            "desaturation timing implausible, not scored automatically"
+                        )
+                        continue
+
             if trust_spo2:
                 if event_duration >= LONG_EVENT_SENSOR_SUSPECT_SEC:
                     event["review_reason"] = (
