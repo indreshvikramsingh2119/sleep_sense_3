@@ -1401,6 +1401,7 @@ class SleepSenseDashboard(QMainWindow):
         self.patient_rail.on_expand = self.expand_patient_panel
         self.patient_rail.hide()
         self._patient_panel_collapsed = False
+        self._patient_panel_open_width = None  # set right after startup; width to return to after hide/unhide
         patient_layout.addWidget(self.patient_rail)
         
         splitter.addWidget(patient_panel)
@@ -1415,6 +1416,10 @@ class SleepSenseDashboard(QMainWindow):
         self.monitor_chart.set_patient_id("--------")
         self.monitor_chart.raw_data_saved.connect(self.patient_info.add_saved_raw_file)
         self.monitor_chart.apnea_events_updated.connect(self.patient_info.update_detected_events_list)
+        # Loading a recording relayouts the window; make sure the patient panel keeps its width.
+        self.monitor_chart.apnea_events_updated.connect(
+            lambda _events: QTimer.singleShot(0, self._restore_patient_panel_width)
+        )
 
         # Connect monitor chart reference to patient info for upload/save/event jump functionality
         self.patient_info.monitor_chart = self.monitor_chart
@@ -1457,6 +1462,7 @@ class SleepSenseDashboard(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1) 
         self._set_patient_panel_collapsed(False)
+        QTimer.singleShot(600, self._capture_patient_panel_width)
         
         content_layout.addWidget(splitter)
         
@@ -1475,6 +1481,7 @@ class SleepSenseDashboard(QMainWindow):
             self.collapse_patient_panel()
         else:
             self._set_patient_panel_collapsed(False)
+            self._patient_panel_open_width = panel_width  # the width the user chose
 
     def _set_patient_panel_collapsed(self, collapsed):
         """Show the rail when collapsed and the full panel when expanded."""
@@ -1500,9 +1507,31 @@ class SleepSenseDashboard(QMainWindow):
             return
         self._set_patient_panel_collapsed(False)
         self.main_splitter.setSizes([
-            PATIENT_PANEL_OPEN_WIDTH,
+            int(self._patient_panel_open_width or PATIENT_PANEL_OPEN_WIDTH),
             1000,
         ])
+
+    def _capture_patient_panel_width(self):
+        """Remember the width the panel has right after startup, so every later state returns to it."""
+        if self._patient_panel_open_width is None and not self._patient_panel_collapsed:
+            width = self.patient_panel.width()
+            if width >= PATIENT_PANEL_SNAP_WIDTH:
+                self._patient_panel_open_width = width
+
+    def _restore_patient_panel_width(self):
+        """Keep the open patient panel at its chosen width (startup width, or where the user dragged it).
+
+        Only acts when the panel is open and has drifted by more than a couple of pixels.
+        """
+        splitter = getattr(self, "main_splitter", None)
+        target = getattr(self, "_patient_panel_open_width", None)
+        if splitter is None or target is None or getattr(self, "_patient_panel_collapsed", False):
+            return
+        if abs(self.patient_panel.width() - int(target)) <= 2:
+            return
+        total = sum(splitter.sizes())
+        if total > int(target):
+            splitter.setSizes([int(target), total - int(target)])
 
     def toggle_patient_panel(self):
         """Toggle between the collapsed rail and the expanded patient panel."""

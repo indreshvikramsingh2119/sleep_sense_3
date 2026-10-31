@@ -9,11 +9,11 @@ import json
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QFileDialog, QListWidget, QListWidgetItem, QScrollArea,
+    QFrame, QFileDialog, QListWidget, QListWidgetItem, QScrollArea, QScrollBar,
     QMessageBox, QSizePolicy, QComboBox, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QAbstractItemView
 )
-from PyQt5.QtCore import Qt, QUrl, QSize
+from PyQt5.QtCore import Qt, QUrl, QSize, QObject, QEvent, QTimer
 from PyQt5.QtGui import QDesktopServices, QPainter, QPixmap, QColor, QIcon
 from PyQt5.QtGui import QFont
 from src.utils.db_utils import get_db_path
@@ -22,6 +22,63 @@ try:
     from src.utils.db_utils import get_visible_raw_recording_dir
 except ImportError:
     get_visible_raw_recording_dir = None
+
+
+def install_overlay_scrollbar(area, width=6, margin=3):
+    """Show the vertical scrollbar ON TOP of the right edge of ``area`` instead of beside it.
+
+    A normal "as needed" scrollbar takes its width from the viewport, so everything inside becomes narrower
+    (and its right border is cut off) the moment the content gets taller than the area, e.g. after loading a
+    recording with many events.  Here the viewport width never changes: the bar just floats over the right
+    gutter, and only while there is something to scroll.  Wheel / trackpad scrolling still works.
+    """
+    area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    inner = area.verticalScrollBar()          # keeps the real range/value even while it is hidden
+    bar = QScrollBar(Qt.Vertical, area)
+    bar.setObjectName("overlayScrollBar")
+    bar.setStyleSheet("""
+        QScrollBar#overlayScrollBar:vertical { background: transparent; width: %dpx; margin: 0; border: none; }
+        QScrollBar#overlayScrollBar::handle:vertical { background: rgba(100, 116, 139, 0.55); border-radius: %dpx; min-height: 28px; }
+        QScrollBar#overlayScrollBar::handle:vertical:hover { background: rgba(71, 85, 105, 0.85); }
+        QScrollBar#overlayScrollBar::add-line:vertical, QScrollBar#overlayScrollBar::sub-line:vertical { height: 0; }
+        QScrollBar#overlayScrollBar::add-page:vertical, QScrollBar#overlayScrollBar::sub-page:vertical { background: transparent; }
+    """ % (width, width // 2))
+    bar.hide()
+    syncing = {"on": False}
+
+    def refresh():
+        if syncing["on"]:
+            return
+        syncing["on"] = True
+        try:
+            bar.setRange(inner.minimum(), inner.maximum())
+            bar.setPageStep(inner.pageStep())
+            bar.setSingleStep(inner.singleStep())
+            bar.setValue(inner.value())
+        finally:
+            syncing["on"] = False
+        scrollable = inner.maximum() > inner.minimum() and area.isVisible()
+        bar.setVisible(scrollable)
+        if scrollable:
+            bar.setGeometry(area.width() - width - margin, margin, width, max(0, area.height() - 2 * margin))
+            bar.raise_()
+
+    inner.rangeChanged.connect(lambda *_: refresh())
+    inner.valueChanged.connect(lambda *_: refresh())
+    bar.valueChanged.connect(lambda value: None if syncing["on"] else inner.setValue(value))
+
+    class _Watcher(QObject):
+        def eventFilter(self, obj, event):
+            if obj is area and event.type() in (QEvent.Resize, QEvent.Show, QEvent.Hide, QEvent.LayoutRequest):
+                QTimer.singleShot(0, refresh)
+            return False
+
+    watcher = _Watcher(area)
+    area.installEventFilter(watcher)
+    area._overlay_scrollbar = bar
+    area._overlay_watcher = watcher
+    refresh()
+    return bar
 
 
 class _DetectedEventDelegate(QStyledItemDelegate):
@@ -210,8 +267,9 @@ class PatientInfoWidget(QWidget):
         scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setWidget(main_container)
+        # Floating scrollbar: the container keeps the same width whether or not it has to scroll.
+        install_overlay_scrollbar(scroll)
         layout.addWidget(scroll, 1)
         
         return widget
