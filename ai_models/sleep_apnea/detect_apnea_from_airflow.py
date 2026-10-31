@@ -27,7 +27,7 @@ try:
         create_event_window_image,
         estimate_sample_rate_hz,
         load_cnn_model_bundle,
-        load_sleep_csv,
+        load_sleep_recording_frame,
         predict_event_image,
         preprocess_signals,
     )
@@ -37,7 +37,7 @@ except ImportError:
         create_event_window_image,
         estimate_sample_rate_hz,
         load_cnn_model_bundle,
-        load_sleep_csv,
+        load_sleep_recording_frame,
         predict_event_image,
         preprocess_signals,
     )
@@ -106,12 +106,28 @@ AASM_APNEA_DROP_PERCENT = 75.0
 OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD = 0.20
 CENTRAL_APNEA_EFFORT_THRESHOLD = 0.60
 CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO = 0.08
+# --- Effort-belt reliability -------------------------------------------------
+# Effort (thorax/abdomen) is only trusted for OSA / MSA / CSA when the belt's
+# breathing signal clearly stands above its own noise. The noise floor is measured
+# on the recording itself: a flat belt still reads a few counts of range in a 3 s
+# window, so an amplitude at that level says nothing about effort.
+EFFORT_NOISE_FLOOR_PERCENTILE = 10.0
+EFFORT_NOISE_MARGIN = 1.25
+EFFORT_MIN_BELT_SNR = 6.0
+CSA_REQUIRE_EXTRA_CRITERIA = False
+CSA_MIN_DURATION_SEC = 20.0
+CSA_DESAT_MIN_PT = 3.0
+UNTYPED_APNEA_LABEL = "BEST_GUESS"
+_EFFORT_NOISE_COUNTS = 0.0
+_SCORED_LABELS = {"OSA", "CSA", "MSA", "APNEA", "HYPOPNEA"}
 DESAT_DROP_PERCENT = 3.0
 DESAT_LINK_WINDOW_SEC = 30.0
 # SpO2 sensor dropout handling. A short no-signal interval makes a linked
 # desaturation unknown rather than proving that no desaturation occurred.
 SPO2_DROPOUT_MIN_SEC = 3.0
 SPO2_DROPOUT_EFFORT_MAX_RATIO = 0.60
+SPO2_DROPOUT_MAX_GAP_SEC = 10.0
+SPO2_DROPOUT_MIN_DECLINE_PT = 1.0
 DESAT_BASELINE_LOOKBACK_SEC = 60.0   # how far back the pre-desat baseline is taken
 # The fall must also be a fall against the RECENT level, not just against the
 # best value in the last minute. On a slow drift (99 -> 98 -> 97 -> 96 over a
@@ -141,7 +157,6 @@ _ADJUSTABLE_DEFAULTS = {
 # NameError at import.
 _ADJUSTABLE_DEFAULTS["DESAT_DROP_PERCENT"] = DESAT_DROP_PERCENT
 
-
 def get_analysis_parameters() -> dict[str, Any]:
     """Return the currently active adjustable detection parameters."""
     return {key: globals()[key] for key in _ADJUSTABLE_DEFAULTS}
@@ -153,7 +168,7 @@ def get_default_analysis_parameters() -> dict[str, Any]:
 
 
 def apply_analysis_parameters(values: dict[str, Any]) -> None:
-    """Override adjustable detection parameters at runtime."""
+    """Apply user-selected detection parameters at runtime."""
     for key, value in values.items():
         if key in _ADJUSTABLE_DEFAULTS:
             globals()[key] = value
@@ -446,6 +461,34 @@ EFFORT_BREATH_WINDOW_SEC = 3.0
 # ---------------------------------------------------------------------------
 # A dislodged/blocked nasal cannula kills airflow while the chest belt keeps
 # moving. A real central apnea silences both, so effort distinguishes them.
+# --- Airflow "sensor not connected" gate -----------------------------------
+# Every other sensor-off / baseline rule compares airflow with the airflow of the same night, so a
+# channel that is noise from the first second looks "normal".  This is the ABSOLUTE check: if the
+# typical breath-to-breath swing of the RAW airflow (12-bit ADC counts) is below this, there is no
+# breathing signal at all and no airflow event may be scored.
+# NOTE: 10 counts is a starting value.  Noise on an unplugged channel measured 2.2-3.5 counts;
+# calibrate against a normal recording (real breathing swings tens to hundreds of counts).
+AIRFLOW_MIN_VALID_AMPLITUDE_COUNTS = 10.0
+
+# Same idea for the effort belt.  Measured: unplugged thorax swings ~1 count (ADC noise around
+# mid-scale 2048); a working belt swings 10-40 counts.  4 counts sits safely between the two.
+THORAX_MIN_VALID_SWING_COUNTS = 4.0
+
+
+def _robust_swing_counts(values, fs, block_sec: float = 5.0, night_percentile: float = 90.0):
+    """Per 5 s block: (95th - 5th percentile).  Returns the `night_percentile` of those blocks over the night
+    (90 = "the best-connected stretch").  Immune to single spikes; None if too short."""
+    x = np.asarray(values, dtype=float).reshape(-1)
+    n = max(1, int(round(float(fs) * block_sec)))
+    k = x.size // n
+    if k < 1:
+        return None
+    blocks = x[: k * n].reshape(k, n)
+    blocks = blocks[np.isfinite(blocks).all(axis=1)]
+    if blocks.shape[0] == 0:
+        return None
+    return float(np.percentile(np.percentile(blocks, 95, axis=1) - np.percentile(blocks, 5, axis=1), night_percentile))
+
 SENSOR_OFF_MIN_SEC = 60.0
 SENSOR_OFF_AIRFLOW_RATIO = 0.12
 SENSOR_OFF_ERRATIC_RATIO = 1.75
@@ -518,11 +561,18 @@ def _pulse_response(pulse, time_sec, start_index, end_index):
     if pulse is None or len(pulse) != len(time_sec):
         return result
     start_sec, end_sec = float(time_sec[start_index]), float(time_sec[end_index])
-    pre_mask = (time_sec >= start_sec - PULSE_RISE_PRE_SEC) & (time_sec < start_sec)
-    post_mask = (time_sec > end_sec) & (time_sec <= end_sec + PULSE_RISE_POST_SEC)
-    valid = np.isfinite(pulse) & (pulse >= PULSE_VALID_MIN_BPM) & (pulse <= PULSE_VALID_MAX_BPM)
-    pre, post = pulse[pre_mask & valid], pulse[post_mask & valid]
-    if pre.size < 0.5 * max(1, int(pre_mask.sum())) or post.size < 0.5 * max(1, int(post_mask.sum())):
+    # time_sec is sorted. Slice the two small local windows instead of
+    # allocating full-night boolean masks for every candidate event.
+    pre_left = int(np.searchsorted(time_sec, start_sec - PULSE_RISE_PRE_SEC, side="left"))
+    pre_right = int(np.searchsorted(time_sec, start_sec, side="left"))
+    post_left = int(np.searchsorted(time_sec, end_sec, side="right"))
+    post_right = int(np.searchsorted(time_sec, end_sec + PULSE_RISE_POST_SEC, side="right"))
+    pre_all = pulse[pre_left:pre_right]
+    post_all = pulse[post_left:post_right]
+    pre_valid = np.isfinite(pre_all) & (pre_all >= PULSE_VALID_MIN_BPM) & (pre_all <= PULSE_VALID_MAX_BPM)
+    post_valid = np.isfinite(post_all) & (post_all >= PULSE_VALID_MIN_BPM) & (post_all <= PULSE_VALID_MAX_BPM)
+    pre, post = pre_all[pre_valid], post_all[post_valid]
+    if pre.size < 0.5 * max(1, pre_all.size) or post.size < 0.5 * max(1, post_all.size):
         return result
     pre_median, post_max = float(np.median(pre)), float(np.max(post))
     return {"usable": True, "pre_median": pre_median, "post_max": post_max, "rise_bpm": post_max - pre_median}
@@ -544,8 +594,12 @@ def _snore_channel_informative(snore_spread, analysis_mask):
 
 def _snore_context(snore_spread, time_sec, start_index, end_index):
     start_sec, end_sec = float(time_sec[start_index]), float(time_sec[end_index])
-    pre = snore_spread[(time_sec >= start_sec - SNORE_PRE_SEC) & (time_sec < start_sec)]
-    post = snore_spread[(time_sec > end_sec) & (time_sec <= end_sec + SNORE_POST_SEC)]
+    pre_left = int(np.searchsorted(time_sec, start_sec - SNORE_PRE_SEC, side="left"))
+    pre_right = int(np.searchsorted(time_sec, start_sec, side="left"))
+    post_left = int(np.searchsorted(time_sec, end_sec, side="right"))
+    post_right = int(np.searchsorted(time_sec, end_sec + SNORE_POST_SEC, side="right"))
+    pre = snore_spread[pre_left:pre_right]
+    post = snore_spread[post_left:post_right]
     during = snore_spread[start_index:end_index + 1]
 
     def mean(values):
@@ -583,17 +637,26 @@ def _effort_trend(thorax_event, abdomen_event, thorax_baseline_amp, abdomen_base
     return {"shape": shape, "ratio": float(ratio), "first_ratio": float(first), "last_ratio": float(last)}
 
 
-def _movement_overlap(body_movement, body_position, time_sec, start_index, end_index):
+def _movement_overlap(
+    body_movement, body_position, time_sec, start_index, end_index,
+    movement_channel_active=None,
+):
     start_sec = float(time_sec[start_index]) - MOVEMENT_PAD_SEC
     end_sec = float(time_sec[end_index]) + MOVEMENT_PAD_SEC
-    window = (time_sec >= start_sec) & (time_sec <= end_sec)
-    if not np.any(window):
+    left = int(np.searchsorted(time_sec, start_sec, side="left"))
+    right = int(np.searchsorted(time_sec, end_sec, side="right"))
+    if right <= left:
         return {"source": "none", "overlap_ratio": 0.0, "position_changes": 0, "flag": False}
-    if body_movement is not None and np.any(np.nan_to_num(body_movement, nan=0.0) != 0):
-        ratio = float(np.mean(np.nan_to_num(body_movement[window], nan=0.0) != 0))
+    if movement_channel_active is None:
+        movement_channel_active = bool(
+            body_movement is not None
+            and np.any(np.nan_to_num(body_movement, nan=0.0) != 0)
+        )
+    if movement_channel_active:
+        ratio = float(np.mean(np.nan_to_num(body_movement[left:right], nan=0.0) != 0))
         return {"source": "movement_channel", "overlap_ratio": ratio, "position_changes": 0, "flag": ratio >= MOVEMENT_MIN_OVERLAP_RATIO}
     if body_position is not None and len(body_position) == len(time_sec):
-        changes = int(np.sum(np.diff(body_position[window]) != 0))
+        changes = int(np.sum(np.diff(body_position[left:right]) != 0))
         return {"source": "position_flicker", "overlap_ratio": 0.0, "position_changes": changes, "flag": changes >= POSITION_FLICKER_MIN_CHANGES}
     return {"source": "none", "overlap_ratio": 0.0, "position_changes": 0, "flag": False}
 
@@ -674,22 +737,33 @@ def _rolling_aasm_baseline(
     amp_source[:exclude_points] = np.nan
     global_fallback = float(np.nanmedian(amp_source)) if np.any(np.isfinite(amp_source)) else float(np.nanmedian(amp))
 
+    series = pd.Series(amp_source)
+    rolling = series.rolling(win, min_periods=1)
+    roll_mean = rolling.mean().to_numpy(dtype=float)
+    roll_std = rolling.std(ddof=0).to_numpy(dtype=float)
+    roll_count = rolling.count().to_numpy(dtype=float)
+    roll_p90 = rolling.quantile(0.9, interpolation="linear").to_numpy(dtype=float)
+
     grid = np.arange(0, n, step)
-    baseline_grid = np.empty(len(grid), dtype=float)
-    for gi, i in enumerate(grid):
-        lo = max(0, i - win)
-        window = amp_source[lo:i] if i > lo else amp_source[: max(1, step)]
-        valid = int(np.sum(np.isfinite(window)))
-        if valid == 0:
-            baseline_grid[gi] = global_fallback
-            continue
-        mean_val = float(np.nanmean(window))
-        std_val = float(np.nanstd(window))
-        cv = std_val / (mean_val + 1e-9)
-        if cv <= cv_threshold or valid < int(fs * 30):
-            baseline_grid[gi] = mean_val
+    end_index = np.clip(grid - 1, 0, n - 1)
+    mean_val = roll_mean[end_index]
+    std_val = roll_std[end_index]
+    valid = roll_count[end_index]
+    p90 = roll_p90[end_index]
+    if grid.size:
+        head = amp_source[: max(1, step)]
+        if np.any(np.isfinite(head)):
+            mean_val[0] = float(np.nanmean(head))
+            std_val[0] = float(np.nanstd(head))
+            valid[0] = float(np.sum(np.isfinite(head)))
+            p90[0] = float(np.nanpercentile(head, 90))
         else:
-            baseline_grid[gi] = float(np.nanpercentile(window, 90))
+            valid[0] = 0.0
+    cv = std_val / (mean_val + 1e-9)
+    use_mean = (cv <= cv_threshold) | (valid < int(fs * 30))
+    baseline_grid = np.where(use_mean, mean_val, p90)
+    baseline_grid = np.where(valid > 0, baseline_grid, global_fallback)
+    baseline_grid = np.where(np.isfinite(baseline_grid), baseline_grid, global_fallback)
     return np.interp(np.arange(n, dtype=float), grid.astype(float), baseline_grid)
 
 
@@ -726,7 +800,10 @@ def _effort_breath_rate(segment: np.ndarray | None, baseline_amp: float, fs: flo
     peaks, _ = find_peaks(
         values,
         distance=max(2, int(fs * 1.2)),
-        prominence=EFFORT_BREATH_PROMINENCE_RATIO * baseline_amp,
+        prominence=max(
+            EFFORT_BREATH_PROMINENCE_RATIO * baseline_amp,
+            EFFORT_NOISE_MARGIN * float(_EFFORT_NOISE_COUNTS),
+        ),
     )
     if len(peaks) < EFFORT_MIN_BREATH_PEAKS:
         return 0.0
@@ -841,6 +918,109 @@ def _breath_band_power_fraction(segment: np.ndarray, fs: float) -> float:
     return float(np.sum(power[band]) / total)
 
 
+def _band_fractions_for_windows(series: np.ndarray, starts: np.ndarray, win: int, fs: float):
+    """Breathing-band power fraction of many equal-length windows at once.
+
+    Same recipe as ``_breath_band_power_fraction`` (demean, remove a 6 s centred moving average, Welch,
+    band / total) for all windows together instead of one by one.  The moving average uses running sums, so
+    the numbers agree with the per-window function to ~1e-13 rather than bit for bit; the caller therefore
+    re-computes with the original function every window whose answer is close to a decision threshold.
+    Returns (fraction, usable); windows with non-finite samples or a flat / empty spectrum are not usable.
+    """
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    views = sliding_window_view(np.asarray(series, dtype=float), win)
+    count = len(starts)
+    fraction = np.zeros(count, dtype=float)
+    usable = np.zeros(count, dtype=bool)
+    drift_window = max(3, int(round(fs * 6.0)))
+    offset = (drift_window - 1) // 2
+    index = np.arange(win)
+    stop = np.minimum(win, index + 1 + offset)                  # pandas centred window, min_periods=1
+    begin = np.maximum(0, index + 1 + offset - drift_window)
+    span = (stop - begin).astype(float)
+    nperseg = min(win, max(8, int(round(fs * 40.0))))
+    low, high = PERIODICITY_BREATH_BAND_HZ
+    for chunk in range(0, count, 256):
+        rows = views[starts[chunk:chunk + 256]]
+        finite = np.isfinite(rows).all(axis=1)
+        if not finite.any():
+            continue
+        x = rows[finite]
+        x = x - x.mean(axis=1, keepdims=True)
+        running = np.concatenate([np.zeros((x.shape[0], 1)), np.cumsum(x, axis=1)], axis=1)
+        x = x - (running[:, stop] - running[:, begin]) / span
+        spread = x.std(axis=1)
+        freqs, power = welch(x, fs=fs, nperseg=nperseg, axis=-1)
+        total = power[:, freqs > 0.02].sum(axis=1)
+        band = (freqs >= low) & (freqs <= high)
+        band_power = power[:, band].sum(axis=1)
+        good = (spread > 1e-9) & (total > 0.0)
+        value = np.zeros(x.shape[0], dtype=float)
+        value[good] = band_power[good] / total[good]
+        block = slice(chunk, chunk + len(rows))
+        fraction[block][finite] = value
+        usable[block][finite] = good
+    return fraction, usable
+
+
+def _window_fractions(series, starts, win, fs, threshold, margin=1e-6):
+    """Per-window fractions: batched, with the original function for unusable and near-threshold windows."""
+    fraction, usable = _band_fractions_for_windows(series, starts, win, fs)
+    redo = ~usable | (np.abs(fraction - threshold) < margin)
+    for position in np.flatnonzero(redo):
+        start = int(starts[position])
+        fraction[position] = _breath_band_power_fraction(series[start:start + win], fs)
+    return fraction, usable
+
+
+def _periodicity_flagged(airflow, thorax, fs, win, step, airflow_max_frac, thorax_min_frac) -> np.ndarray:
+    """Samples inside windows where airflow lost its rhythm while the thorax kept breathing.
+
+    Gives exactly the flags of the original window-by-window loop (kept as the fallback below): the batched
+    numbers only decide windows that are clearly away from the thresholds, everything else is decided by the
+    original function, and a spot check against the original function switches the batch path off if the two
+    ever disagree.
+    """
+    n = len(airflow)
+    starts = np.arange(0, n - win + 1, step)
+
+    def original() -> np.ndarray:
+        flagged = np.zeros(n, dtype=bool)
+        for start in starts:
+            start = int(start)
+            stop = start + win
+            if _breath_band_power_fraction(airflow[start:stop], fs) >= airflow_max_frac:
+                continue
+            if _breath_band_power_fraction(thorax[start:stop], fs) >= thorax_min_frac:
+                flagged[start:stop] = True
+        return flagged
+
+    if len(starts) < 4:
+        return original()
+    try:
+        airflow_fraction, usable = _window_fractions(airflow, starts, win, fs, airflow_max_frac)
+        # spot check: batched numbers must agree with the original function on a sample of windows
+        check = np.flatnonzero(usable)[:: max(1, int(usable.sum()) // 12)][:12]
+        raw, _ = _band_fractions_for_windows(airflow, starts[check], win, fs)
+        for position, value in zip(check, raw):
+            start = int(starts[position])
+            if abs(_breath_band_power_fraction(airflow[start:start + win], fs) - value) > 1e-9:
+                return original()
+        rhythm_lost = airflow_fraction < airflow_max_frac
+        flagged = np.zeros(n, dtype=bool)
+        candidates = np.flatnonzero(rhythm_lost)
+        if candidates.size:
+            thorax_fraction, _ = _window_fractions(thorax, starts[candidates], win, fs, thorax_min_frac)
+            for position, value in zip(candidates, thorax_fraction):
+                if value >= thorax_min_frac:
+                    start = int(starts[position])
+                    flagged[start:start + win] = True
+        return flagged
+    except Exception:
+        return original()
+
+
 def detect_periodicity_loss_segments(
     airflow: np.ndarray,
     thorax: np.ndarray | None,
@@ -862,15 +1042,7 @@ def detect_periodicity_loss_segments(
     step = max(1, int(round(fs * step_sec)))
     if n < win:
         return []
-    flagged = np.zeros(n, dtype=bool)
-    for start in range(0, n - win + 1, step):
-        stop = start + win
-        airflow_frac = _breath_band_power_fraction(airflow[start:stop], fs)
-        if airflow_frac >= airflow_max_frac:
-            continue
-        thorax_frac = _breath_band_power_fraction(thorax[start:stop], fs)
-        if thorax_frac >= thorax_min_frac:
-            flagged[start:stop] = True
+    flagged = _periodicity_flagged(airflow, thorax, fs, win, step, airflow_max_frac, thorax_min_frac)
     results: list[dict[str, Any]] = []
     for start_idx, end_idx, duration_sec in _segment_mask(flagged, time_sec, min_duration_sec):
         results.append({
@@ -1033,6 +1205,37 @@ def _expand_segment_to_drop_extent(
     return new_start, new_end
 
 
+def _drop_nan_1d(values) -> np.ndarray:
+    """Same values as ``pd.to_numeric(pd.Series(values), errors="coerce").dropna()`` for float input."""
+    array = np.asarray(values, dtype=float)
+    if array.ndim != 1:                              # keep the old behaviour for unusual shapes
+        return pd.to_numeric(pd.Series(array), errors="coerce").dropna().to_numpy(dtype=float)
+    return array[~np.isnan(array)]
+
+
+def _rolling_spread(values: np.ndarray, window: int) -> np.ndarray:
+    """max - min inside a centred window; same numbers as the two pandas rolling(window, center=True,
+    min_periods=2) calls it replaces, for a series without NaN (the callers drop them first).
+
+    A maximum / minimum involves no arithmetic, so a plain sliding max / min filter gives identical values.
+    Near the ends the window is cut short (pandas) -- the filter repeats the edge sample (mode="nearest"),
+    which is already inside that shortened window, so the max / min do not change.  scipy's default window
+    placement for any size equals pandas' centred placement.
+    """
+    from scipy.ndimage import maximum_filter1d, minimum_filter1d
+
+    x = np.asarray(values, dtype=float)
+    if x.size == 0:
+        return x.copy()
+    if not np.isfinite(x).all():                     # +-inf: let pandas decide, exactly as before
+        series = pd.Series(x)
+        return (
+            series.rolling(window, center=True, min_periods=2).max()
+            - series.rolling(window, center=True, min_periods=2).min()
+        ).to_numpy()
+    return maximum_filter1d(x, size=int(window), mode="nearest") - minimum_filter1d(x, size=int(window), mode="nearest")
+
+
 def _robust_signal_amplitude(values: pd.Series | np.ndarray) -> float:
     series = pd.Series(values)
     series = pd.to_numeric(series, errors="coerce").dropna()
@@ -1052,17 +1255,13 @@ def _effort_amplitude(values: np.ndarray | None, fs: float = DEFAULT_SAMPLE_RATE
     """
     if values is None:
         return 0.0
-    series = pd.to_numeric(pd.Series(np.asarray(values, dtype=float)), errors="coerce").dropna()
+    series = _drop_nan_1d(values)
     if len(series) == 0:
         return 0.0
     window_points = max(3, int(round(fs * EFFORT_BREATH_WINDOW_SEC)))
     if len(series) < window_points:
         return _robust_signal_amplitude(series)
-    spread = (
-        series.rolling(window_points, center=True, min_periods=2).max()
-        - series.rolling(window_points, center=True, min_periods=2).min()
-    )
-    return float(np.nanmedian(spread.to_numpy()))
+    return float(np.nanmedian(_rolling_spread(series, window_points)))
 
 
 def _effort_ratios(
@@ -1093,17 +1292,13 @@ def _effort_baseline_amplitude(values: np.ndarray, fs: float) -> float:
     baseline is dragged down by the very events being measured. The 90th
     percentile represents the patient's normal breathing.
     """
-    series = pd.to_numeric(pd.Series(np.asarray(values, dtype=float)), errors="coerce").dropna()
+    series = _drop_nan_1d(values)
     if len(series) == 0:
         return 0.0
     window_points = max(3, int(round(fs * EFFORT_BREATH_WINDOW_SEC)))
     if len(series) < window_points:
         return _robust_signal_amplitude(series)
-    spread = (
-        series.rolling(window_points, center=True, min_periods=2).max()
-        - series.rolling(window_points, center=True, min_periods=2).min()
-    )
-    return float(np.nanpercentile(spread.to_numpy(), 90))
+    return float(np.nanpercentile(_rolling_spread(series, window_points), 90))
 
 
 def _compute_effort_baseline(
@@ -1134,6 +1329,20 @@ def _compute_effort_baseline(
     return thorax_baseline_amp, abdomen_baseline_amp
 
 
+def _effort_belt_noise_floor(values, fs, mask=None):
+    """Noise floor of an effort belt in raw counts over 3 s ranges."""
+    if values is None:
+        return 0.0
+    series = pd.to_numeric(pd.Series(np.asarray(values, dtype=float)), errors="coerce")
+    w = max(3, int(round(fs * EFFORT_BREATH_WINDOW_SEC)))
+    spread = (series.rolling(w, center=True, min_periods=2).max()
+              - series.rolling(w, center=True, min_periods=2).min()).to_numpy()
+    if mask is not None and len(mask) == len(spread):
+        spread = spread[np.asarray(mask, dtype=bool)]
+    spread = spread[np.isfinite(spread)]
+    return float(np.nanpercentile(spread, EFFORT_NOISE_FLOOR_PERCENTILE)) if spread.size else 0.0
+
+
 def _effort_state(
     thorax_segment: np.ndarray | None,
     abdomen_segment: np.ndarray | None,
@@ -1159,6 +1368,10 @@ def _effort_state(
         absent_below = OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD
     if present_at_or_above is None:
         present_at_or_above = CENTRAL_APNEA_EFFORT_THRESHOLD
+
+    _ref_baseline = thorax_baseline_amp if thorax_baseline_amp > 0 else abdomen_baseline_amp
+    if _ref_baseline > 0 and _EFFORT_NOISE_COUNTS > 0:
+        absent_below = max(absent_below, EFFORT_NOISE_MARGIN * _EFFORT_NOISE_COUNTS / _ref_baseline)
 
     best_ratio = _effort_ratios(
         thorax_segment, abdomen_segment, thorax_baseline_amp, abdomen_baseline_amp, fs
@@ -1224,20 +1437,21 @@ def classify_apnea_effort_type(
             _effort_breath_rate(thorax_event, thorax_baseline_amp, fs),
             _effort_breath_rate(abdomen_event, abdomen_baseline_amp, fs),
         )
-        # CSA needs effort truly gone across the WHOLE event: either the
-        # amplitude floor, or no detectable breath on any belt.
+        # CSA is accepted only when BOTH whole-event checks confirm absent
+        # effort: amplitude is below 8% of baseline and the detected breathing
+        # rate is below the minimum effort rate. A weak/noisy or contradictory
+        # belt must never create a CSA label.
         if (
             whole_event_ratio < CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO
-            or whole_event_breaths < EFFORT_MIN_BREATH_RATE_PER_MIN
+            and whole_event_breaths < EFFORT_MIN_BREATH_RATE_PER_MIN
         ):
             return "CSA"
+        return "UNDETERMINED"
+    if {first_half_state, second_half_state} == {"absent", "present"}:
         return "MSA"
-    # AASM mixed apnea has a specific shape: NO effort at the start, effort
-    # resuming later. Anything else with effort present is obstructive --
-    # "MSA" must never be the dumping ground for uncertain cases.
-    if first_half_state == "absent":
-        return "MSA"
-    return "OSA"
+    if first_half_state == "present" and second_half_state == "present":
+        return "OSA"
+    return "UNDETERMINED"
 
 
 def _build_event_evidence(event: dict[str, Any]) -> list[str]:
@@ -1248,7 +1462,7 @@ def _build_event_evidence(event: dict[str, Any]) -> list[str]:
     event_amp = float(event.get("event_airflow_amplitude", 0.0) or 0.0)
     drop = float(event.get("airflow_drop_percent", 0.0) or 0.0)
     if drop >= AASM_APNEA_DROP_PERCENT:
-        tier = "apnea tier (>=75%)"
+        tier = f"apnea tier (>={AASM_APNEA_DROP_PERCENT:.0f}%)"
     elif drop >= AASM_HYPOPNEA_DROP_PERCENT:
         tier = "hypopnea tier (30-75%)"
     else:
@@ -1455,15 +1669,15 @@ def _build_hourly_baseline_array(
     return baseline_array
 
 
-def _write_text_report(result: dict[str, Any], csv_path: str | Path, output_dir: str | Path) -> Path:
+def _write_text_report(result: dict[str, Any], recording_path: str | Path, output_dir: str | Path) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = output_dir / f"{Path(csv_path).stem}_rule_ai_events_{timestamp}.txt"
+    report_path = output_dir / f"{Path(recording_path).stem}_rule_ai_events_{timestamp}.txt"
     generated_dt = datetime.now()
 
     lines: list[str] = [
-        f"report_type=rule_based_apnea_detection | source_csv={csv_path} | generated_date={generated_dt.strftime('%Y-%m-%d')} | generated_time={generated_dt.strftime('%H:%M:%S')}",
+        f"report_type=rule_based_apnea_detection | source_recording={recording_path} | generated_date={generated_dt.strftime('%Y-%m-%d')} | generated_time={generated_dt.strftime('%H:%M:%S')}",
         "formula=legacy_candidate_scan_drop_percent=((window_baseline-analysis_peak_envelope)/window_baseline)*100",
         f"label_rules=AASM | Hypopnea:>={AASM_HYPOPNEA_DROP_PERCENT:.0f}%+spo2_desat>={AASM_HYPOPNEA_SPO2_DESAT_MIN:.0f}% | Apnea:>={AASM_APNEA_DROP_PERCENT:.0f}%(OSA/CSA/MSA by effort) | min_event_sec={MIN_EVENT_SEC:.1f}",
         "baseline_note=detection_uses_hourly_or_remainder_window_peak_baselines_not_one_combined_average",
@@ -1537,6 +1751,78 @@ def classify_rule_event(
         return "NO_EVENT"
 
     return "NO_EVENT"
+
+
+def _meets_active_event_rules(event: dict[str, Any], effort_classifiable: bool) -> bool:
+    """Final gate using the detector's currently active analysis parameters."""
+    label = str(event.get("rule_label", "")).upper()
+    duration_sec = float(event.get("duration_sec", 0.0) or 0.0)
+    drop_percent = float(event.get("airflow_drop_percent", 0.0) or 0.0)
+
+    if label == "SENSOR_OFF":
+        return True
+    if not MIN_EVENT_SEC <= duration_sec <= MAX_EVENT_SEC:
+        return False
+    if label == "HYPOPNEA":
+        return bool(
+            drop_percent >= AASM_HYPOPNEA_DROP_PERCENT
+            and event.get("spo2_confirmed")
+            and float(event.get("spo2_drop", 0.0) or 0.0)
+            >= AASM_HYPOPNEA_SPO2_DESAT_MIN
+        )
+    if label not in {"OSA", "CSA", "MSA"}:
+        return False
+    if drop_percent < AASM_APNEA_DROP_PERCENT:
+        return False
+    if label != "CSA":
+        return True
+
+    effort = event.get("effort_summary") or {}
+    whole_ratio = effort.get("whole_ratio")
+    breaths_per_min = effort.get("breaths_per_min")
+    return bool(
+        effort_classifiable
+        and whole_ratio is not None
+        and breaths_per_min is not None
+        and float(whole_ratio) < CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO
+        and float(breaths_per_min) < EFFORT_MIN_BREATH_RATE_PER_MIN
+    )
+
+
+def _spo2_dropout_supports_hypopnea(time_sec, spo2, start_index, end_index):
+    """Return whether a nearby SpO2 dropout plausibly masks a desaturation."""
+    t = np.asarray(time_sec, dtype=float)
+    s = np.asarray(spo2, dtype=float)
+    start_sec = float(t[start_index])
+    end_sec = float(t[end_index])
+    link_end = end_sec + DESAT_LINK_WINDOW_SEC
+
+    window_mask = (t >= start_sec) & (t <= link_end)
+    if not np.any(window_mask):
+        return False
+    window_t = t[window_mask]
+    missing = ~np.isfinite(s[window_mask])
+    if not missing.any():
+        return False
+    dropout_start_sec = float(window_t[np.argmax(missing)])
+
+    if (dropout_start_sec - end_sec) > SPO2_DROPOUT_MAX_GAP_SEC:
+        return False
+
+    baseline_mask = (
+        (t >= start_sec - DESAT_BASELINE_LOOKBACK_SEC) & (t < start_sec) & np.isfinite(s)
+    )
+    recent_mask = (
+        (t >= dropout_start_sec - DESAT_RECENT_BASELINE_SEC)
+        & (t < dropout_start_sec)
+        & np.isfinite(s)
+    )
+    if not np.any(baseline_mask) or not np.any(recent_mask):
+        return False
+
+    pre_event_baseline = float(np.median(s[baseline_mask]))
+    last_before_dropout = float(s[recent_mask][-1])
+    return (pre_event_baseline - last_before_dropout) >= SPO2_DROPOUT_MIN_DECLINE_PT
 
 
 def _raw_spo2_dip(time_sec, spo2, start_sec, end_sec):
@@ -1616,27 +1902,45 @@ def detect_desaturations(
         )
 
     def _desat_pass(baseline_series: np.ndarray, recent_series: np.ndarray) -> np.ndarray:
+        """Samples that belong to a desaturation.
+
+        Same rules as the original sample-by-sample loop (kept below as comments), evaluated without a
+        Python loop.  Only samples with a finite value and a finite positive baseline take part; samples
+        that are not "deep enough" end a desaturation, a deep sample inside a desaturation always
+        continues it, and a deep sample that is not yet inside one starts it only if the last few seconds
+        (``recent_series``) show the fall as well (onset rule).  A run of deep samples is therefore active
+        from its first allowed onset sample to its end.
+        """
         active = np.zeros(sample_count, dtype=bool)
-        in_desaturation = False
-        for index, value in enumerate(spo2_arr):
-            if not np.isfinite(value):
-                continue
-            baseline_spo2 = baseline_series[index]
-            if not np.isfinite(baseline_spo2) or baseline_spo2 <= 0.0:
-                continue
-            if baseline_spo2 - float(value) < float(drop_percent):
-                in_desaturation = False
-                continue
-            if not in_desaturation:
-                # ONSET only: a drift has already carried the recent level down, so
-                # the fall does not show against the last few seconds. A real
-                # desaturation still does -- SpO2 is high right up to the fall.
-                recent_baseline = recent_series[index]
-                if np.isfinite(recent_baseline) and recent_baseline - float(value) < float(drop_percent):
-                    continue
-                in_desaturation = True
-            active[index] = True
+        relevant = np.isfinite(spo2_arr) & np.isfinite(baseline_series) & (baseline_series > 0.0)
+        positions = np.flatnonzero(relevant)
+        if positions.size == 0:
+            return active
+        value = spo2_arr[positions]
+        baseline = baseline_series[positions]
+        recent = recent_series[positions]
+        threshold = float(drop_percent)
+        shallow = (baseline - value) < threshold                 # ends a desaturation
+        deep = ~shallow
+        onset_blocked = np.isfinite(recent) & ((recent - value) < threshold)
+        onset_ok = deep & ~onset_blocked
+        segment = np.cumsum(shallow)                             # a shallow sample starts a new segment
+        first_ok = np.full(int(segment[-1]) + 1, positions.size, dtype=np.int64)
+        ok_index = np.flatnonzero(onset_ok)
+        if ok_index.size:
+            ok_segment, first_at = np.unique(segment[ok_index], return_index=True)
+            first_ok[ok_segment] = ok_index[first_at]
+        active[positions] = deep & (np.arange(positions.size) >= first_ok[segment])
         return active
+
+    # Original loop, for reference:
+    #   for index, value in enumerate(spo2_arr):
+    #       skip non-finite values / non-finite or non-positive baselines (state unchanged)
+    #       if baseline - value < drop: in_desaturation = False; continue
+    #       if not in_desaturation:
+    #           if finite(recent) and recent - value < drop: continue
+    #           in_desaturation = True
+    #       active[index] = True
 
     plain_baseline = _trailing_median(spo2_arr, lookback_samples, 1)
     plain_recent = _trailing_median(spo2_arr, recent_samples, 1)
@@ -1714,14 +2018,17 @@ def detect_apnea_events_from_dataframe(
     )
     airflow_enhancement_applied = False
     if enhance_airflow_for_graph_and_detection is not None and "airflow" in signal_df.columns:
+        frame_fs = estimate_sample_rate_hz(signal_df)
+        kernel_scale = max(1.0, float(frame_fs) / float(DEFAULT_SAMPLE_RATE_HZ))
         enhanced_airflow = enhance_airflow_for_graph_and_detection(
             signal_df["airflow"].to_numpy(dtype=float),
             amplitude=1.15,
             max_limit=None,
             spike_threshold=20.0,
-            kernel_size=5,
+            kernel_size=int(round(5 * kernel_scale)) | 1,
             low_protect_margin=2.0,
             keep_integer=True,
+            savgol_window=int(round(11 * kernel_scale)) | 1,
         )
         signal_df["airflow"] = enhanced_airflow
         airflow_enhancement_applied = True
@@ -1739,16 +2046,41 @@ def detect_apnea_events_from_dataframe(
     # report_metrics_calculator already rejects below 70. Two different floors
     # meant the dashboard scored 16 desaturations where the report scored 14.
     spo2 = np.where(~np.isfinite(spo2) | (spo2 < 70.0) | (spo2 > 100.0), np.nan, spo2)
-    snoring = signal_df["snoring"].to_numpy(dtype=float)
+    # Airflow-derived snoring is bipolar; detection uses its intensity.
+    snoring = np.abs(signal_df["snoring"].to_numpy(dtype=float))
     body_movement = signal_df["body_movement"].to_numpy(dtype=float)
     thorax = signal_df["thorax"].to_numpy(dtype=float) if "thorax" in signal_df.columns else None
     abdomen = signal_df["abdomen"].to_numpy(dtype=float) if "abdomen" in signal_df.columns else None
 
     estimated_fs = estimate_sample_rate_hz(signal_df)
     sample_dt = 1.0 / estimated_fs if estimated_fs else 0.1
+
+    airflow_not_connected = False
+    raw_airflow_median_amplitude = None
+    if unenhanced_airflow is not None and len(unenhanced_airflow) > 0:
+        _raw_amp = _continuous_breath_amplitude(unenhanced_airflow, estimated_fs)
+        _raw_amp = _raw_amp[np.isfinite(_raw_amp)]
+        if _raw_amp.size:
+            # 90th percentile, NOT the median: a cannula that falls out for half the night must not
+            # wipe out the events of the part that was connected.
+            raw_airflow_median_amplitude = float(np.percentile(_raw_amp, 90))
+            airflow_not_connected = raw_airflow_median_amplitude < AIRFLOW_MIN_VALID_AMPLITUDE_COUNTS
+
+    thorax_not_connected = False
+    thorax_raw_swing = None
+    if thorax is not None and len(thorax) > 0:
+        thorax_raw_swing = _robust_swing_counts(thorax, estimated_fs)
+        if thorax_raw_swing is not None and thorax_raw_swing < THORAX_MIN_VALID_SWING_COUNTS:
+            thorax_not_connected = True
+            # No belt: treat as "no effort channel" so OSA/CSA/MSA is never decided from ADC noise.
+            thorax = None
+
     peak_window_points = max(1, int(round(estimated_fs * CANDIDATE_WINDOW_SEC)))
 
-    skip_sec = SKIP_MINUTES * 60.0
+    # A centrally edge-trimmed upload already starts at stable data. Do not
+    # apply the detector's legacy warm-up skip a second time.
+    edge_trim_start_sec = float(signal_df.attrs.get("edge_trim_start_sec", 0.0))
+    skip_sec = 0.0 if edge_trim_start_sec > 0.0 else SKIP_MINUTES * 60.0
     baseline_mask = raw_time_sec >= skip_sec
     baseline_airflow_window = raw_airflow[baseline_mask]
     if len(baseline_airflow_window) == 0:
@@ -1792,6 +2124,22 @@ def detect_apnea_events_from_dataframe(
     if baseline_airflow_amplitude <= 0:
         baseline_airflow_amplitude = airflow_reduction_range
     effort_baseline = _compute_effort_baseline(thorax, abdomen, baseline_mask, estimated_fs)
+    _noise_counts = max(
+        _effort_belt_noise_floor(thorax, estimated_fs, baseline_mask) if thorax is not None else 0.0,
+        _effort_belt_noise_floor(abdomen, estimated_fs, baseline_mask) if abdomen is not None else 0.0,
+    )
+    globals()["_EFFORT_NOISE_COUNTS"] = float(_noise_counts)
+    effort_classifiable = False
+    if effort_baseline is not None:
+        _belt_amp = effort_baseline[0] if effort_baseline[0] > 0 else effort_baseline[1]
+        _snr = (_belt_amp / _noise_counts) if _noise_counts > 0 else float("inf")
+        effort_classifiable = _snr >= EFFORT_MIN_BELT_SNR
+        print(
+            f"Effort belt: normal breath {_belt_amp:.1f} counts, noise floor {_noise_counts:.1f} counts "
+            f"-> SNR {_snr:.1f} "
+            + ("(OK: apnea type is classified from effort)" if effort_classifiable
+               else f"(< {EFFORT_MIN_BELT_SNR:.0f}: too weak, apneas are NOT typed as OSA/MSA/CSA)")
+        )
     thorax_typical_breath = 0.0
     if thorax is not None and len(thorax) == len(time_sec):
         thorax_typical_breath = float(
@@ -1920,24 +2268,31 @@ def detect_apnea_events_from_dataframe(
         f"{'informative' if snore_informative else 'continuous noise, not weighted'}"
     )
     review_candidates: list[dict[str, Any]] = []
+    movement_channel_active = bool(
+        body_movement is not None
+        and np.any(np.nan_to_num(body_movement, nan=0.0) != 0)
+    )
 
     def _secondary_evidence(start_index, end_index, core_start_index, core_end_index):
         pulse_info = _pulse_response(pulse, time_sec, start_index, end_index)
         snore_info = _snore_context(snore_spread_all, time_sec, start_index, end_index)
         movement_info = _movement_overlap(
-            body_movement, body_position, time_sec, start_index, end_index
+            body_movement, body_position, time_sec, start_index, end_index,
+            movement_channel_active=movement_channel_active,
         )
         link_end = float(time_sec[end_index]) + DESAT_LINK_WINDOW_SEC
-        link_mask = (time_sec >= float(time_sec[start_index])) & (time_sec <= link_end)
+        link_left = int(np.searchsorted(time_sec, float(time_sec[start_index]), side="left"))
+        link_right = int(np.searchsorted(time_sec, link_end, side="right"))
+        link_spo2 = spo2[link_left:link_right]
         spo2_missing = (
             not spo2_usable
-            or float(np.mean(np.isfinite(spo2[link_mask]))) < 0.5
-            if np.any(link_mask) else True
+            or float(np.mean(np.isfinite(link_spo2))) < 0.5
+            if link_spo2.size else True
         )
         spo2_dropout_sec = 0.0
-        if spo2_usable and np.any(link_mask):
+        if spo2_usable and link_spo2.size:
             spo2_dropout_sec = float(
-                np.sum(~np.isfinite(spo2[link_mask])) / max(float(estimated_fs), 1e-9)
+                np.sum(~np.isfinite(link_spo2)) / max(float(estimated_fs), 1e-9)
             )
         mid = (core_start_index + core_end_index) // 2
         return {
@@ -2273,7 +2628,7 @@ def detect_apnea_events_from_dataframe(
                     and drop_percent >= AASM_HYPOPNEA_DROP_PERCENT
                     and night_amplitude_ratio <= HYPOPNEA_MAX_NIGHT_REF_RATIO
                     and (secondary["spo2_missing"] or spo2_dropout_hit)
-                    and (secondary["pulse_response"].get("rise_bpm", 0.0) >= PULSE_RISE_AROUSAL_BPM
+                    and (float(secondary["pulse_response"].get("rise_bpm") or 0.0) >= PULSE_RISE_AROUSAL_BPM
                          or drop_percent >= REVIEW_HYPOPNEA_MIN_DROP_PERCENT)
                 ):
                     candidate_record["rule_label"] = "HYPOPNEA"
@@ -2343,23 +2698,6 @@ def detect_apnea_events_from_dataframe(
                 ):
                     detected_rule_label = "HYPOPNEA"
                     demoted = True
-                elif (
-                    night_amplitude_ratio <= HYPOPNEA_MAX_NIGHT_REF_RATIO
-                    and spo2_usable
-                    and secondary["spo2_dropout_sec"] >= SPO2_DROPOUT_MIN_SEC
-                    and core_effort_ratio is not None
-                    and core_effort_ratio <= SPO2_DROPOUT_EFFORT_MAX_RATIO
-                ):
-                    detected_rule_label = "HYPOPNEA"
-                    demoted = True
-                    candidate_record["spo2_dropout_corroborated"] = True
-                    print(
-                        f"Kept {time_sec[start_index]:.0f}s-{time_sec[end_index]:.0f}s "
-                        f"as hypopnea despite SpO2 probe dropout "
-                        f"({secondary['spo2_dropout_sec']:.1f}s no signal): amplitude "
-                        f"{night_amplitude_ratio * 100:.0f}% of typical breathing and "
-                        f"effort belt fell to {core_effort_ratio * 100:.0f}% of baseline"
-                    )
                 else:
                     raw_dip = _raw_spo2_dip(
                         time_sec, spo2,
@@ -2422,9 +2760,10 @@ def detect_apnea_events_from_dataframe(
             rule_label = detected_rule_label
 
             if rule_label == "APNEA_CANDIDATE":
+                typed = "UNDETERMINED"
                 if effort_baseline is not None:
                     thorax_baseline_amp, abdomen_baseline_amp = effort_baseline
-                    rule_label = classify_apnea_effort_type(
+                    typed = classify_apnea_effort_type(
                         thorax_event=(
                             thorax[start_index:end_index + 1] if thorax is not None else None
                         ),
@@ -2435,8 +2774,20 @@ def detect_apnea_events_from_dataframe(
                         abdomen_baseline_amp=abdomen_baseline_amp,
                         fs=estimated_fs,
                     )
-                else:
-                    rule_label = "OSA"
+                if (
+                    typed == "CSA"
+                    and CSA_REQUIRE_EXTRA_CRITERIA
+                    and not (float(duration_sec) >= CSA_MIN_DURATION_SEC or float(spo2_drop) >= CSA_DESAT_MIN_PT)
+                ):
+                    typed = "UNDETERMINED"
+                if effort_baseline is None or not effort_classifiable or typed == "UNDETERMINED":
+                    if UNTYPED_APNEA_LABEL == "OSA" or typed == "UNDETERMINED":
+                        typed = "OSA"
+                    print(
+                        f"Apnea at {float(time_sec[start_index]):.0f}s typed as {typed} by ASSUMPTION "
+                        f"({UNTYPED_APNEA_LABEL}): effort belt could not decide it"
+                    )
+                rule_label = typed
 
             candidate_record["rule_label"] = rule_label
             candidate_record["effort_summary"] = _effort_summary_for(
@@ -2543,15 +2894,14 @@ def detect_apnea_events_from_dataframe(
                 "loses its SpO2 confirmation"
             )
 
-    # AASM: an unconfirmed hypopnea is not scored, except when the SpO2
-    # verdict is unknown because of probe dropout and the effort belt
-    # independently corroborates the reduced breathing.
+    # An HSA requires both >=30% airflow reduction and a confirmed >=3% SpO2
+    # desaturation. Sensor dropout can make the event reviewable, but it can
+    # never replace the mandatory desaturation or create a scored hypopnea.
     kept_events: list[dict[str, Any]] = []
     for event in merged_events:
         if (
             event["rule_label"] == "HYPOPNEA"
             and not event.get("spo2_confirmed")
-            and not event.get("spo2_dropout_corroborated")
         ):
             claimed_by = event.get("desat_claimed_by_sec")
             if claimed_by is not None:
@@ -2589,9 +2939,7 @@ def detect_apnea_events_from_dataframe(
                 event_start, float(segment["start_sec"])
             )
             noise_overlap = max(noise_overlap, overlap / event_duration)
-        if noise_overlap >= SENSOR_OFF_EVENT_OVERLAP_RATIO and event["rule_label"] in {
-            "OSA", "CSA", "MSA", "HYPOPNEA"
-        }:
+        if noise_overlap >= SENSOR_OFF_EVENT_OVERLAP_RATIO and event["rule_label"] in _SCORED_LABELS:
             event["rule_label"] = "SENSOR_OFF"
             event["sensor_off_reason"] = (
                 f"{noise_overlap * 100:.0f}% of event inside a stretch where airflow had "
@@ -2602,7 +2950,7 @@ def detect_apnea_events_from_dataframe(
                 "(airflow was sensor noise, not breathing)"
             )
             continue
-        if event["rule_label"] in {"OSA", "CSA", "MSA", "HYPOPNEA"} and (
+        if event["rule_label"] in _SCORED_LABELS and (
             event_end >= float(time_sec[-1]) - RECORDING_EDGE_SEC
         ):
             event["review_reason"] = (
@@ -2627,9 +2975,7 @@ def detect_apnea_events_from_dataframe(
             ):
                 displaced_after = segment
                 break
-        if displaced_after is not None and event["rule_label"] in {
-            "OSA", "CSA", "MSA", "HYPOPNEA"
-        }:
+        if displaced_after is not None and event["rule_label"] in _SCORED_LABELS:
             seg_len = float(displaced_after["end_sec"]) - float(displaced_after["start_sec"])
             event["review_reason"] = (
                 f"{event_duration:.0f}s drop followed {float(displaced_after['start_sec']) - event_end:.0f}s "
@@ -2645,7 +2991,7 @@ def detect_apnea_events_from_dataframe(
 
         if (
             thorax_typical_breath > 0
-            and event["rule_label"] in {"OSA", "CSA", "MSA", "HYPOPNEA"}
+            and event["rule_label"] in _SCORED_LABELS
             and not event.get("spo2_confirmed")
         ):
             pre_mask = (time_sec >= event_start - POST_MOVEMENT_LOOKBACK_SEC) & (
@@ -2779,7 +3125,7 @@ def detect_apnea_events_from_dataframe(
                 "no confirmed desaturation"
             )
 
-        if reassign and event["rule_label"] in {"OSA", "CSA", "MSA", "HYPOPNEA"}:
+        if reassign and event["rule_label"] in _SCORED_LABELS:
             event["rule_label"] = "SENSOR_OFF"
             event["sensor_off_reason"] = reason
             print(
@@ -2792,6 +3138,15 @@ def detect_apnea_events_from_dataframe(
             event for event in merged_events if event not in long_events_for_review
         ]
         review_candidates.extend(long_events_for_review)
+
+    # Last scoring gate: secondary processing cannot bypass the active rules.
+    # Every threshold referenced here is updated by Analysis Parameters, so
+    # this validation automatically follows the user's selected settings.
+    merged_events = [
+        event
+        for event in merged_events
+        if _meets_active_event_rules(event, effort_classifiable)
+    ]
 
     # Confidence is a review aid only; it does not alter AASM scoring.
     for event in merged_events:
@@ -2893,6 +3248,23 @@ def detect_apnea_events_from_dataframe(
     )
     debug_events = [_build_event_debug_line(event.to_dict(), event.event_id) for event in events]
 
+    if thorax_not_connected:
+        debug_summary = list(debug_summary) + [
+            f"EFFORT BELT NOT CONNECTED: thorax swing {thorax_raw_swing:.1f} counts "
+            f"< {THORAX_MIN_VALID_SWING_COUNTS:.0f}; apnea type is not decided from effort"
+        ]
+        print(debug_summary[-1])
+
+    if airflow_not_connected:
+        events = []
+        review_candidates = []
+        debug_events = []
+        debug_summary = list(debug_summary) + [
+            f"AIRFLOW NOT CONNECTED: best-stretch (90th pct) breath swing {raw_airflow_median_amplitude:.1f} counts "
+            f"< {AIRFLOW_MIN_VALID_AMPLITUDE_COUNTS:.0f}; airflow events not scored (SpO2 desaturations only)"
+        ]
+        print(debug_summary[-1])
+
     return {
         "baseline_source": "rolling_120s_pre_event_amplitude",
         "pipeline_mode": "rule_first_ai_second",
@@ -2972,31 +3344,43 @@ def detect_apnea_events_from_dataframe(
         ),
         "spo2_channel_usable": bool(spo2_usable),
         "desat_threshold_percent": float(DESAT_DROP_PERCENT),
+        "airflow_not_connected": bool(airflow_not_connected),
+        "airflow_median_amplitude_counts": raw_airflow_median_amplitude,
+        "thorax_not_connected": bool(thorax_not_connected),
+        "thorax_swing_counts": thorax_raw_swing,
     }
 
 
-def detect_apnea_events_from_csv(
-    csv_path: str | Path,
+def detect_apnea_events_from_recording(
+    recording_path: str | Path,
     output_dir: str | Path | None = None,
     enable_ai: bool = False,
+    trim_start_seconds: float = 0.0,
+    trim_end_seconds: float = 0.0,
 ) -> dict[str, Any]:
-    signal_df = load_sleep_csv(csv_path)
+    signal_df = load_sleep_recording_frame(
+        recording_path,
+        trim_start_seconds=trim_start_seconds,
+        trim_end_seconds=trim_end_seconds,
+    )
     result = detect_apnea_events_from_dataframe(signal_df, output_dir=output_dir, enable_ai=enable_ai)
-    result["source_csv"] = str(csv_path)
+    result["source_recording"] = str(recording_path)
     if output_dir is not None:
-        result["text_report_path"] = str(_write_text_report(result, csv_path=csv_path, output_dir=output_dir))
+        result["text_report_path"] = str(_write_text_report(
+            result, recording_path=recording_path, output_dir=output_dir,
+        ))
     return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Rule-based apnea detection with AI-assisted event labeling.")
-    parser.add_argument("--input", required=True, help="Input CSV path")
+    parser.add_argument("--input", required=True, help="Input binary recording path")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR / "rule_ai_detector"))
     parser.add_argument("--enable-ai", action="store_true")
     args = parser.parse_args()
 
-    result = detect_apnea_events_from_csv(
-        csv_path=args.input,
+    result = detect_apnea_events_from_recording(
+        recording_path=args.input,
         output_dir=args.output_dir,
         enable_ai=args.enable_ai,
     )

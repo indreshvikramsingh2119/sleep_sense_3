@@ -31,6 +31,10 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!SleepSense.spec
+
+# Generated Windows packaging output
+/installer/
 
 # Installer logs
 pip-log.txt
@@ -206,3 +210,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 raw_data/
+
+# macOS metadata sidecars (AppleDouble/resource forks)
+._*
+.DS_Store
+__MACOSX/

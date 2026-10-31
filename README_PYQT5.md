@@ -42,21 +42,23 @@ pip install -r requirements.txt
 ```
 
 2. **Verify files are present:**
-   - `sleep_sense_dashboard.py` - Main application file
+   - `main.py` - Main application file
+   - `src/components/dashboard.py` - Main dashboard UI
    - `sleep_sense_medical_white.qss` - Stylesheet file
    - `requirements.txt` - Python dependencies
 
 ## ▶️ Running the Application
 
 ```bash
-python sleep_sense_dashboard.py
+python main.py
 ```
 
 ## 📁 File Structure
 
 ```
 sleep-sense-dashboard/
-├── sleep_sense_dashboard.py          # Main application
+├── main.py                           # Main application
+├── src/components/dashboard.py       # Main dashboard UI
 ├── sleep_sense_medical_white.qss     # Medical white theme stylesheet
 ├── requirements.txt                   # Python dependencies
 └── README_PYQT5.md                   # This file
@@ -77,7 +79,7 @@ QPushButton {
 
 ### Adding New Signal Traces
 
-In `sleep_sense_dashboard.py`, modify the `signals` list in `init_charts()`:
+In `src/components/sleep_monitor_chart.py`, modify the `signals` list in `init_charts()`:
 
 ```python
 signals = [

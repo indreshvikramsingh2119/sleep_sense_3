@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import threading
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
@@ -21,32 +23,30 @@ LEGACY_PIPELINE_NOTE = (
 )
 
 CURRENT_DIR = Path(__file__).resolve().parent
+APP_ROOT = CURRENT_DIR.parents[1]
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+
 MODELS_DIR = CURRENT_DIR / "models"
 DEFAULT_MODEL_PATH = MODELS_DIR / "event_image_cnn_custom.keras"
 DEFAULT_META_PATH = MODELS_DIR / "event_image_cnn_meta.json"
 DEFAULT_CLASS_NAMES_PATH = MODELS_DIR / "event_image_cnn_class_names.json"
 DEFAULT_OUTPUT_DIR = CURRENT_DIR / "hybrid_pipeline_output"
+MPU6050_COUNTS_PER_G = 16384.0
+MOVEMENT_NOISE_FLOOR_PERCENT_G = 1.0
 
-SIGNAL_COLUMNS = {
-    "timestamp": 0,
-    "body_position": 1,
-    "pulse": 2,
-    "spo2": 3,
-    "body_movement": 4,
-    "airflow": 5,
-    "snoring": 7,
-    "abdomen": 10,
-}
-CSV_SIGNAL_NAMES = tuple(
-    signal_name
-    for signal_name in SIGNAL_COLUMNS
-    if signal_name != "timestamp"
+from src.utils.sample_rate import (
+    DEFAULT_SAMPLE_RATE_HZ, DETECTION_SAMPLE_RATE_HZ,
 )
-INTERPOLATED_SIGNAL_NAMES = tuple(
-    signal_name
-    for signal_name in CSV_SIGNAL_NAMES
-    if signal_name != "timestamp"
-)
+try:
+    from src.utils import sd_record_reader
+except ImportError:  # pragma: no cover - exercised only without SD support.
+    sd_record_reader = None
+
+MASTER_CHANNEL = "airflow"
+_RECORDING_CACHE: dict[str, Any] = {"key": None, "value": None, "value_recorded": None}
+_RECORDING_LOCK = threading.RLock()
+
 EVENT_IMAGE_CHANNEL_ORDER = ["airflow", "spo2", "pulse", "body_movement", "snoring"]
 EVENT_IMAGE_Y_LIMITS = {
     "airflow": (-10, 110),
@@ -55,7 +55,6 @@ EVENT_IMAGE_Y_LIMITS = {
     "body_movement": (-10, 110),
     "snoring": (-10, 110),
 }
-DEFAULT_SAMPLE_RATE_HZ = 10.0
 DEFAULT_IMAGE_SIZE = (64, 64)
 
 
@@ -100,51 +99,333 @@ def _normalize_leading_empty_columns(numeric: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def load_sleep_csv(csv_path: str | Path) -> pd.DataFrame:
-    csv_path = Path(csv_path)
-    raw = pd.read_csv(csv_path, header=None)
-    numeric = raw.apply(pd.to_numeric, errors="coerce")
-    numeric = numeric.dropna(how="all").reset_index(drop=True)
-    numeric = _normalize_leading_empty_columns(numeric)
+def _parse_body_movement(values: pd.Series) -> dict[str, pd.Series]:
+    """Parse MPU-6050 ``X|Y|Z`` samples and derive one movement-intensity trace.
 
-    if numeric.shape[1] == 0:
-        raise ValueError(
-            f"CSV {csv_path} has no usable numeric columns."
-        )
+    The accelerometer's vector magnitude contains gravity even while the patient
+    is still.  The displayed channel therefore uses the change between adjacent
+    3-axis vectors, expressed as percent of 1 g.  Tiny changes are treated as
+    sensor noise.  The three raw axes remain available for future analysis.
+    """
+    text = values.astype("string").str.strip()
+    components = text.str.split("|", expand=True)
+    has_xyz = components.shape[1] >= 3 and components.iloc[:, :3].notna().all(axis=1).any()
 
-    timestamp_index = SIGNAL_COLUMNS["timestamp"]
-    if numeric.shape[1] <= timestamp_index:
-        raise ValueError(f"CSV {csv_path} is missing the timestamp column at index {timestamp_index}.")
+    if not has_xyz:
+        numeric = pd.to_numeric(values, errors="coerce")
+        return {"body_movement": numeric}
 
-    available_signal_columns = {
-        name: index
-        for name, index in SIGNAL_COLUMNS.items()
-        if index < numeric.shape[1]
+    xyz = np.column_stack([
+        pd.to_numeric(components.iloc[:, axis], errors="coerce").to_numpy(dtype=float)
+        for axis in range(3)
+    ])
+    valid = np.isfinite(xyz).all(axis=1)
+    zero_vector = valid & np.all(xyz == 0.0, axis=1)
+    movement = np.full(len(xyz), np.nan, dtype=float)
+    movement[valid] = 0.0
+
+    if len(xyz) > 1:
+        adjacent_valid = valid[1:] & valid[:-1] & ~zero_vector[1:] & ~zero_vector[:-1]
+        changes = np.linalg.norm(xyz[1:] - xyz[:-1], axis=1)
+        intensity = changes / MPU6050_COUNTS_PER_G * 100.0
+        intensity[intensity < MOVEMENT_NOISE_FLOOR_PERCENT_G] = 0.0
+        movement_indices = np.flatnonzero(adjacent_valid) + 1
+        movement[movement_indices] = np.clip(intensity[adjacent_valid], 0.0, 100.0)
+
+    return {
+        "body_movement": pd.Series(movement, index=values.index),
+        "body_movement_x": pd.Series(xyz[:, 0], index=values.index),
+        "body_movement_y": pd.Series(xyz[:, 1], index=values.index),
+        "body_movement_z": pd.Series(xyz[:, 2], index=values.index),
     }
 
-    signal_df = pd.DataFrame(
-        {
-            name: numeric.iloc[:, index]
-            for name, index in available_signal_columns.items()
-        }
+
+def _parse_sd_recording(path: Path) -> dict[str, Any]:
+    """Parse one SD recording into the plain dict every caller works with (no airflow_recorded copy yet)."""
+    recording = sd_record_reader.read_sd_recording(path)
+    if recording.record_time_sec.size == 0:
+        raise ValueError(f"{path} contains no valid records (sync/CRC check failed everywhere).")
+    signals = {name: np.asarray(values, dtype=float) for name, values in recording.signals.items()}
+    times = {name: np.asarray(values, dtype=float) for name, values in recording.times.items()}
+    rates = {name: float(rate) for name, rate in recording.sample_rates.items()}
+    signals["timestamp"] = recording.record_timestamps_ms.astype(float)
+    times["timestamp"] = recording.record_time_sec.copy()
+    rates["timestamp"] = 1.0
+    master = MASTER_CHANNEL if MASTER_CHANNEL in times else max(rates, key=rates.get)
+    return {"source_format": "smf", "source_path": str(path), "signals": signals,
+            "times": times, "sample_rates": rates, "master_channel": master,
+            "time": times[master].copy(), "meta": dict(recording.meta)}
+
+
+def _with_recorded_airflow(base: dict[str, Any]) -> dict[str, Any]:
+    """The same recording plus an untouched copy of the airflow ("airflow_recorded") for plateau analysis."""
+    if "airflow" not in base["signals"]:
+        return base
+    result = {**base, "signals": dict(base["signals"]), "times": dict(base["times"]),
+              "sample_rates": dict(base["sample_rates"])}
+    result["signals"]["airflow_recorded"] = base["signals"]["airflow"].copy()
+    result["times"]["airflow_recorded"] = base["times"]["airflow"].copy()
+    result["sample_rates"]["airflow_recorded"] = base["sample_rates"]["airflow"]
+    return result
+
+
+def load_sleep_recording(path: str | Path, *, interpolate_signals: bool = True,
+                         preserve_recorded_airflow: bool = False) -> dict[str, Any]:
+    """Load a binary SD-card recording with per-channel native rates.
+
+    One parse is shared by everybody: the cache key no longer contains ``preserve_recorded_airflow``
+    (the chart asks for it, the detector does not, so the two used to parse the same file twice), and
+    the lock makes a second caller that arrives while the first is still parsing wait for that result
+    instead of starting a second parse of its own.
+    """
+    path = Path(path)
+    if sd_record_reader is not None and sd_record_reader.is_sd_recording(path):
+        try:
+            stat = path.stat()
+            cache_key = (
+                str(path.resolve()),
+                int(stat.st_size),
+                int(stat.st_mtime_ns),
+                bool(interpolate_signals),
+            )
+        except OSError:
+            cache_key = None
+
+        if cache_key is None:
+            base = _parse_sd_recording(path)
+            return _with_recorded_airflow(base) if preserve_recorded_airflow else base
+
+        with _RECORDING_LOCK:
+            if _RECORDING_CACHE["key"] != cache_key:
+                _RECORDING_CACHE["value"] = None
+                _RECORDING_CACHE["value_recorded"] = None
+                _RECORDING_CACHE["value"] = _parse_sd_recording(path)
+                _RECORDING_CACHE["key"] = cache_key
+            if not preserve_recorded_airflow:
+                return _RECORDING_CACHE["value"]
+            if _RECORDING_CACHE.get("value_recorded") is None:
+                _RECORDING_CACHE["value_recorded"] = _with_recorded_airflow(_RECORDING_CACHE["value"])
+            return _RECORDING_CACHE["value_recorded"]
+
+    raise ValueError(
+        f"Unsupported recording format: {path.name}. "
+        "Only binary SD recordings with a valid sync marker/CRC are supported."
     )
-    signal_df = signal_df.dropna(subset=["timestamp"]).reset_index(drop=True)
-    signal_df["timestamp"] = signal_df["timestamp"].astype(float)
 
-    # Project timing is fixed at 10 Hz, so derive time from sample index
-    signal_df["time_sec"] = np.arange(len(signal_df), dtype=float) / DEFAULT_SAMPLE_RATE_HZ
 
-    for channel in INTERPOLATED_SIGNAL_NAMES:
-        if channel not in signal_df.columns:
+def trim_recording_edges(
+    recording: dict[str, Any],
+    *,
+    start_seconds: float = 0.0,
+    end_seconds: float = 0.0,
+) -> dict[str, Any]:
+    """Return a copied recording with unstable start/end time removed.
+
+    Every native-rate channel is clipped against the master-channel time
+    bounds and rebased to start at zero. The input can be the cached object
+    returned by ``load_sleep_recording``; it is never modified in place.
+    """
+    start_seconds = max(0.0, float(start_seconds))
+    end_seconds = max(0.0, float(end_seconds))
+    if start_seconds == 0.0 and end_seconds == 0.0:
+        return recording
+
+    source_times = recording.get("times", {})
+    source_signals = recording.get("signals", {})
+    master = recording.get("master_channel", MASTER_CHANNEL)
+    master_time = np.asarray(
+        recording.get("time", source_times.get(master, [])), dtype=float
+    ).reshape(-1)
+    finite_master = master_time[np.isfinite(master_time)]
+    if finite_master.size == 0:
+        raise ValueError("Recording has no valid master timeline to trim.")
+
+    original_start = float(finite_master[0])
+    original_end = float(finite_master[-1])
+    original_span = original_end - original_start
+    if original_span <= start_seconds + end_seconds:
+        raise ValueError(
+            "Recording must be longer than the excluded start/end period "
+            f"({(start_seconds + end_seconds) / 60.0:g} minutes)."
+        )
+
+    keep_start = original_start + start_seconds
+    keep_end = original_end - end_seconds
+    trimmed_times: dict[str, np.ndarray] = {}
+    trimmed_signals: dict[str, np.ndarray] = {}
+
+    for name, values in source_times.items():
+        channel_time = np.asarray(values, dtype=float).reshape(-1)
+        mask = (
+            np.isfinite(channel_time)
+            & (channel_time >= keep_start)
+            & (channel_time <= keep_end)
+        )
+        # Boolean indexing already returns new arrays, so no extra .copy() is needed, and the time axis is
+        # built once (it used to be built twice for every channel that has a signal).
+        if name in source_signals:
+            channel_values = np.asarray(source_signals[name])
+            count = min(channel_time.size, channel_values.shape[0])
+            trimmed_times[name] = channel_time[:count][mask[:count]] - keep_start
+            trimmed_signals[name] = channel_values[:count][mask[:count]]
+        else:
+            trimmed_times[name] = channel_time[mask] - keep_start
+
+    master_mask = (
+        np.isfinite(master_time)
+        & (master_time >= keep_start)
+        & (master_time <= keep_end)
+    )
+    for name, values in source_signals.items():
+        if name in trimmed_signals:
             continue
-        signal_df[channel] = pd.to_numeric(signal_df[channel], errors="coerce")
-        signal_df[channel] = signal_df[channel].interpolate(limit_direction="both")
-        signal_df[channel] = signal_df[channel].ffill().bfill()
+        channel_values = np.asarray(values)
+        if name == "snoring_packets" and channel_values.ndim == 2 and channel_values.shape[1] >= 7:
+            packet_mask = (
+                np.isfinite(channel_values[:, 5])
+                & np.isfinite(channel_values[:, 6])
+                & (channel_values[:, 5] >= keep_start)
+                & (channel_values[:, 6] <= keep_end)
+            )
+            packets = channel_values[packet_mask].copy()
+            if packets.size:
+                packets[:, 5:7] -= keep_start
+                master_rate = float(recording.get("sample_rates", {}).get(master, 0.0))
+                if master_rate > 0:
+                    packets[:, 0] = np.rint(packets[:, 5] * master_rate)
+                    packets[:, 1] = np.rint(packets[:, 6] * master_rate)
+            trimmed_signals[name] = packets
+        elif channel_values.ndim >= 1 and channel_values.shape[0] == master_time.size:
+            trimmed_signals[name] = channel_values[master_mask].copy()
+        else:
+            trimmed_signals[name] = channel_values.copy()
 
+    trimmed_master_time = trimmed_times.get(master)
+    if trimmed_master_time is None:
+        trimmed_master_time = (master_time[master_mask] - keep_start).copy()
+    if trimmed_master_time.size == 0:
+        raise ValueError("No samples remain after trimming the recording edges.")
+
+    metadata = dict(recording.get("meta", {}))
+    metadata.update({
+        "original_duration_sec": original_span,
+        "edge_trim_start_sec": start_seconds,
+        "edge_trim_end_sec": end_seconds,
+        "duration_sec": float(trimmed_master_time[-1]),
+    })
+    return {
+        **recording,
+        "signals": trimmed_signals,
+        "times": trimmed_times,
+        "sample_rates": dict(recording.get("sample_rates", {})),
+        "time": trimmed_master_time,
+        "meta": metadata,
+    }
+
+
+def _align_to_grid(values: np.ndarray, source_time: np.ndarray, grid_time: np.ndarray) -> np.ndarray:
+    """Place a slower channel on the master grid using sample-and-hold."""
+    values = np.asarray(values, dtype=float).ravel()
+    source_time = np.asarray(source_time, dtype=float).ravel()
+    n = min(values.size, source_time.size)
+    if n == 0:
+        return np.full(grid_time.shape, np.nan, dtype=float)
+    values, source_time = values[:n], source_time[:n]
+    index = np.searchsorted(source_time, grid_time, side="right") - 1
+    return values[np.clip(index, 0, n - 1)]
+
+
+def recording_to_dataframe(recording: dict[str, Any], grid_rate_hz: float | None = None) -> pd.DataFrame:
+    """Build an aligned frame, optionally decimated for detector processing."""
+    signals, times, rates = recording["signals"], recording["times"], recording["sample_rates"]
+    master = recording.get("master_channel", MASTER_CHANNEL)
+    master_rate = float(rates.get(master, DEFAULT_SAMPLE_RATE_HZ))
+    master_time = np.asarray(recording.get("time", times[master]), dtype=float)
+    factor = 1
+    if grid_rate_hz and master_rate > float(grid_rate_hz) * 1.01:
+        factor = max(1, int(round(master_rate / float(grid_rate_hz))))
+    grid_rate = master_rate / factor
+    grid_time = master_time[::factor] if factor > 1 else master_time
+
+    def _decimate(values: np.ndarray) -> np.ndarray:
+        from scipy.signal import decimate
+        values = np.asarray(values, dtype=float)
+        if factor == 1 or values.size < 30:
+            return values[::factor]
+        finite = np.isfinite(values)
+        if finite.all():
+            filled = values
+        elif finite.any():
+            filled = np.interp(np.arange(values.size), np.flatnonzero(finite), values[finite])
+        else:
+            filled = np.zeros_like(values)
+        out = decimate(filled, factor, ftype="fir", zero_phase=True)[:grid_time.size]
+        if not finite.all():
+            out[~finite[::factor][:out.size]] = np.nan
+        return out
+
+    def _peak_bins(values: np.ndarray) -> np.ndarray:
+        values = np.abs(np.nan_to_num(np.asarray(values, dtype=float), nan=0.0))
+        if factor == 1:
+            return values
+        n_bins = int(np.ceil(values.size / factor))
+        padded = np.pad(values, (0, n_bins * factor - values.size))
+        return padded.reshape(n_bins, factor).max(axis=1)[:grid_time.size]
+    frame = {}
+    for name, values in signals.items():
+        source_time = times.get(name)
+        if source_time is None or len(source_time) != len(values):
+            continue
+        on_master_grid = name == master or (len(values) == len(master_time) and np.array_equal(source_time, master_time))
+        if on_master_grid:
+            frame[name] = _peak_bins(values) if name == "snoring" else _decimate(values)
+        else:
+            frame[name] = _align_to_grid(values, source_time, grid_time)
+    signal_df = pd.DataFrame(frame)
+    signal_df["time_sec"] = grid_time
+    signal_df.attrs["sample_rate_hz"] = float(grid_rate)
+    signal_df.attrs["sample_rates"] = dict(rates)
+    signal_df.attrs["source_format"] = recording.get("source_format", "csv")
+    signal_df.attrs["master_channel"] = master
+    signal_df.attrs["edge_trim_start_sec"] = float(
+        recording.get("meta", {}).get("edge_trim_start_sec", 0.0)
+    )
+    signal_df.attrs["edge_trim_end_sec"] = float(
+        recording.get("meta", {}).get("edge_trim_end_sec", 0.0)
+    )
     return signal_df
 
 
+def load_sleep_recording_frame(recording_path: str | Path, *, interpolate_signals: bool = True,
+                               preserve_recorded_airflow: bool = False,
+                               trim_start_seconds: float = 0.0,
+                               trim_end_seconds: float = 0.0) -> pd.DataFrame:
+    """Load a binary SD recording as an aligned detector frame."""
+    path = Path(recording_path)
+    recording = load_sleep_recording(
+        path, interpolate_signals=interpolate_signals,
+        preserve_recorded_airflow=preserve_recorded_airflow,
+    )
+    recording = trim_recording_edges(
+        recording,
+        start_seconds=trim_start_seconds,
+        end_seconds=trim_end_seconds,
+    )
+    return recording_to_dataframe(recording, grid_rate_hz=DETECTION_SAMPLE_RATE_HZ)
+
+
 def estimate_sample_rate_hz(signal_df: pd.DataFrame) -> float:
+    """Sample rate from attrs, else time spacing, else legacy default."""
+    try:
+        rate = float(signal_df.attrs.get("sample_rate_hz", 0.0))
+        if rate > 0:
+            return rate
+    except (AttributeError, TypeError, ValueError):
+        pass
+    if "time_sec" in getattr(signal_df, "columns", ()) and len(signal_df) > 2:
+        spacing = np.nanmedian(np.diff(signal_df["time_sec"].to_numpy(dtype=float)))
+        if np.isfinite(spacing) and spacing > 0:
+            return float(1.0 / spacing)
     return DEFAULT_SAMPLE_RATE_HZ
 
 
@@ -504,18 +785,18 @@ def generate_sleep_report(
 
 
 def run_hybrid_pipeline(
-    csv_path: str | Path,
+    recording_path: str | Path,
     output_dir: str | Path | None = DEFAULT_OUTPUT_DIR,
     pre_event_seconds: float = 30.0,
     post_event_seconds: float = 30.0,
     confidence_threshold: float = 0.70,
 ) -> dict[str, Any]:
-    csv_path = Path(csv_path)
+    recording_path = Path(recording_path)
     output_dir = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR
     image_dir = output_dir / "event_images"
     image_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_df = load_sleep_csv(csv_path)
+    raw_df = load_sleep_recording_frame(recording_path)
     processed_df, preprocessing_meta = preprocess_signals(raw_df)
     candidates = detect_rule_candidates(processed_df)
     model, class_names, model_meta = load_cnn_model_bundle()
@@ -543,9 +824,12 @@ def run_hybrid_pipeline(
         row["top_probabilities"] = cnn_prediction["top_probabilities"]
         report_rows.append(row)
 
-    report_paths = generate_sleep_report(report_rows, output_dir=output_dir, stem=csv_path.stem.replace(" ", "_"))
+    report_paths = generate_sleep_report(
+        report_rows, output_dir=output_dir,
+        stem=recording_path.stem.replace(" ", "_"),
+    )
     summary = {
-        "source_csv": str(csv_path),
+        "source_recording": str(recording_path),
         "output_dir": str(output_dir),
         "candidate_count": len(candidates),
         "report_csv": str(report_paths["csv"]),
@@ -553,7 +837,7 @@ def run_hybrid_pipeline(
         "preprocessing": preprocessing_meta,
         "model_meta": model_meta,
     }
-    (output_dir / f"{csv_path.stem.replace(' ', '_')}_summary.json").write_text(
+    (output_dir / f"{recording_path.stem.replace(' ', '_')}_summary.json").write_text(
         json.dumps(summary, indent=2),
         encoding="utf-8",
     )

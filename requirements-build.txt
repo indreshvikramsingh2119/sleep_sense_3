@@ -1,0 +1,13 @@
+# Minimal runtime/build environment for the packaged desktop app.
+# Training-only libraries and Qt WebEngine are intentionally omitted.
+PyQt5>=5.15.10
+pyqtgraph>=0.13.3
+numpy>=1.26.0
+pandas>=1.5.0
+pytz>=2020.1
+reportlab>=4.0.0
+PyMuPDF>=1.24.0
+Pillow>=10.0.0
+scipy>=1.11.0
+matplotlib>=3.8.0
+pyinstaller>=6.11,<7

@@ -1,0 +1,11 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python.defaultInterpreterPath": "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3",
+    "python-envs.pythonProjects": [],
+    "windsurf.inferenceProvider": "ollama",
+    "windsurf.localModel": "qwen2.5-coder:3b",
+    "git.ignoreLimitWarning": true,
+    "code-runner.runInTerminal": true,
+    "code-runner.clearPreviousOutput": true,
+    "code-runner.ignoreSelection": true
+}
