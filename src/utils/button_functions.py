@@ -163,6 +163,10 @@ class ButtonFunctions:
         from PyQt5.QtWidgets import QMenu
         
         menu = QMenu(self.parent)
+        # Let the rounded QSS border define the popup's visible outline.
+        # Windows otherwise paints a rectangular surface/shadow behind it.
+        menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        menu.setAttribute(Qt.WA_TranslucentBackground)
         # Apply professional styling to the menu
         menu.setStyleSheet("""
             QMenu {
@@ -209,16 +213,13 @@ class ButtonFunctions:
         """)
         
         if menu_type == 'file':
-            # custom file menu matching requested image
-            menu.addSeparator()
+            # custom file menu matching requested image        
             # menu.addAction('Database', self.file_database)
-            # menu.addAction('Archive', self.file_open_archive)
             # save_action = menu.addAction('Save report locally', self.file_save_report_locally)
             # Example: disable if no report available
             # save_action.setEnabled(bool(getattr(self.parent, 'has_report', True)))
             # menu.addAction('Print report', self.file_print_report)
             
-            menu.addSeparator()
             # dup_action = menu.addAction('Duplicate', self.file_duplicate)
             # dup_action.setEnabled(True)  # will validate inside handler
             # Export submenu
@@ -227,13 +228,11 @@ class ButtonFunctions:
             # export_menu.addAction('Export as JSON', lambda: self.file_export('json'))
             # menu.addMenu(export_menu)
             # menu.addAction('Import recording', self.file_import_recording)
-            
-            menu.addSeparator()
+
             send_report_action = menu.addAction('Send report by email', self.file_send_report_email)
             send_report_action.setEnabled(True)  # enabled if report exists (checked inside)
             # send_rec_action = menu.addAction('Send recording by email', self.file_send_recording_email)
             # send_rec_action.setEnabled(True)
-            menu.addSeparator()
             menu.addAction('Exit App', self.parent.close)
             
         # elif menu_type == 'edit':
@@ -363,7 +362,7 @@ class ButtonFunctions:
         # tools_menu.addAction(data_analysis_action)
         # 
         # report_generator_action = QAction('Generate Report', self.parent)
-        # report_generator_action.setStatusTip('Generate medical report')
+        # report_generator_action.setStatusTip('Generate report')
         # report_generator_action.triggered.connect(self.tools_generate_report)
         # tools_menu.addAction(report_generator_action)
         # 
@@ -383,64 +382,54 @@ class ButtonFunctions:
     
     # File Menu Actions
     def file_new(self):
-        print("File -> New clicked")
+        pass
         # TODO: Implement new session functionality
     
     def file_open(self):
-        print("File -> Open clicked")
+        pass
         # TODO: Implement file open functionality
     
     def file_save(self):
-        print("File -> Save clicked")
+        pass
         # TODO: Implement file save functionality
     
     # def file_export(self):
-    #     print("File -> Export Data clicked")
     #     # TODO: Implement data export functionality
     
     # Edit Menu Actions
     # def edit_undo(self):
-    #     print("Edit -> Undo clicked")
     #     # TODO: Implement undo functionality
     
     # def edit_redo(self):
-    #     print("Edit -> Redo clicked")
     #     # TODO: Implement redo functionality
     
     # def edit_copy(self):
-    #     print("Edit -> Copy clicked")
     #     # TODO: Implement copy functionality
     
     # def edit_paste(self):
-    #     print("Edit -> Paste clicked")
     #     # TODO: Implement paste functionality
     
     # Tools Menu Actions
     # def tools_settings(self):
-    #     print("Tools -> Settings clicked")
     #     # TODO: Implement settings dialog
     
     # def tools_import_data(self):
-    #     print("Tools -> Import Data clicked")
     #     # TODO: Implement data import functionality
     
     # def tools_data_analysis(self):
-    #     print("Tools -> Data Analysis clicked")
     #     # TODO: Implement data analysis tools
     
     # def tools_generate_report(self):
-    #     print("Tools -> Generate Report clicked")
     #     # TODO: Implement report generation
     
     # def tools_analysis_parameters(self):
     #     """Analysis Parameters"""
-    #     print("Tools -> Analysis Parameters clicked")
     #     # TODO: Implement analysis parameters functionality
     
     def tools_reanalyze(self):
-        """Re-analyze - run detection again on the currently loaded CSV."""
+        """Re-analyze the currently loaded binary recording."""
         monitor_chart = getattr(self.parent, "monitor_chart", None)
-        if monitor_chart is None or not getattr(monitor_chart, "loaded_csv_path", None):
+        if monitor_chart is None or not getattr(monitor_chart, "loaded_recording_path", None):
             msg_box = QMessageBox(self.parent)
             msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
             msg_box.setWindowTitle("No Data Loaded")
@@ -595,7 +584,7 @@ class ButtonFunctions:
 
         clicked = warning_box.clickedButton()
         if clicked is cancel_btn or clicked is None:
-            print("Tools -> Re-analyze cancelled")
+            pass
             return
 
         if clicked is new_report_btn:
@@ -681,7 +670,7 @@ class ButtonFunctions:
         auto_result = getattr(monitor_chart, "auto_rule_ai_result", None)
         if isinstance(auto_result, dict):
             event_count = len(auto_result.get("events", []))
-        print(f"Tools -> Re-analyze complete ({report_choice}), {event_count} events detected")
+        pass
 
         QMessageBox.information(
             self.parent,
@@ -693,73 +682,10 @@ class ButtonFunctions:
     def tools_settings_analysis_parameters(self):
         """Open the Analysis parameters dialog and apply changes to the detector."""
         monitor_chart = getattr(self.parent, "monitor_chart", None)
-        if monitor_chart is None or not getattr(monitor_chart, "loaded_csv_path", None):
-            msg_box = QMessageBox(self.parent)
-            msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-            msg_box.setWindowTitle("No Data Loaded")
-            msg_box.setText("Please upload PSG data before changing analysis parameters.")
-            msg_box.setIconPixmap(self._upload_psg_icon_pixmap())
-            msg_box.setStyleSheet("""
-                QMessageBox {
-                    background-color: #f8fbff;
-                }
-                QMessageBox QLabel {
-                    color: #111827;
-                    font-size: 13px;
-                    font-weight: 500;
-                }
-                QMessageBox QPushButton {
-                    min-width: 54px;
-                    min-height: 22px;
-                    padding: 4px 12px;
-                    border-radius: 6px;
-                    border: 1px solid #1d4ed8;
-                    background-color: #2563eb;
-                    color: white;
-                    font-size: 11px;
-                    font-weight: 700;
-                }
-                QMessageBox QPushButton:hover {
-                    background-color: #3b82f6;
-                    border: 1px solid #1e40af;
-                }
-                QMessageBox QPushButton:pressed {
-                    background-color: #1e40af;
-                    border: 1px solid #1e3a8a;
-                }
-            """)
-            msg_box.setStandardButtons(QMessageBox.Ok)
-            ok_button = msg_box.button(QMessageBox.Ok)
-            if ok_button is not None:
-                ok_button.setAutoDefault(False)
-                ok_button.setDefault(True)
-                ok_button.setStyleSheet("""
-                    QPushButton {
-                        min-width: 54px;
-                        min-height: 22px;
-                        padding: 4px 12px;
-                        border-radius: 6px;
-                        border: 1px solid #1d4ed8;
-                        background-color: #2563eb;
-                        color: white;
-                        font-size: 11px;
-                        font-weight: 700;
-                    }
-                    QPushButton:hover {
-                        background-color: #3b82f6;
-                        border: 1px solid #1e40af;
-                    }
-                    QPushButton:pressed {
-                        background-color: #1e40af;
-                        border: 1px solid #1e3a8a;
-                    }
-                """)
-            msg_box.exec_()
-            return
 
         dialog = AnalysisParametersDialog(self.parent)
         if dialog.exec_() != QDialog.Accepted:
-            print("Tools -> Analysis parameters cancelled")
+            pass
             return
 
         parameters = dialog.get_parameters()
@@ -836,7 +762,7 @@ class ButtonFunctions:
             return
 
         apnea_detector.apply_analysis_parameters(parameters)
-        print(f"Tools -> Analysis parameters applied: {parameters}")
+        pass
 
         # Hypopnea / Snoring / Desaturation / CSR tab values.
         # Kept separate so the apnea detector only receives the constants it
@@ -852,7 +778,7 @@ class ButtonFunctions:
                     apnea_detector.apply_extra_analysis_parameters(extra_parameters)
                 except Exception as extra_error:
                     print(f"Extra analysis parameters not applied: {extra_error}")
-            print(f"Tools -> Extra analysis parameters: {extra_parameters}")
+            pass
         msg_box = QMessageBox(self.parent)
         msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         msg_box.setWindowTitle("Analysis Parameters")
@@ -964,98 +890,85 @@ class ButtonFunctions:
     
     # def tools_new_event_group(self):
     #     """New event group"""
-    #     print("Tools -> New event group clicked")
     #     # TODO: Implement new event group functionality
     
     # def tools_delete_event_group(self):
     #     """Delete event group"""
-    #     print("Tools -> Delete event group clicked")
     #     # TODO: Implement delete event group functionality
     
     # def tools_edit_event_group(self):
     #     """Edit event group"""
-    #     print("Tools -> Edit event group clicked")
     #     # TODO: Implement edit event group functionality
     
         
     # def tools_settings_report(self):
     #     """Report"""
-    #     print("Tools -> Settings -> Report clicked")
     #     dialog = ReportSettingsDialog(self.parent)
     #     if dialog.exec_() == QDialog.Accepted:
-    #         print("Report settings applied")
     #         # TODO: Apply report settings
     
     # def tools_settings_analysis_parameters(self):
     #     """Analysis parameters"""
-    #     print("Tools -> Settings -> Analysis parameters clicked")
     #     dialog = AnalysisParametersDialog(self.parent)
     #     dialog.exec_()
     
     # def tools_settings_edf_export(self):
     #     """EDF export"""
-    #     print("Tools -> Settings -> EDF export clicked")
     #     dialog = EDFExportDialog(self.parent)
     #     if dialog.exec_() == QDialog.Accepted:
-    #         print("EDF export settings applied")
     #         # TODO: Apply EDF export settings
     
     # def tools_settings_general(self):
     #     """General settings"""
-    #     print("Tools -> Settings -> General clicked")
     #     # TODO: Implement general settings dialog
     
     # def tools_settings_data(self):
     #     """Data settings"""
-    #     print("Tools -> Settings -> Data clicked")
     #     # TODO: Implement data settings dialog
     
     # def tools_settings_display(self):
     #     """Display settings"""
-    #     print("Tools -> Settings -> Display clicked")
     #     # TODO: Implement display settings dialog
     
     # def tools_settings_export(self):
     #     """Export settings"""
-    #     print("Tools -> Settings -> Export clicked")
     #     # TODO: Implement export settings dialog
     
     # def tools_reanalysis(self):
     #     """Reanalysis"""
-    #     print("Tools -> Reanalysis clicked")
     #     # TODO: Implement reanalysis functionality
     
     # Help Menu Actions
     def help_clinical_guide(self):
-        print("Help -> Clinical Guide clicked")
+        pass
         QMessageBox.information(self.parent, "Clinical Guide", "Clinical guide will be added here.")
     
     def help_patient_instructions(self):
-        print("Help -> Patient instructions clicked")
+        pass
         QMessageBox.information(self.parent, "Patient Instructions", "Patient instructions will be added here.")
     
     def help_program_info(self):
-        print("Help -> Program info clicked")
+        pass
         QMessageBox.information(self.parent, "Program Info", "Program information will be added here.")
     
     def help_recording_info(self):
-        print("Help -> Recording info clicked")
+        pass
         QMessageBox.information(self.parent, "Recording Info", "Recording information will be added here.")
     
     def help_device_info(self):
-        print("Help -> Device info clicked")
+        pass
         QMessageBox.information(self.parent, "Device Info", "Device information will be added here.")
     
     def help_documentation(self):
-        print("Help -> Documentation clicked")
+        pass
         QMessageBox.information(self.parent, "Documentation", "Documentation will be added here.")
     
     def help_about(self):
-        print("Help -> About clicked")
+        pass
         QMessageBox.information(self.parent, "About", "Sleep Sense application information will be added here.")
     
     def file_load_data(self):
-        """Load PSG data from CSV file using file dialog"""
+        """Load PSG data from a binary recording using the file dialog."""
         if not getattr(self.parent, "current_patient_db_id", None):
             QMessageBox.warning(
                 self.parent,
@@ -1081,21 +994,6 @@ class ButtonFunctions:
     #     if hasattr(self.parent, 'open_database'):
     #         self.parent.open_database()
     #     else:
-    #         print("Parent does not have open_database method")
-    
-    # def file_open_archive(self):
-    #     """Open archive window - same as blue archive button"""
-    #     # Check if parent has monitor_chart with selection active and block if needed
-    #     if (hasattr(self.parent, 'monitor_chart') and 
-    #         hasattr(self.parent.monitor_chart, 'block_if_selection_active') and 
-    #         self.parent.monitor_chart.block_if_selection_active()):
-    #         return
-    #
-    #     # Call the same open_archive method as the blue toolbar button
-    #     if hasattr(self.parent, 'open_archive'):
-    #         self.parent.open_archive()
-    #     else:
-    #         print("Parent does not have open_archive method")
     
     def file_archive(self):
         """Archive a selected file into an Archive folder with timestamp"""
@@ -1259,69 +1157,109 @@ class ButtonFunctions:
     #         QMessageBox.critical(self.parent, "Import Error", str(e))
     
     def _generate_pdf_from_html(self, html_content, output_path):
-        """Generate PDF from HTML content using QWebEngineView"""
+        """Generate a PDF with Qt's native document renderer.
+
+        QTextDocument is already used elsewhere in the app and avoids
+        bundling the roughly 100 MB Qt WebEngine runtime just for this helper.
+        """
         try:
-            from PyQt5.QtWebEngineWidgets import QWebEngineView
-
-            # Create a temporary web view to render HTML
-            web_view = QWebEngineView()
-            web_view.setHtml(html_content)
-            
-            # Wait for page to load (simple approach)
-            # In production, you'd use QWebEnginePage.loadFinished signal
-            import time
-            time.sleep(2)  # Give time for rendering
-
-            # Create printer
             printer = QPrinter(QPrinter.HighResolution)
             printer.setOutputFormat(QPrinter.PdfFormat)
             printer.setOutputFileName(output_path)
             printer.setPageSize(QPrinter.A4)
-            
-            # Print to PDF
-            web_view.page().print(printer, lambda success: None)
-            
-            return True
+
+            document = QTextDocument()
+            document.setHtml(html_content)
+            document.print_(printer)
+            return os.path.isfile(output_path) and os.path.getsize(output_path) > 0
         except Exception as e:
             print(f"Error generating PDF: {e}")
             return False
     
     def _open_gmail_compose(self, subject, body, attachment_path=None):
-        """Open Gmail compose in browser with subject and body pre-filled"""
+        """Show a modal confirmation before opening Gmail in the browser."""
         try:
-            # Gmail compose URL with subject and body
             gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&su={quote(subject)}&body={quote(body)}"
-            
-            # Open Gmail in browser
-            webbrowser.open(gmail_url)
-            
+
+            message_box = QMessageBox(self.parent)
+            message_box.setWindowFlags(
+                message_box.windowFlags() & ~Qt.WindowContextHelpButtonHint
+            )
+            message_box.setIcon(QMessageBox.Information)
+            message_box.setWindowTitle("Open Gmail")
+
             if attachment_path:
-                # Show message about attaching the file
-                QMessageBox.information(
-                    self.parent, 
-                    "Gmail Opened",
-                    f"Gmail has been opened in your browser.\n\n"
-                    f"Please attach the file:\n{attachment_path}\n\n"
-                    f"If you're not logged in, you'll be redirected to the login page first."
+                message_box.setText(
+                    "Your report is ready to email.\n\n"
+                    "Click OK to open Gmail in your browser.\n"
+                    f"Please attach this file:\n{attachment_path}"
                 )
-                
-                # Also open file location to help user find the file
-                try:
-                    if platform.system() == "Darwin":  # macOS
-                        subprocess.run(["open", "-R", attachment_path])
-                    elif platform.system() == "Windows":
-                        subprocess.run(["explorer", "/select,", attachment_path])
-                    else:  # Linux
-                        subprocess.run(["xdg-open", os.path.dirname(attachment_path)])
-                except:
-                    pass
             else:
-                QMessageBox.information(
-                    self.parent,
-                    "Gmail Opened",
-                    "Gmail has been opened in your browser.\n\nIf you're not logged in, you'll be redirected to the login page first."
+                message_box.setText(
+                    "Your email is ready.\n\n"
+                    "Click OK to open Gmail in your browser.\n"
+                    "If you are not logged in, Gmail will show its login page first."
                 )
-                
+
+            message_box.setStandardButtons(QMessageBox.Ok)
+            message_box.setDefaultButton(QMessageBox.Ok)
+            message_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: #f8fbff;
+                }
+                QMessageBox QLabel {
+                    color: #111827;
+                    font-size: 13px;
+                    font-weight: 500;
+                }
+                QMessageBox QPushButton {
+                    min-width: 76px;
+                    min-height: 30px;
+                    padding: 5px 16px;
+                    border-radius: 5px;
+                    border: 1px solid #1d4ed8;
+                    background-color: #2563eb;
+                    color: #ffffff;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                QMessageBox QPushButton:hover {
+                    background-color: #1d4ed8;
+                    border-color: #1e40af;
+                }
+                QMessageBox QPushButton:pressed {
+                    background-color: #1e3a8a;
+                    border-color: #172554;
+                }
+            """)
+
+            ok_button = message_box.button(QMessageBox.Ok)
+            if ok_button is not None:
+                ok_button.setMinimumSize(82, 32)
+                ok_button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2563eb;
+                        color: #ffffff;
+                        border: 1px solid #1d4ed8;
+                        border-radius: 5px;
+                        padding: 5px 16px;
+                        font-size: 12px;
+                        font-weight: 600;
+                    }
+                    QPushButton:hover {
+                        background-color: #1d4ed8;
+                        border-color: #1e40af;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1e3a8a;
+                        border-color: #172554;
+                    }
+                """)
+
+            # The browser is opened only after the user accepts this dialog.
+            if message_box.exec_() == QMessageBox.Ok:
+                webbrowser.open(gmail_url)
+
         except Exception as e:
             QMessageBox.warning(self.parent, "Email", f"Could not open Gmail:\n{e}")
     
@@ -1880,7 +1818,7 @@ class AnalysisParametersDialog(QDialog):
         layout.addWidget(subtitle)
 
         hypopnea_percent = current.get("AASM_HYPOPNEA_DROP_PERCENT", 30.0)
-        apnea_percent = current.get("AASM_APNEA_DROP_PERCENT", 75.0)
+        apnea_percent = 90.0
         obstructive_effort_percent = float(current.get("OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD", 0.20)) * 100.0
         central_effort_percent = float(current.get("CENTRAL_APNEA_EFFORT_THRESHOLD", 0.60)) * 100.0
         central_amplitude_percent = float(current.get("CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO", 0.08)) * 100.0
@@ -2116,7 +2054,7 @@ class AnalysisParametersDialog(QDialog):
                 },
                 "snoring": {
                     "threshold": float(self.snoring_threshold.text()),
-                    "min_duration": float(self.snoring_min_duration.text()),
+                    "min_duration": max(1.0, float(self.snoring_min_duration.text())),
                     "max_duration": float(self.snoring_max_duration.text()),
                     "mean_time": float(self.snoring_mean_time.text()),
                 },
@@ -2257,6 +2195,7 @@ class AnalysisParametersDialog(QDialog):
 
         self.snoring_threshold = QLineEdit("6.0")
         self.snoring_threshold.setFixedWidth(50)
+        self.snoring_threshold.setReadOnly(True)
         row1.addWidget(self.snoring_threshold)
 
         row1.addWidget(QLabel("%  [1.5 - 10.0]"))
@@ -2267,11 +2206,12 @@ class AnalysisParametersDialog(QDialog):
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("Min. length of a\nsnoring event:"))
 
-        self.snoring_min_duration = QLineEdit("0.3")
+        self.snoring_min_duration = QLineEdit("1.0")
         self.snoring_min_duration.setFixedWidth(50)
+        self.snoring_min_duration.setReadOnly(True)
         row2.addWidget(self.snoring_min_duration)
 
-        row2.addWidget(QLabel("s  [0.3 - 0.9]"))
+        row2.addWidget(QLabel("s  [>= 1.0]"))
         row2.addStretch()
         left_col.addLayout(row2)
 
@@ -2282,8 +2222,9 @@ class AnalysisParametersDialog(QDialog):
         row3 = QHBoxLayout()
         row3.addWidget(QLabel("Max. duration of a\nsnoring event:"))
 
-        self.snoring_max_duration = QLineEdit("3.5")
+        self.snoring_max_duration = QLineEdit("5.0")
         self.snoring_max_duration.setFixedWidth(50)
+        self.snoring_max_duration.setReadOnly(True)
         row3.addWidget(self.snoring_max_duration)
 
         row3.addWidget(QLabel("s  [2.0 - 5.0]"))
@@ -2368,7 +2309,7 @@ class AnalysisParametersDialog(QDialog):
     #     layout.addStretch()
     
     def standard_parameter(self):
-        """Reset the Apnea fields to the detector's built-in default values."""
+        """Reset fields to the standard values shown in the dialog."""
         defaults = {}
         if apnea_detector is not None:
             try:
@@ -2377,7 +2318,10 @@ class AnalysisParametersDialog(QDialog):
                 defaults = {}
 
         hypopnea_percent = defaults.get("AASM_HYPOPNEA_DROP_PERCENT", 30.0)
-        apnea_percent = defaults.get("AASM_APNEA_DROP_PERCENT", 75.0)
+        # Keep 90 as the pending/displayed standard value.  The detector's
+        # currently applied value (75 by default) is intentionally untouched
+        # until the user accepts the parent dialog with OK.
+        apnea_percent = 90.0
         obstructive_effort_percent = float(defaults.get("OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD", 0.20)) * 100.0
         central_effort_percent = float(defaults.get("CENTRAL_APNEA_EFFORT_THRESHOLD", 0.60)) * 100.0
         central_amplitude_percent = float(defaults.get("CENTRAL_APNEA_AMPLITUDE_CONFIRM_RATIO", 0.08)) * 100.0
@@ -2407,8 +2351,8 @@ class AnalysisParametersDialog(QDialog):
         self.hypopnea_respiratory_mean_time.setText("1.0")
 
         self.snoring_threshold.setText("6.0")
-        self.snoring_min_duration.setText("0.3")
-        self.snoring_max_duration.setText("3.5")
+        self.snoring_min_duration.setText("1.0")
+        self.snoring_max_duration.setText("5.0")
         self.snoring_mean_time.setText("0.5")
 
         self.desaturation_threshold.setText(str(desat_percent))

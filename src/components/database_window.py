@@ -7,10 +7,11 @@ from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QFrame, QSplitter, QGroupBox, QLineEdit,
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
-    QToolBar, QSizePolicy, QMessageBox, QInputDialog
+    QToolBar, QSizePolicy, QMessageBox, QInputDialog, QDialogButtonBox,
+    QApplication
 )
-from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtCore import Qt, QSize, QEvent
+from PyQt5.QtGui import QFont, QColor, QBrush
 import hashlib
 import sys
 import os
@@ -78,9 +79,23 @@ class DatabaseWindow(QDialog):
         self.setModal(False)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("Patient Database")
-        self.setFixedSize(1200, 800)
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        available_width = available.width() if available else 1366
+        available_height = available.height() if available else 768
+        target_width = min(1200, max(900, available_width - 32))
+        target_height = min(800, max(560, available_height - 32))
+        self.setMinimumSize(min(900, target_width), min(560, target_height))
+        self.resize(target_width, target_height)
         self.db_manager = DatabaseManager()
         self._record_group_rows = {}
+        self._last_child_table = None
+        self._syncing_child_selection = False
+        self._patient_hover_row = -1
+        self._record_hover_row = -1
+        self._record_hover_backgrounds = {}
+        self._report_hover_row = -1
+        self._report_hover_backgrounds = {}
         self.init_ui()
  
         self.connect_signals()
@@ -197,21 +212,19 @@ class DatabaseWindow(QDialog):
             QTableWidget {
                 border: 1px solid #b7c8d8;
                 border-radius: 6px;
+                outline: none;
                 background-color: #ffffff;
                 gridline-color: #b7c8d8;
                 selection-background-color: #e3f2fd;
                 selection-color: #1565c0;
             }
             QTableWidget::item {
-                padding: 8px;
+                padding: 4px 8px;
                 border: 1px solid #c1cfdb;
             }
             QTableWidget::item:selected {
                 background-color: #d9ecfb;
                 color: #123b63;
-            }
-            QTableWidget::item:hover {
-                background-color: #edf7fe;
             }
             QHeaderView::section {
                 background-color: #f8fbfd;
@@ -237,18 +250,22 @@ class DatabaseWindow(QDialog):
         self.patients_table.setColumnWidth(3, 110)
         self.patients_table.setAlternatingRowColors(True)
         self.patients_table.setSelectionBehavior(QTableWidget.SelectRows)
-        # KYON: default ExtendedSelection me halka sa drag hote hi kai rows
-        # select ho jate the, aur neeche wala code sabse upar wali row utha
-        # leta tha - isliye galat patient ke records dikhne lagte the.
-        self.patients_table.setSelectionMode(QTableWidget.SingleSelection)
+        # A normal click keeps one patient selected. Holding Shift selects the
+        # complete range between the current row and the clicked row. The
+        # Delete action uses these selected rows; Selection still uses only
+        # the current row below.
+        self.patients_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.patients_table.setMouseTracking(True)
+        self.patients_table.viewport().setMouseTracking(True)
+        self.patients_table.viewport().installEventFilter(self)
         self.patients_table.setShowGrid(True)
         self.patients_table.verticalHeader().setVisible(False)
-        self.patients_table.setSortingEnabled(True)
         # Disable inline editing triggered by double-click. Edit must happen only
         # through the Edit button.
         self.patients_table.setEditTriggers(QTableWidget.NoEditTriggers)
         # Fix row height so the Edit button stays vertically centered.
-        self.patients_table.verticalHeader().setDefaultSectionSize(36)
+        self.patients_table.verticalHeader().setMinimumSectionSize(40)
+        self.patients_table.verticalHeader().setDefaultSectionSize(40)
         
         layout.addWidget(self.patients_table)
         
@@ -295,6 +312,7 @@ class DatabaseWindow(QDialog):
             QTableWidget {
                 border: 1px solid #b7c8d8;
                 border-radius: 6px;
+                outline: none;
                 background-color: #ffffff;
                 gridline-color: #b7c8d8;
                 selection-background-color: #e3f2fd;
@@ -307,9 +325,6 @@ class DatabaseWindow(QDialog):
             QTableWidget::item:selected {
                 background-color: #e3f2fd;
                 color: #1565c0;
-            }
-            QTableWidget::item:hover {
-                background-color: #f5f9fc;
             }
             QHeaderView::section {
                 background-color: #f8fbfd;
@@ -338,6 +353,9 @@ class DatabaseWindow(QDialog):
         self.records_table.setColumnWidth(0, 32)
         self.records_table.setAlternatingRowColors(True)
         self.records_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.records_table.setMouseTracking(True)
+        self.records_table.viewport().setMouseTracking(True)
+        self.records_table.viewport().installEventFilter(self)
         self.records_table.setShowGrid(True)
         self.records_table.verticalHeader().setVisible(False)
         # Sorting stays off here: root/child (reanalyzed) rows must sit next
@@ -384,6 +402,7 @@ class DatabaseWindow(QDialog):
             QTableWidget {
                 border: 1px solid #b7c8d8;
                 border-radius: 6px;
+                outline: none;
                 background-color: #ffffff;
                 gridline-color: #b7c8d8;
                 selection-background-color: #e3f2fd;
@@ -396,9 +415,6 @@ class DatabaseWindow(QDialog):
             QTableWidget::item:selected {
                 background-color: #e3f2fd;
                 color: #1565c0;
-            }
-            QTableWidget::item:hover {
-                background-color: #f5f9fc;
             }
             QHeaderView::section {
                 background-color: #f8fbfd;
@@ -422,6 +438,9 @@ class DatabaseWindow(QDialog):
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         self.reports_table.setAlternatingRowColors(True)
         self.reports_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.reports_table.setMouseTracking(True)
+        self.reports_table.viewport().setMouseTracking(True)
+        self.reports_table.viewport().installEventFilter(self)
         self.reports_table.setShowGrid(True)
         self.reports_table.verticalHeader().setVisible(False)
         self.reports_table.setSortingEnabled(True)
@@ -453,6 +472,7 @@ class DatabaseWindow(QDialog):
         self.selection_btn = QPushButton("Selection")
         self.delete_btn = QPushButton("Delete")
         self.cancel_btn = QPushButton("Cancel")
+        self.delete_btn.setAutoRepeat(False)
         
         # Style buttons with professional medical look
         button_style = """
@@ -537,13 +557,34 @@ class DatabaseWindow(QDialog):
 
         # Load recordings and reports only when a patient row is actually clicked
         self.patients_table.itemClicked.connect(self.on_patient_clicked)
-        # Double-click a recording -> load that CSV into the charts
+        # Double-click a recording -> load that binary recording into the charts.
         self.records_table.itemDoubleClicked.connect(self.open_selected_record)
         # Double-click a report -> open the PDF
         self.reports_table.itemDoubleClicked.connect(self.open_selected_report)
 
+        self.records_table.itemSelectionChanged.connect(
+            lambda: self._on_child_table_selection_changed(self.records_table, self.reports_table)
+        )
+        self.reports_table.itemSelectionChanged.connect(
+            lambda: self._on_child_table_selection_changed(self.reports_table, self.records_table)
+        )
+
+    def _on_child_table_selection_changed(self, active_table, other_table):
+        """Remember the table the user is working in and clear the other one."""
+        if self._syncing_child_selection:
+            return
+        if not active_table.selectedRanges():
+            return
+        self._last_child_table = active_table
+        self._syncing_child_selection = True
+        try:
+            other_table.clearSelection()
+        finally:
+            self._syncing_child_selection = False
+
     def on_patient_clicked(self, item):
         """Handle explicit patient-row clicks only."""
+        self._last_child_table = None
         self.on_patient_selection_changed()
 
     def on_patient_selection_changed(self):
@@ -674,6 +715,7 @@ class DatabaseWindow(QDialog):
         no parent_session_id, so they simply show up as roots with no
         children - nothing about them changes.
         """
+        self._set_record_hover_row(-1)
         self.records_table.setRowCount(0)
         self._record_group_rows = {}
         if not patient:
@@ -764,6 +806,8 @@ class DatabaseWindow(QDialog):
     def create_expand_button(self, child_rows):
         """+/- toggle shown on a root Records row that has reanalyzed children."""
         button = StrictClickButton("+")
+        button.setProperty("recordExpandButton", True)
+        button.installEventFilter(self)
         button.setCursor(Qt.PointingHandCursor)
         button.setFixedSize(24, 24)
         button.setStyleSheet("""
@@ -822,6 +866,11 @@ class DatabaseWindow(QDialog):
             parent.load_patient_data(patient)
 
         if parent and hasattr(parent, 'load_psg_data_from_path'):
+            # The chart's loading overlay belongs to the dashboard.  Keeping
+            # this dialog visible here used to cover that overlay, making the
+            # load look as if it were happening silently in the background.
+            self.hide()
+            QApplication.processEvents()
             if parent.load_psg_data_from_path(file_path):
                 # Tell the chart which saved session this is, so a later
                 # Re-analyze -> "New report" save nests under the same root
@@ -830,6 +879,11 @@ class DatabaseWindow(QDialog):
                 if monitor_chart is not None and hasattr(monitor_chart, 'set_current_session') and session_id is not None:
                     monitor_chart.set_current_session(session_id, parent_session_id)
                 self.accept()
+            else:
+                # Let the user choose another record when loading fails.
+                self.show()
+                self.raise_()
+                self.activateWindow()
         else:
             QMessageBox.warning(self, "Not Available", "The dashboard cannot load this recording.")
 
@@ -837,22 +891,17 @@ class DatabaseWindow(QDialog):
         """Load patients from the database."""
         patients = self.db_manager.get_all_patients()
 
-        # Disable sorting while filling, otherwise rows can shuffle mid-load.
-        was_sorting = self.patients_table.isSortingEnabled()
-        self.patients_table.setSortingEnabled(False)
-
         self.patients_table.setRowCount(len(patients))
         for row, patient in enumerate(patients):
             self.patients_table.setItem(row, 0, QTableWidgetItem(patient['last_name'] or ""))
             self.patients_table.setItem(row, 1, QTableWidgetItem(patient['first_name'] or ""))
             self.patients_table.setItem(row, 2, QTableWidgetItem(patient['dob'] or ""))
+            self.patients_table.setRowHeight(row, 40)
             # Store the patient ID in the row for later retrieval
             self.patients_table.item(row, 0).setData(Qt.UserRole, patient['id'])
             # Each row gets its own Edit button
             self.patients_table.setCellWidget(row, 3, self.create_edit_button())
 
-        self.patients_table.setSortingEnabled(was_sorting)
-        
         # Clear the Records table for now
         self.records_table.setRowCount(0)
         self.reports_table.setRowCount(0)
@@ -888,21 +937,30 @@ class DatabaseWindow(QDialog):
                 break
 
     def create_edit_button(self):
-        """Create a simple Edit button for one row."""
+        """Create an Edit button centred inside its table cell."""
+        cell_container = QWidget()
+        cell_container.setStyleSheet("background: transparent;")
+        cell_layout = QHBoxLayout(cell_container)
+        cell_layout.setContentsMargins(0, 0, 0, 0)
+        cell_layout.setSpacing(0)
+
         button = StrictClickButton("Edit")
+        button.setProperty("patientEditButton", True)
+        button.installEventFilter(self)
         button.setCursor(Qt.PointingHandCursor)
-        button.setFixedHeight(24)
-        button.setMinimumWidth(64)
+        button.setFixedSize(90, 26)
         button.setStyleSheet("""
             QPushButton {
                 background-color: #f8fbfd;
                 color: #1e3a5f;
-                border: 1px solid #3498db;
+                border-top: 1px solid #3498db;
+                border-right: 1px solid #3498db;
+                border-bottom: 1px solid #3498db;
+                border-left: 1px solid #3498db;
                 border-radius: 4px;
-                padding: 4px 12px;
+                padding: 0px 10px;
                 font-weight: 700;
                 font-size: 12px;
-                min-width: 64px;
             }
             QPushButton:hover {
                 background-color: #e3f2fd;
@@ -912,11 +970,138 @@ class DatabaseWindow(QDialog):
                 background-color: #d6eaf8;
             }
         """)
-        # NOTE: Do not capture the row index here. When QTableWidget sorts,
-        # cell widgets do not move with the data, so we resolve the real row
-        # at click time using indexAt().
-        button.clicked.connect(lambda checked=False, btn=button: self.handle_edit_patient(btn))
-        return button
+        cell_layout.addWidget(button, 0, Qt.AlignCenter)
+
+        # Resolve the row from the cell container at click time so sorting does
+        # not leave a captured row number pointing at a different patient.
+        button.clicked.connect(
+            lambda checked=False, container=cell_container: self.handle_edit_patient(container)
+        )
+        return cell_container
+
+    def _set_patient_hover_row(self, row):
+        """Highlight one patient row, excluding its Edit-button column."""
+        row = int(row) if row is not None else -1
+        if row == self._patient_hover_row:
+            return
+
+        previous_row = self._patient_hover_row
+        self._patient_hover_row = row
+
+        if 0 <= previous_row < self.patients_table.rowCount():
+            for column in range(3):
+                item = self.patients_table.item(previous_row, column)
+                if item is not None:
+                    item.setBackground(QBrush())
+
+        if 0 <= row < self.patients_table.rowCount():
+            hover_brush = QBrush(QColor("#edf7fe"))
+            for column in range(3):
+                item = self.patients_table.item(row, column)
+                if item is not None:
+                    item.setBackground(hover_brush)
+
+        self.patients_table.viewport().update()
+
+    def _set_table_hover_row(
+        self,
+        table,
+        row,
+        row_attribute,
+        backgrounds_attribute,
+        excluded_columns=(),
+    ):
+        """Highlight a complete table row while preserving its base colours."""
+        row = int(row) if row is not None else -1
+        previous_row = getattr(self, row_attribute)
+        if row == previous_row:
+            return
+
+        previous_backgrounds = getattr(self, backgrounds_attribute)
+        if 0 <= previous_row < table.rowCount():
+            for column, background in previous_backgrounds.items():
+                item = table.item(previous_row, column)
+                if item is not None:
+                    item.setBackground(background)
+
+        setattr(self, row_attribute, row)
+        setattr(self, backgrounds_attribute, {})
+
+        if 0 <= row < table.rowCount():
+            excluded = set(excluded_columns)
+            saved_backgrounds = {}
+            hover_brush = QBrush(QColor("#edf7fe"))
+            for column in range(table.columnCount()):
+                if column in excluded:
+                    continue
+                item = table.item(row, column)
+                if item is not None:
+                    saved_backgrounds[column] = QBrush(item.background())
+                    item.setBackground(hover_brush)
+            setattr(self, backgrounds_attribute, saved_backgrounds)
+
+        table.viewport().update()
+
+    def _set_record_hover_row(self, row):
+        """Highlight a Records row except its +/- action column."""
+        self._set_table_hover_row(
+            self.records_table,
+            row,
+            "_record_hover_row",
+            "_record_hover_backgrounds",
+            excluded_columns=(0,),
+        )
+
+    def _set_report_hover_row(self, row):
+        """Highlight the complete Reports row."""
+        self._set_table_hover_row(
+            self.reports_table,
+            row,
+            "_report_hover_row",
+            "_report_hover_backgrounds",
+        )
+
+    def eventFilter(self, watched, event):
+        """Drive full-row hover while keeping action buttons independent."""
+        patients_table = getattr(self, "patients_table", None)
+        if patients_table is not None:
+            if watched is patients_table.viewport():
+                if event.type() == QEvent.MouseMove:
+                    index = patients_table.indexAt(event.pos())
+                    hover_row = index.row() if index.isValid() and index.column() < 3 else -1
+                    self._set_patient_hover_row(hover_row)
+                elif event.type() == QEvent.Leave:
+                    self._set_patient_hover_row(-1)
+            elif (
+                event.type() == QEvent.Enter
+                and bool(watched.property("patientEditButton"))
+            ):
+                self._set_patient_hover_row(-1)
+
+        records_table = getattr(self, "records_table", None)
+        if records_table is not None:
+            if watched is records_table.viewport():
+                if event.type() == QEvent.MouseMove:
+                    index = records_table.indexAt(event.pos())
+                    hover_row = index.row() if index.isValid() and index.column() > 0 else -1
+                    self._set_record_hover_row(hover_row)
+                elif event.type() == QEvent.Leave:
+                    self._set_record_hover_row(-1)
+            elif (
+                event.type() == QEvent.Enter
+                and bool(watched.property("recordExpandButton"))
+            ):
+                self._set_record_hover_row(-1)
+
+        reports_table = getattr(self, "reports_table", None)
+        if reports_table is not None and watched is reports_table.viewport():
+            if event.type() == QEvent.MouseMove:
+                index = reports_table.indexAt(event.pos())
+                self._set_report_hover_row(index.row() if index.isValid() else -1)
+            elif event.type() == QEvent.Leave:
+                self._set_report_hover_row(-1)
+
+        return super().eventFilter(watched, event)
 
     def verify_edit_password(self, action="editing"):
         """Ask for the password before a protected action.
@@ -924,14 +1109,64 @@ class DatabaseWindow(QDialog):
         `action` only changes the wording, e.g. "editing" or
         "deleting this patient". Returns True only if the password matches.
         """
-        password, ok = QInputDialog.getText(
-            self,
-            "Password Required",
-            f"Please enter the password before {action}:",
-            QLineEdit.Password,
+        password_dialog = QInputDialog(self)
+        password_dialog.setWindowFlags(
+            password_dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint
         )
-        if not ok:
+        password_dialog.setWindowTitle("Password Required")
+        password_dialog.setInputMode(QInputDialog.TextInput)
+        password_dialog.setLabelText(f"Please enter the password before {action}:")
+        password_dialog.setTextEchoMode(QLineEdit.Password)
+        password_dialog.setOkButtonText("OK")
+        password_dialog.setCancelButtonText("Cancel")
+        password_dialog.setMinimumWidth(360)
+
+        button_box = password_dialog.findChild(QDialogButtonBox)
+        if button_box is not None:
+            ok_button = button_box.button(QDialogButtonBox.Ok)
+            cancel_button = button_box.button(QDialogButtonBox.Cancel)
+            if ok_button is not None:
+                ok_button.setMinimumSize(76, 30)
+                ok_button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2563eb;
+                        color: white;
+                        border: 1px solid #1d4ed8;
+                        border-radius: 5px;
+                        padding: 5px 14px;
+                        font-weight: 600;
+                    }
+                    QPushButton:hover {
+                        background-color: #1d4ed8;
+                        border-color: #1e40af;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1e3a8a;
+                    }
+                """)
+            if cancel_button is not None:
+                cancel_button.setMinimumSize(76, 30)
+                cancel_button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #ef4444;
+                        color: white;
+                        border: 1px solid #dc2626;
+                        border-radius: 5px;
+                        padding: 5px 14px;
+                        font-weight: 600;
+                    }
+                    QPushButton:hover {
+                        background-color: #dc2626;
+                        border-color: #b91c1c;
+                    }
+                    QPushButton:pressed {
+                        background-color: #991b1b;
+                    }
+                """)
+
+        if password_dialog.exec_() != QDialog.Accepted:
             return False
+        password = password_dialog.textValue()
 
         entered_hash = hashlib.sha256((password or "").encode("utf-8")).hexdigest()
         if entered_hash != EDIT_PASSWORD_HASH:
@@ -1046,7 +1281,7 @@ class DatabaseWindow(QDialog):
             full_patient_data = self.db_manager.get_patient_by_id(patient_db_id)
             
             if full_patient_data:
-                print(f"Selected patient: {full_patient_data['last_name']} {full_patient_data['first_name']} (DB ID: {patient_db_id})")
+                pass
                 
                 # Set patient data in the parent dashboard
                 if self.parent() and hasattr(self.parent(), 'load_patient_data'):
@@ -1145,17 +1380,132 @@ class DatabaseWindow(QDialog):
             selected_rows = list(set(item.row() for item in self.reports_table.selectedItems()))
             
         if selected_rows:
-            print(f"View: {len(selected_rows)} items selected")
+            pass
         else:
-            print("No items selected to view")
+            pass
             
+    def _get_selected_patient_rows(self):
+        """Return visible patient rows selected for a delete operation."""
+        return sorted({
+            item.row()
+            for item in self.patients_table.selectedItems()
+            if not self.patients_table.isRowHidden(item.row())
+        })
+
+    @staticmethod
+    def _get_selected_rows(table):
+        """Return selected visible rows from a database table."""
+        return sorted({
+            item.row()
+            for item in table.selectedItems()
+            if not table.isRowHidden(item.row())
+        })
+
+    @staticmethod
+    def _row_db_id(table, row):
+        """Return the DB id (Qt.UserRole + 1) stored on any cell of this row."""
+        for col in range(table.columnCount()):
+            item = table.item(row, col)
+            if item is None:
+                continue
+            value = item.data(Qt.UserRole + 1)
+            if value is not None:
+                return value
+        return None
+
+    def _delete_selected_records_or_reports(self):
+        """Delete only explicitly selected Records or Reports rows."""
+        record_rows = self._get_selected_rows(self.records_table)
+        report_rows = self._get_selected_rows(self.reports_table)
+
+        if not record_rows and not report_rows:
+            return False
+
+        if record_rows and report_rows:
+            if self._last_child_table is self.reports_table:
+                record_rows = []
+            else:
+                report_rows = []
+
+        is_records = bool(record_rows)
+        table = self.records_table if is_records else self.reports_table
+        rows = record_rows if is_records else report_rows
+        item_label = "record" if is_records else "report"
+        item_ids = []
+        for row in rows:
+            db_id = self._row_db_id(table, row)
+            if db_id is not None:
+                item_ids.append(db_id)
+
+        pass
+
+        if not item_ids:
+            QMessageBox.warning(
+                self,
+                "Cannot Delete",
+                f"The selected {item_label} row has no database id.\n"
+                "Please click the patient again, reselect the row and retry.",
+            )
+            table.clearSelection()
+            return True
+
+        count_label = f"{len(item_ids)} {item_label}{'' if len(item_ids) == 1 else 's'}"
+        if not self.verify_edit_password(f"deleting the selected {item_label}"):
+            return True
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Are you sure you want to delete the selected {count_label}?\n\nThe patient will not be deleted.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            pass
+            return True
+
+        success = (
+            self.db_manager.delete_sessions(item_ids)
+            if is_records
+            else self.db_manager.delete_reports(item_ids)
+        )
+        if not success:
+            QMessageBox.critical(
+                self,
+                "Delete Failed",
+                f"Could not delete the selected {count_label}. Check the console for details.",
+            )
+            return True
+
+        pass
+
+        patient = self.get_selected_patient()
+        if patient:
+            if is_records:
+                self.load_records_for_patient(patient)
+            else:
+                self.load_reports_from_database(patient)
+        else:
+            for row in sorted(rows, reverse=True):
+                table.removeRow(row)
+            if is_records:
+                self._record_group_rows = {}
+
+        table.clearSelection()
+        self._last_child_table = None
+        return True
+
     def handle_delete(self):
-        """Handle Delete button click"""
-        print("Delete action triggered")
-        
-        # Get selected patient
-        row = self.patients_table.currentRow()
-        if row < 0 or self.patients_table.isRowHidden(row):
+        """Delete all patients selected with Shift (in one DB transaction)."""
+        pass
+
+        # A selected Record/Report row takes priority over the still-highlighted
+        # patient row. This ensures Delete removes only the chosen child item.
+        if self._delete_selected_records_or_reports():
+            return
+
+        rows = self._get_selected_patient_rows()
+        if not rows:
             msg_box = QMessageBox(self)
             msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
             msg_box.setWindowTitle("No Selection")
@@ -1219,28 +1569,34 @@ class DatabaseWindow(QDialog):
             msg_box.exec_()
             return
             
-        # Get patient data
-        patient_db_id = self.patients_table.item(row, 0).data(Qt.UserRole)
-        last_name = self.patients_table.item(row, 0).text()
-        first_name = self.patients_table.item(row, 1).text()
+        patients = []
+        for row in rows:
+            id_item = self.patients_table.item(row, 0)
+            if id_item is None:
+                continue
+            patients.append({
+                "id": id_item.data(Qt.UserRole),
+                "name": f"{self.patients_table.item(row, 0).text()} "
+                        f"{self.patients_table.item(row, 1).text()}".strip(),
+            })
+        if not patients:
+            return
 
         # Deleting a patient is far more destructive than editing one, so it
         # asks for the same password the Edit button already asks for.
-        if not self.verify_edit_password("deleting this patient"):
+        action_text = "deleting this patient" if len(patients) == 1 else "deleting these patients"
+        if not self.verify_edit_password(action_text):
             return
 
-        session_count, report_count = self._count_patient_data(patient_db_id)
-
-        confirm_lines = [
-            f'Are you sure you want to delete patient "{last_name} {first_name}"?'
-        ]
-        if session_count or report_count:
-            confirm_lines.append("")
-            confirm_lines.append(
-                f"This patient has {session_count} recording(s) and "
-                f"{report_count} report(s). After deleting the patient they "
-                f"will no longer be reachable from the Records and Reports lists."
-            )
+        if len(patients) == 1:
+            confirm_lines = [f'Are you sure you want to delete patient "{patients[0]["name"]}"?']
+        else:
+            names = "\n".join(f'  • {patient["name"]}' for patient in patients)
+            confirm_lines = [
+                f"Are you sure you want to delete these {len(patients)} patients?",
+                "",
+                names,
+            ]
         confirm_lines.append("")
         confirm_lines.append("This cannot be undone.")
 
@@ -1284,8 +1640,8 @@ class DatabaseWindow(QDialog):
         no_button = msg_box.button(QMessageBox.No)
         if yes_button is not None:
             yes_button.setText("Yes")
-            yes_button.setAutoDefault(False)
-            yes_button.setDefault(False)
+            yes_button.setAutoDefault(True)
+            yes_button.setDefault(True)
             yes_button.setStyleSheet("""
                 QPushButton {
                     min-width: 54px;
@@ -1310,7 +1666,7 @@ class DatabaseWindow(QDialog):
         if no_button is not None:
             no_button.setText("No")
             no_button.setAutoDefault(False)
-            no_button.setDefault(True)
+            no_button.setDefault(False)
             no_button.setStyleSheet("""
                 QPushButton {
                     min-width: 54px;
@@ -1335,23 +1691,21 @@ class DatabaseWindow(QDialog):
         reply = msg_box.exec_()
         
         if reply == QMessageBox.Yes:
-            # Delete from database
-            success = self.db_manager.delete_patient(patient_db_id)
+            patient_ids = [patient["id"] for patient in patients]
+            success = self.db_manager.delete_patients(patient_ids)
             if success:
-                print(f"Patient {last_name} {first_name} deleted successfully")
-                # The dashboard may still be showing this patient - clear it
-                # before refreshing, so nothing gets filed against a patient
-                # row that no longer exists.
-                self._clear_dashboard_if_showing(patient_db_id)
-                # Refresh the patients list (reports/records update inside this call)
+                pass
+                for patient_db_id in patient_ids:
+                    self._clear_dashboard_if_showing(patient_db_id)
                 self.load_patients_from_database()
             else:
                 print("Failed to delete patient")
         else:
-            print("Delete cancelled")
+            pass
     
     def load_reports_from_database(self, patient=None):
         """Load reports. If a patient is provided, show only that patient's reports."""
+        self._set_report_hover_row(-1)
         if patient and patient.get('id'):
             reports = self.db_manager.get_patient_reports(patient['id'])
         else:
@@ -1401,9 +1755,9 @@ class DatabaseWindow(QDialog):
             viewer = PDFViewerWidget(pdf_path, self, allow_print=True)
             viewer.exec_()
         except Exception as error:
-            # If the internal viewer fails, open the PDF with the system default app
             print(f"Internal PDF viewer failed: {error}")
-            from PyQt5.QtGui import QDesktopServices
-            from PyQt5.QtCore import QUrl
-            if not QDesktopServices.openUrl(QUrl.fromLocalFile(pdf_path)):
-                QMessageBox.critical(self, "Cannot Open", f"Could not open the PDF:\n{pdf_path}")
+            QMessageBox.critical(
+                self,
+                "Cannot Open Report",
+                f"The report could not be displayed inside the application.\n\n{error}",
+            )

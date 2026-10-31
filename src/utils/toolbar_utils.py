@@ -101,13 +101,6 @@ def get_icon_definitions():
         #     "status_tip": "View detected events",
         #     "callback_name": "open_event_list"
         # },
-        # {
-        #     "name": "archive",
-        #     "icon": get_asset_path("icons/archive.svg"),
-        #     "tooltip": "Archive",
-        #     "status_tip": "Access archived records",
-        #     "callback_name": "open_archive"
-        # }
     ]
 
 

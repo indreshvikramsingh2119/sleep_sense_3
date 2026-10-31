@@ -13,14 +13,15 @@ from PyQt5.QtWidgets import (
     QMessageBox, QSizePolicy, QComboBox, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QAbstractItemView
 )
-from PyQt5.QtCore import Qt, QUrl
-from PyQt5.QtGui import QDesktopServices, QPainter, QPixmap, QColor
+from PyQt5.QtCore import Qt, QUrl, QSize
+from PyQt5.QtGui import QDesktopServices, QPainter, QPixmap, QColor, QIcon
 from PyQt5.QtGui import QFont
 from src.utils.db_utils import get_db_path
+from src.utils.app_paths import get_resource_path as get_asset_path
 try:
-    from src.utils.db_utils import get_visible_raw_csv_dir
+    from src.utils.db_utils import get_visible_raw_recording_dir
 except ImportError:
-    get_visible_raw_csv_dir = None
+    get_visible_raw_recording_dir = None
 
 
 class _DetectedEventDelegate(QStyledItemDelegate):
@@ -268,6 +269,8 @@ class PatientInfoWidget(QWidget):
         save_btn = QPushButton(" Save Data")
         save_btn.setObjectName("actionButton")
         save_btn.setMinimumHeight(46)  # Increased button height
+        save_btn.setIcon(QIcon(get_asset_path("icons/save.svg")))
+        save_btn.setIconSize(QSize(24, 24))
         save_btn.setStyleSheet(action_button_style)
         save_btn.clicked.connect(self.save_data)
         frame_layout.addWidget(save_btn)
@@ -276,6 +279,8 @@ class PatientInfoWidget(QWidget):
         upload_btn = QPushButton(" Upload Data")
         upload_btn.setObjectName("actionButton")
         upload_btn.setMinimumHeight(46)  # Increased button height
+        upload_btn.setIcon(QIcon(get_asset_path("icons/upload.svg")))
+        upload_btn.setIconSize(QSize(24, 24))
         upload_btn.setStyleSheet(action_button_style)
         upload_btn.clicked.connect(self.upload_data)
         frame_layout.addWidget(upload_btn)
@@ -287,7 +292,7 @@ class PatientInfoWidget(QWidget):
         if self.monitor_chart:
             self.monitor_chart.confirm_and_save_raw_data()
         else:
-            print("Monitor chart not connected")
+            pass
 
     def upload_data(self):
         """Handle upload data action"""
@@ -358,7 +363,7 @@ class PatientInfoWidget(QWidget):
             self,
             "Select Data Files to Upload",
             "",
-            "Data Files (*.csv *.edf *.txt *.json);;All Files (*)"
+            "SD PSG Data (*.smf *.bin *.dat *.sd *.raw *.psg);;All Files (*)"
         )
         if files:
             if not self.monitor_chart:
@@ -367,11 +372,11 @@ class PatientInfoWidget(QWidget):
 
             selected_file = files[0]
             lower_name = selected_file.lower()
-            if not lower_name.endswith((".csv", ".txt")):
+            if not lower_name.endswith((".smf", ".bin", ".dat", ".sd", ".raw", ".psg")):
                 QMessageBox.information(
                     self,
                     "Unsupported File",
-                    "Only CSV/TXT uploads are currently supported for graph plotting.",
+                    "Please select an SD-card binary recording (.smf/.bin/.dat/.sd/.raw/.psg).",
                 )
                 return
 
@@ -381,6 +386,8 @@ class PatientInfoWidget(QWidget):
 
             time_data, signals, jumped = self.monitor_chart.load_psg_data_and_detect(selected_file)
             if len(time_data) == 0 or not signals:
+                if getattr(self.monitor_chart, "last_load_rejected_for_short_duration", False):
+                    return
                 QMessageBox.warning(
                     self,
                     "Load Failed",
@@ -389,6 +396,7 @@ class PatientInfoWidget(QWidget):
                 return
 
             detected_events = []
+            detection_running = bool(getattr(self.monitor_chart, "is_detection_running", lambda: False)())
             if getattr(self.monitor_chart, "auto_rule_ai_result", None):
                 detected_events = list(self.monitor_chart.auto_rule_ai_result.get("events", []))
             msg_box = QMessageBox(self)
@@ -401,7 +409,10 @@ class PatientInfoWidget(QWidget):
                 f'<span style="color:#111827; font-weight:700;">File</span>'
                 f'<span style="color:#6b7280;"> : {os.path.basename(selected_file)}</span><br>'
                 + (
-                    f'<span style="color:#111827; font-weight:700;">Auto-detection</span>'
+                    '<span style="color:#111827; font-weight:700;">Auto-detection</span>'
+                    '<span style="color:#6b7280;"> : running in the background - events will appear in the panel shortly.</span><br>'
+                    if detection_running
+                    else f'<span style="color:#111827; font-weight:700;">Auto-detection</span>'
                     f'<span style="color:#6b7280;"> : {len(detected_events)} events found.</span><br>'
                     if detected_events
                     else '<span style="color:#111827; font-weight:700;">Auto-detection</span>'
@@ -493,7 +504,9 @@ class PatientInfoWidget(QWidget):
         header.addWidget(self.raw_count_label)
         frame_layout.addLayout(header)
 
-        self.raw_hint_label = QLabel("Press Save -> Yes to copy the loaded raw CSV and store patient/time in DB.")
+        self.raw_hint_label = QLabel(
+            "Press Save -> Yes to copy the loaded recording and store patient/time in DB."
+        )
         self.raw_hint_label.setStyleSheet("font-size: 12px; color: #6b7280;")
         self.raw_hint_label.setWordWrap(True)
         frame_layout.addWidget(self.raw_hint_label)
@@ -528,6 +541,8 @@ class PatientInfoWidget(QWidget):
         open_folder_btn = QPushButton(" Open Data Folder")
         open_folder_btn.setObjectName("actionButton")
         open_folder_btn.setMinimumHeight(42)
+        open_folder_btn.setIcon(QIcon(get_asset_path("icons/open-folder.svg")))
+        open_folder_btn.setIconSize(QSize(24, 24))
         open_folder_btn.setStyleSheet("""
             QPushButton#actionButton {
                 background: qlineargradient(
@@ -641,6 +656,7 @@ class PatientInfoWidget(QWidget):
         self.detected_hint_label = QLabel("Upload data to populate automatic apnea events.")
         self.detected_hint_label.setStyleSheet("font-size: 12px; color: #6b7280;")
         self.detected_hint_label.setWordWrap(True)
+        self.detected_hint_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         frame_layout.addWidget(self.detected_hint_label)
 
         self.detected_filter_dropdown = QComboBox()
@@ -651,7 +667,7 @@ class PatientInfoWidget(QWidget):
             os.path.dirname(os.path.dirname(__file__)),
             "assets",
             "dropdown-arrow.svg",
-        )
+        ).replace("\\", "/")
         self.detected_filter_dropdown.setStyleSheet("""
             QComboBox {
                 background-color: white;
@@ -745,10 +761,10 @@ class PatientInfoWidget(QWidget):
         self.raw_file_list.setItemWidget(item, row_widget)
 
     def _get_raw_data_dir(self):
-        """Raw CSV folder dhundo: helper -> last saved file -> DB folder."""
-        if get_visible_raw_csv_dir is not None:
+        """Find the recording folder: helper -> last saved file -> DB folder."""
+        if get_visible_raw_recording_dir is not None:
             try:
-                folder = get_visible_raw_csv_dir()
+                folder = get_visible_raw_recording_dir()
                 if folder and os.path.isdir(folder):
                     return folder
             except Exception:
@@ -773,17 +789,17 @@ class PatientInfoWidget(QWidget):
             self,
             "Select Saved Raw Data to Plot",
             folder,
-            "Data Files (*.csv *.txt);;All Files (*)"
+            "SD PSG Data (*.smf *.bin *.dat *.sd *.raw *.psg);;All Files (*)"
         )
         if not selected_file:
             return
 
         lower_name = selected_file.lower()
-        if not lower_name.endswith((".csv", ".txt")):
+        if not lower_name.endswith((".smf", ".bin", ".dat", ".sd", ".raw", ".psg")):
             QMessageBox.information(
                 self,
                 "Unsupported File",
-                "Only CSV/TXT saved raw data can be plotted.",
+                "Please select an SD-card binary recording (.smf/.bin/.dat/.sd/.raw/.psg).",
             )
             return
 
@@ -792,7 +808,7 @@ class PatientInfoWidget(QWidget):
         self.load_saved_raw_file(temp_item)
 
     def load_saved_raw_file(self, item):
-        """Reload a saved raw CSV/TXT directly from the visible mirror folder."""
+        """Reload a saved raw SD binary recording from the visible mirror folder."""
         if not self.monitor_chart:
             QMessageBox.warning(self, "Chart Not Available", "Monitor chart not connected.")
             return
@@ -812,6 +828,8 @@ class PatientInfoWidget(QWidget):
 
         time_data, signals, jumped = self.monitor_chart.load_psg_data_and_detect(selected_file)
         if len(time_data) == 0 or not signals:
+            if getattr(self.monitor_chart, "last_load_rejected_for_short_duration", False):
+                return
             QMessageBox.warning(
                 self,
                 "Load Failed",
@@ -860,6 +878,27 @@ class PatientInfoWidget(QWidget):
         painter.end()
         return pixmap
 
+    def _empty_events_state(self):
+        """Return (show_zero_count, message) for an EMPTY event list.
+
+        An empty list means four different things and must not all read "Upload data...":
+        no recording loaded / detection still running / detection unavailable / detection finished.
+        """
+        chart = self.monitor_chart
+        if chart is None or not getattr(chart, "loaded_recording_path", None):
+            return False, "Upload data to populate automatic apnea events."
+        try:
+            if chart.is_detection_running():
+                return False, "Detecting events..."
+        except Exception:
+            pass
+        result = getattr(chart, "auto_rule_ai_result", None)
+        if not result:
+            return False, "Automatic event detection is not available for this recording."
+        if result.get("airflow_not_connected"):
+            return True, "Airflow sensor not connected - airflow events were not scored."
+        return True, "No apnea or hypopnea events detected."
+
     def update_detected_events_list(self, events):
         """Render automatic detected events and make them clickable."""
         self.all_detected_events = [
@@ -870,14 +909,17 @@ class PatientInfoWidget(QWidget):
         ]
 
         if not self.all_detected_events:
+            show_zero, empty_message = self._empty_events_state()
             self.detected_count_label.setText("0")
-            self.detected_count_label.setVisible(False)
+            self.detected_count_label.setVisible(show_zero)
             self.detected_hint_label.setVisible(True)
             self.detected_filter_dropdown.setVisible(False)
             self.detected_events_list.setVisible(False)
             self.detected_events_list.clear()
             self.detected_events_list.setFixedHeight(0)
-            self.detected_hint_label.setText("Upload data to populate automatic apnea events.")
+            self.detected_hint_label.setText(empty_message)
+            self.detected_hint_label.adjustSize()
+            self.detected_hint_label.setMinimumHeight(self.detected_hint_label.sizeHint().height())
             return
 
         self.detected_hint_label.setText("Click an event to jump the graph to that time.")
@@ -992,17 +1034,16 @@ class PatientInfoWidget(QWidget):
         avatar_layout = QVBoxLayout(avatar_container)
         avatar_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Avatar label (SJ for Sarah Johnson)
-        avatar_label = QLabel("👤")
+        # Patient avatar
+        avatar_label = QLabel()
         avatar_label.setAlignment(Qt.AlignCenter)
+        avatar_label.setPixmap(
+            QIcon(get_asset_path("icons/patient-avatar.svg")).pixmap(QSize(86, 86))
+        )
         avatar_label.setStyleSheet("""
             QLabel {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                            stop:0 #2CA3FA, stop:1 #1E88E5);
-                color: white;
-                font-size: 28px;
-                font-weight: bold;
-                border-radius: 43px;
+                background: transparent;
+                border: none;
             }
         """)
         avatar_layout.addWidget(avatar_label)
@@ -1096,7 +1137,7 @@ class PatientInfoWidget(QWidget):
             id_label.setText(f"ID: {id_text}")
             id_label.setStyleSheet("font-size: 13px; color: #6b7280; background: transparent; border: none;")
 
-        print(f"Updated patient info: {patient_data}")
+        pass
 
     def apply_empty_patient_state(self):
         """Show a clean placeholder state when no patient is loaded."""

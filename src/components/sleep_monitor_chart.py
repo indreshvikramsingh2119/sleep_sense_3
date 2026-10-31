@@ -9,6 +9,11 @@ import os
 import sys
 import json
 import math
+import time
+import ctypes
+import hmac
+import hashlib
+from html import escape as html_escape
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -16,20 +21,24 @@ from pathlib import Path
 from scipy.signal import find_peaks
 from src.utils.db_utils import (
     get_db_path,
-    save_raw_csv_session,
+    save_raw_recording_session,
 )
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog, QApplication, QDialog, QStyle, QShortcut
+    QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog, QApplication, QDialog, QStyle, QShortcut, QOpenGLWidget
 )
-from PyQt5.QtCore import Qt, QTimer, QTime, QThread, pyqtSignal, QPoint, QRect, QMimeData, QPointF, QElapsedTimer
+from PyQt5.QtCore import Qt, QTimer, QTime, QThread, pyqtSignal, QPoint, QRect, QMimeData, QPointF, QElapsedTimer, QEvent, QEventLoop, QRectF, QSize
 import sip
 from PyQt5.QtGui import QPixmap, QScreen, QKeySequence
-from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen, QColor, QRegion
+from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen, QColor, QRegion, QSurfaceFormat
 import pyqtgraph as pg
 from .custom_viewbox import CustomViewBox
 from .amplitude_axis_properties_dialog import AmplitudeAxisPropertiesDialog
-from .airflow_display_processing import enhance_airflow_for_graph_and_detection
+from .airflow_display_processing import (
+    enhance_airflow_for_graph_and_detection,
+    add_snore_texture_to_airflow_display,
+    orient_airflow_for_display,
+)
 from ..utils.report_metrics_calculator import (
     calculate_hypoxic_burden_metrics,
     calculate_sleep_metrics,
@@ -38,53 +47,188 @@ from ..utils.report_metrics_calculator import (
 from ..utils.event_labels import canonical_event_label
 from ..utils.runtime_config import get_configured_path
 from ..utils.dialog_helpers import show_styled_warning
+from ..utils.recording_exclusions import exclusion_summary, overlaps_exclusion
+
+CLASSIC_PLOT_LOGIC = True   # True = Airflow/Thorax plotted exactly like the old file; False = newer display + smooth axis
+# True: the whole-night flow-limitation (FL) analysis runs in a worker thread, so the graphs appear first
+# and the FL markers are added a moment later.  False: old behaviour (analysis inside the first draw).
+FL_COMPUTE_IN_BACKGROUND = True
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
+
+# --- Sidecar storage: app-data location + integrity signature ---------------
+_SIDECAR_HMAC_KEY = hashlib.sha256(b"sleepsense-manual-overrides-v1").digest()
+
+
+def _app_data_root() -> Path:
+    """Return the per-user application-data directory for session state."""
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    root = base / "SleepSense" / "session_state"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _sidecar_path_for(source_path) -> Path:
+    """Return an opaque, recording-specific path in the app-data directory."""
+    digest = hashlib.sha256(str(Path(source_path).resolve()).encode("utf-8")).hexdigest()
+    return _app_data_root() / f"{digest}.dat"
+
+
+def _write_signed_json(path: Path, data: dict) -> None:
+    payload = json.dumps(data, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(_SIDECAR_HMAC_KEY, payload, hashlib.sha256).digest()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(signature)
+        handle.write(payload)
+
+
+def _read_signed_json(path: Path):
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_bytes()
+        if len(raw) < 32:
+            return None
+        signature, payload = raw[:32], raw[32:]
+        expected = hmac.new(_SIDECAR_HMAC_KEY, payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            print("⚠️ Manual label sidecar failed integrity check - ignoring file.")
+            return None
+        return json.loads(payload.decode("utf-8"))
+    except Exception as error:
+        print(f"⚠️ Could not read manual label sidecar: {error}")
+        return None
+
 from .plot_psg_data import (  # noqa: E402
-    SAMPLE_RATE_HZ as EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
+    ACTIVE_SIGNAL_CONFIGS,
+    ACTIVE_SIGNAL_NAMES,
+    SIGNAL_Y_RANGES,
+    PLOTTED_SIGNAL_NAMES,
+    CHANNEL_COLORS,
+    AUTO_RANGE_SIGNAL_NAMES,
+    HIDDEN_Y_AXIS_VALUE_CHARTS,
+    AXIS_MIN_SPAN,
+    BIPOLAR_SIGNAL_NAMES,
+    AXIS_HARD_LIMITS,
+    AXIS_ALWAYS_REFIT,
+    AXIS_TOP_HEADROOM,
+    AXIS_TOP_CEILING,
+    AUTO_RANGE_OUTLIER_IQR_FACTOR,
+    AUTO_RANGE_MIN_KEEP_FRACTION,
+    AXIS_SMOOTH_ENABLED,
+    AXIS_SMOOTH_CHARTS,
+    AXIS_SMOOTH_MARGIN,
+    AXIS_SMOOTH_NORMAL_REACH,
+    AXIS_SMOOTH_TYPICAL_PCT,
+    AXIS_SMOOTH_ZOOM_OUT_SEC,
+    AXIS_SMOOTH_ZOOM_IN_SEC,
+    AXIS_SMOOTH_SHIFT_SEC,
+    AXIS_SMOOTH_MIN_HALF,
+    AXIS_SMOOTH_OVERFLOW,
+    AXIS_SMOOTH_BAND,
+    AXIS_SMOOTH_COMPRESS_RANGE,
+    AXIS_SMOOTH_FLAT_FRACTION,
+    AXIS_SMOOTH_DEAD_FRACTION,
+    AXIS_SMOOTH_FLAT_HOLD_SEC,
+    AXIS_SMOOTH_REFERENCE_SEC,
+    THORAX_DISPLAY_LOWPASS_HZ,
+    BODY_POSITION_VIEW_MIN,
+    BODY_POSITION_VIEW_MAX,
+    SPO2_FIXED_AXIS,
+    SPO2_ARTIFACT_FLOOR,
+    SPO2_LABEL_ROOM_FRACTION,
+    PULSE_FIXED_AXIS,
     CHART_SIGNAL_MAPPING,
     BODY_POSITION_TICKS,
     BODY_POSITION_LABEL_TO_CODE,
+    BODY_POSITION_UNKNOWN,
     signal_key_for_chart,
 )
+from ..utils.sample_rate import (  # noqa: E402
+    CHANNEL_SAMPLE_RATES,
+    DETECTION_SAMPLE_RATE_HZ,
+    channel_sample_rate,
+)
+from ..utils.sd_record_reader import (  # noqa: E402
+    INSPIRATION_IS_LOW_AIRFLOW,
+    THORAX_BASELINE_REMOVE,
+    remove_slow_baseline,
+)
 
-ACTIVE_SIGNAL_CONFIGS = [
-    ("Body Position", "#3b82f6", 0.5, 10, 50, 0, 5),
-    ("Airflow", "#8b5cf6", 0.3, 15, 50, 0, 1500),
-    ("Snoring", "#ef4444", 1.0, 8, 50, 100, 400),
-    ("Thorax", "#f59e0b", 0.2, 5, 50, 0, 4095),
-    # ("Abdomen", "#10b981", 0.1, 2, 90, 0, 80),
-    ("SpO2", "#06b6d4", 1.5, 12, 50, 60, 110),
-    ("Pulse", "#f97316", 0.0, 0, 30, 40, 140),
-    ("Body Movement", "#8b5cf6", 0.1, 5, 20, 0, 100),
-]
-ACTIVE_SIGNAL_NAMES = tuple(name for name, *_rest in ACTIVE_SIGNAL_CONFIGS)
-SIGNAL_Y_RANGES = {
-    name: (y_min, y_max)
-    for name, _color, _freq, _amp, _offset, y_min, y_max in ACTIVE_SIGNAL_CONFIGS
-}
-PLOTTED_SIGNAL_NAMES = set(ACTIVE_SIGNAL_NAMES)
-CHANNEL_COLORS = {name: color for name, color, *_rest in ACTIVE_SIGNAL_CONFIGS}
-AUTO_RANGE_SIGNAL_NAMES = {"Airflow", "Thorax"}
-# How far (in IQRs from the median) a sample may sit before it is treated as an
-# outlier for Y-axis auto-scaling. Thorax often has a large settling transient
-# at the start of a recording. Without trimming, that spike can own the whole
-# Y range and make the real breathing waveform look flat on long windows.
-AUTO_RANGE_OUTLIER_IQR_FACTOR = 3.0
-# Never discard more than this fraction of the samples. If the "outliers" are
-# actually the real signal, fall back to the raw data instead.
-AUTO_RANGE_MIN_KEEP_FRACTION = 0.5
+# Binary SD recordings provide native rates per channel. This is only the
+# display/resampling fallback when a rate is absent from recording metadata.
+EXTERNAL_ARRAY_SAMPLE_RATE_HZ = DETECTION_SAMPLE_RATE_HZ
+
+# How far above the typical peak (in typical amplitudes) still counts as NORMAL breathing
+# for a chart. Anything beyond is treated as a movement and is squeezed into the compress
+# band at the top/bottom of the chart (it then looks flat-topped). Airflow gets a larger
+# value than the global AXIS_SMOOTH_NORMAL_REACH because the large recovery breaths after
+# an apnea (2-4x the amplitude of the breaths around them) are real breathing and must keep
+# their natural shape. Only the charts listed here also measure "normal" against the typical
+# amplitude of the whole recording and look ahead (AXIS_SMOOTH_LOOKAHEAD_SEC); the others
+# (Thorax) keep treating a big swing as a movement. They use AXIS_SMOOTH_NORMAL_REACH.
+AXIS_SMOOTH_NORMAL_REACH_BY_CHART = {"Airflow": 2.5}
+
+# Thorax: a 6-10 s chunk whose peak-to-peak swing is more than this many times the typical
+# breathing amplitude of the WHOLE recording is body movement, not breathing.  Such chunks
+# are left out when the window's "typical" breathing level is measured.  Without this, a
+# movement that fills ~45 % or more of the window drags the median (the "typical" level)
+# into the movement, the axis zooms out to hold it and the real breathing is drawn flat.
+AXIS_MOVEMENT_AMPLITUDE_FACTOR_BY_CHART = {"Thorax": 4.0}
+
+# The axis looks this many seconds of DATA beyond the right edge of the window (times the
+# playback speed, so it is the same number of real seconds on screen) and starts to widen
+# BEFORE a big breath scrolls in. 0 = off. Not used in All-PSG mode.
+AXIS_SMOOTH_LOOKAHEAD_SEC = 4.0
+
+# --- Snoring Y scale ---------------------------------------------------------
+# Snoring is a burst channel: long silence + short vibration packets. With a
+# per-window auto-fit the SAME spike changed height whenever a bigger spike
+# entered or left the 60 s view: Play held the Play-start scale (new big spike
+# drawn huge / clipped), Pause refit to the biggest spike (everything shrank).
+# True = one fixed scale for the whole recording (like a PSG viewer's channel
+# gain), so a spike always has the same height - paused, playing, any window.
+SNORING_FIXED_AXIS_FROM_RECORDING = True
+# Scale = this percentile of the snore-packet amplitudes of the whole night, so
+# one rare artifact cannot squash every other spike (it is clipped instead).
+SNORING_AXIS_PERCENTILE = 99.5
+# > 1.0 = spikes drawn bigger (e.g. 1.5), < 1.0 = smaller. Same for whole file.
+SNORING_AXIS_GAIN = 1.0
+
+# --- Airflow DISPLAY filter (AASM) ------------------------------------------
+# The drawn airflow uses an AASM-style 0.1-15 Hz band-pass from the raw signal.
+# Detection continues to use the enhanced copy below.
+AIRFLOW_AASM_FILTER_ENABLED = True
+AIRFLOW_AASM_LOW_HZ = 0.1
+AIRFLOW_AASM_HIGH_HZ = 15.0
+
+# Print diagnostics about repeated flat-topped breaths when debugging clipping.
+AIRFLOW_DEBUG_FLAT_TOPS = False
+
+# PERF (upload): the "<file>_airflow_debug_<time>.txt" report used to be
+# written on EVERY upload (argsort over the whole airflow signal + disk write
+# on the GUI thread). Off by default now; turn on with:
+#   $env:PSG_AIRFLOW_DEBUG_REPORT="1"
+AIRFLOW_DEBUG_REPORT_ON_UPLOAD = os.environ.get(
+    "PSG_AIRFLOW_DEBUG_REPORT", "0"
+) not in ("0", "", "false", "False")
 
 # --- SpO2 value labels -----------------------------------------------------
 # Which selected time windows (in seconds, exactly as the dropdown sets them)
 # get SpO2 numbers on the trace. Every other window shows no labels at all.
 #   RAW  -> one label per sample, the original 10s reading view
 #   AVG  -> the window is split into buckets and each bucket's MEAN is labelled
-SPO2_RAW_LABEL_WINDOWS_SEC = (10,)
-SPO2_AVG_LABEL_WINDOWS_SEC = (120, 300)
+SPO2_RAW_LABEL_WINDOWS_SEC = ()
+SPO2_AVG_LABEL_WINDOWS_SEC = (10,30,60,120, 300)
 # Safety net: never draw per-sample labels for more points than this.
 SPO2_LABEL_MAX_RAW_POINTS = 400
 # Roughly how many averaged labels to spread across the plot in AVG mode. The
@@ -100,17 +244,254 @@ SPO2_LABEL_BUCKET_STEPS_SEC = (1, 2, 5, 10, 15, 20, 30, 60)
 # the label has fallen off the trace. Labels are NEVER drawn below the line.
 SPO2_LABEL_MARK_NADIR_DROP = 0.0
 
+# What one averaged label shows: "mean" = the true average of the readings in that
+# bucket, "median" = the middle reading (the old SpO2 behaviour). They only differ
+# when a bucket holds 3+ readings and they are not all the same (e.g. it straddles a
+# step). SpO2 and Pulse labels use exactly the same rules; only the numbers differ.
+SPO2_LABEL_STAT = "mean"
+PULSE_LABEL_STAT = "mean"
+# A bucket that straddles a step must show a value that was actually recorded,
+# rather than a mix of the upper and lower plateaus.
+LABEL_STEP_SHOWS_REAL_VALUE = True
+# Where the SpO2 / Pulse numbers sit:
+#   "trace" = just above the line, so they move up and down with it
+#   "row"   = one straight row at a constant height at the top of the plot
+SPO2_LABEL_POSITION = "trace"
+PULSE_LABEL_POSITION = "trace"
+# When enabled, a DE-SATURATION box is reduced to only its start and nadir values.
+# Disabled so averaged readings remain visible throughout the dip.
+DESAT_BOX_TWO_LABELS = False
+# Number of seconds around a level change in which labels are suppressed. Zero keeps
+# the actual averaged value visible at the edge and inside a dip.
+LABEL_STEP_CLEARANCE_SEC = 0.0
+# Only a clinically visible dip/rise triggers the clearance rule. Small 1–2 point
+# SpO2 fluctuations remain labelled normally.
+LABEL_STEP_MIN_CHANGE = 5.0
+# The detector marks every stretch where the cannula delivered no breathing signal
+# (grey shading on Airflow), but until now only apnea CANDIDATES that fell inside
+# such a stretch were listed as SENSOR_OFF events, so a 2.5 h cannula-out showed up
+# as one 110 s event. With this on, every detected sensor-off stretch is itself
+# listed as a SENSOR_OFF event with its full duration, and the short reassigned
+# candidates inside it are folded into it.
+SENSOR_OFF_SEGMENTS_AS_EVENTS = True
+SENSOR_OFF_EVENT_MIN_SEC = 60.0
+SPO2_LABEL_STEP_TOLERANCE = 1.0
+PULSE_LABEL_STEP_TOLERANCE = 2.0
+# Pulse value labels on the Pulse chart (same windows / buckets as SpO2).
+PULSE_LABELS_ENABLED = True
+PULSE_LABEL_COLOR = (154, 52, 18)
+
+# Display-only SpO2 artifact handling: short zero/missing runs are bridged;
+# longer zero runs remain visible as a drop to 0. Analysis data is unchanged.
+SPO2_DISPLAY_BRIDGE_MAX_SECONDS = 60.0
+# A run of SpO2 = 0 is only an ARTIFACT (pink box, excluded from the chart's event
+# and FL filters) when it is LONGER than this many seconds. Shorter runs are not
+# artifacts: the trace is bridged over them (SPO2_DISPLAY_BRIDGE_MAX_SECONDS) and no
+# box is drawn. Kept equal to the bridge length on purpose, so a run is either
+# bridged or shown as an artifact drawn down to 0, never both, never neither.
+# 0 = every zero run is an artifact (old behaviour).
+ARTIFACT_MIN_SECONDS = SPO2_DISPLAY_BRIDGE_MAX_SECONDS
+# Warm-up readings below this threshold are replaced once at the start of the
+# recording, never separately for each visible window.
+SPO2_DISPLAY_WARMUP_MIN = 50.0
+
+# Flow limitation (FL) is a flattening of the INSPIRATORY part of the breath.
+# plateau_breaths() treats the upward part of the array it is given as
+# inspiration and looks for a flat top there. This recording/export reads HIGH
+# on inhale, so no SD inversion is applied.
+FL_DETECT_ON_INHALE_SIDE = True
+
+# Snoring chart: red = inhale (main trace), these two are drawn on top.
+SNORE_EXHALE_COLOR = "#ef4444"
+SNORE_REVIEW_COLOR = "#ef4444"
+# Same-color phase overlays add no visual information, so skip their extra
+# per-frame drawing by default. Set True to draw them again.
+SNORE_PHASE_OVERLAYS_ENABLED = False
+
+# Keep high-rate waveform rendering responsive while preserving peaks.
+HIGH_RATE_CHART_NAMES = ("Airflow", "Snoring", "Thorax")
+HIGH_RATE_PEAK_DOWNSAMPLING = False
+SNORE_PHASE_EXHALE_CODE = 2
+SNORE_PHASE_ISOLATED_CODE = 3
+
 # Physiologically possible range per channel. Anything outside is a sensor
-# dropout or a probe artifact, NOT a reading - the oximeter writes 0 when it
-# has no signal, and plotted as 0 that looks like a fall to 0% SpO2. Values
-# outside the range become gaps in the trace instead.
+# dropout or a probe artifact, NOT a physiological reading. SpO2=0 is kept as
+# a recorded no-signal marker so the chart can visibly dip to zero; it is still
+# excluded from report/medical calculations.
 SIGNAL_VALID_RANGES = {
     "spo2": (50.0, 100.0),
     "pulse": (25.0, 250.0),
 }
-# Channels whose dropouts must NOT be interpolated across. Linear interpolation
-# would invent readings the oximeter never took; a blank is the honest display.
+# SpO2/Pulse dropouts are not interpolated: inventing a reading between two
+# oximeter samples can look like a false fluctuation. Display smoothing below
+# removes isolated spikes without changing the stored/analysis data.
 SIGNAL_NO_GAP_FILL = ("spo2", "pulse")
+
+# ---------------------------------------------------------------------------
+# PSG-style desaturation post-processing (AASM + Noxturnal/Profusion/ABOSA)
+# One SpO2 drop is one event. A short SpO2/Pulse=0 artifact does not split it.
+# ---------------------------------------------------------------------------
+DESAT_POSTPROCESS_ENABLED = True
+DESAT_SPO2_VALID_RANGE = (50.0, 100.0)
+DESAT_ARTIFACT_BRIDGE_SEC = 10.0
+DESAT_RECOVERY_RISE = 2.0
+DESAT_MAX_FALL_RATE = 4.0
+DESAT_MAX_DURATION_SEC = 180.0
+# Display only: extend a desaturation box back to the first visible sample
+# below its baseline.  The detector's start/duration and all report metrics
+# remain untouched.
+DESAT_DISPLAY_ONSET_LOOKBACK_SEC = 60.0
+DESAT_DISPLAY_BASELINE_TOLERANCE = 0.25
+
+
+def _desat_valid_mask(values):
+    values = np.asarray(values, dtype=float)
+    low, high = DESAT_SPO2_VALID_RANGE
+    return np.isfinite(values) & (values >= low) & (values <= high)
+
+
+def _desat_index(times, seconds):
+    return int(np.searchsorted(times, float(seconds), side="left"))
+
+
+def merge_split_desaturations(
+    desaturations,
+    times,
+    spo2,
+    max_gap_sec=DESAT_ARTIFACT_BRIDGE_SEC,
+    recovery_rise=DESAT_RECOVERY_RISE,
+):
+    """Merge adjacent desaturations when SpO2 did not recover between them."""
+    if not desaturations:
+        return []
+
+    times = np.asarray(times, dtype=float)
+    spo2 = np.asarray(spo2, dtype=float)
+    items = sorted(
+        (dict(desaturation) for desaturation in desaturations),
+        key=lambda desaturation: float(desaturation["start_sec"]),
+    )
+    merged = [items[0]]
+
+    for next_desaturation in items[1:]:
+        current = merged[-1]
+        gap = float(next_desaturation["start_sec"]) - float(current["end_sec"])
+        start_index = _desat_index(times, current["end_sec"])
+        end_index = min(
+            len(spo2),
+            _desat_index(times, next_desaturation["start_sec"]) + 1,
+        )
+        gap_values = spo2[start_index:end_index]
+        gap_values = gap_values[_desat_valid_mask(gap_values)]
+
+        try:
+            current_nadir = float(current.get("nadir_spo2"))
+        except (TypeError, ValueError):
+            current_nadir = float("nan")
+
+        no_recovery = (
+            gap_values.size == 0
+            or not np.isfinite(current_nadir)
+            or float(gap_values.max()) < current_nadir + float(recovery_rise)
+        )
+        if gap <= float(max_gap_sec) and no_recovery:
+            current["end_sec"] = max(
+                float(current["end_sec"]),
+                float(next_desaturation["end_sec"]),
+            )
+            try:
+                next_nadir = float(next_desaturation.get("nadir_spo2"))
+            except (TypeError, ValueError):
+                next_nadir = current_nadir
+            nadirs = [
+                value
+                for value in (current_nadir, next_nadir)
+                if np.isfinite(value)
+            ]
+            if nadirs:
+                current["nadir_spo2"] = min(nadirs)
+                try:
+                    current["drop_percent"] = (
+                        float(current.get("baseline_spo2")) - current["nadir_spo2"]
+                    )
+                except (TypeError, ValueError):
+                    pass
+            current["duration_sec"] = (
+                current["end_sec"] - float(current["start_sec"])
+            )
+            current["merged_parts"] = int(current.get("merged_parts", 1)) + 1
+        else:
+            merged.append(next_desaturation)
+
+    return merged
+
+
+def flag_desat_quality(
+    desaturations,
+    times,
+    spo2,
+    max_fall_rate=DESAT_MAX_FALL_RATE,
+    max_duration_sec=DESAT_MAX_DURATION_SEC,
+):
+    """Flag unusually fast (>4%/s) or unusually long desaturations for review."""
+    times = np.asarray(times, dtype=float)
+    spo2 = np.asarray(spo2, dtype=float)
+
+    for desaturation in desaturations:
+        start_index = _desat_index(times, float(desaturation["start_sec"]) - 5.0)
+        end_index = min(
+            len(spo2),
+            _desat_index(times, desaturation["end_sec"]) + 1,
+        )
+        segment = spo2[start_index:end_index]
+        segment_times = times[start_index:end_index]
+        valid_indices = np.flatnonzero(_desat_valid_mask(segment))
+        flags = []
+
+        if valid_indices.size >= 2:
+            inside = valid_indices[
+                segment_times[valid_indices] >= float(desaturation["start_sec"])
+            ]
+            nadir_index = (
+                inside[np.argmin(segment[inside])]
+                if inside.size
+                else valid_indices[-1]
+            )
+            before = valid_indices[valid_indices < nadir_index]
+            if before.size:
+                peak_value = segment[before].max()
+                fall_start = before[segment[before] >= peak_value].max()
+                fall_seconds = max(
+                    float(segment_times[nadir_index] - segment_times[fall_start]),
+                    1e-3,
+                )
+                fall_rate = (
+                    float(segment[fall_start] - segment[nadir_index]) / fall_seconds
+                )
+                desaturation["fall_rate_pct_per_sec"] = round(fall_rate, 2)
+                if fall_rate > float(max_fall_rate):
+                    flags.append("fall_rate_too_fast")
+
+        if (
+            float(desaturation["end_sec"]) - float(desaturation["start_sec"])
+            > float(max_duration_sec)
+        ):
+            flags.append("too_long")
+
+        desaturation["quality_flags"] = flags
+        desaturation["needs_review"] = bool(flags)
+
+    return desaturations
+
+# Body Position processing settings.
+BODY_POSITION_BRIDGE_SEC = 10.0    # unknown stretches up to this long are bridged (0 = old)
+BODY_POSITION_DEFLICKER_SEC = 0.0  # 1.0 = remove position flips shorter than ~1 s
+
+# Room above every plot, in pixels. The top tick label of each chart (1400, 15,
+# 2600, 100, 110 ...) is centred on the top edge of the plot, so with the plot
+# layout margins at 0 its upper half fell outside the widget and was clipped.
+# The bottom stays flush so the time axis still hugs the container edge.
+PLOT_TOP_MARGIN_PX = 6
 
 # Deleted auto events are matched by geometry, not exact keys, so a small
 # parameter change during re-analysis does not resurrect the same event.
@@ -121,43 +502,681 @@ AIRFLOW_DROP_MIN_DURATION_SEC = 2.0
 AIRFLOW_EVENT_MAX_DURATION_SEC = None
 AIRFLOW_BASELINE_MIN_OCCURRENCE = 30
 
-# ---------------------------------------------------------------------------
-# PERF: debug logging is opt-in.
-#
-# The playback path used to emit ~20 print() calls per frame. At a 50 ms timer
-# that is ~400 writes/second to stdout; on macOS (Terminal / PyCharm console)
-# each write is synchronous and costs 0.1-1 ms, so printing alone could eat
-# more time than the actual plotting.
-#
-# Run with  PSG_DEBUG=1 python dashboard.py  to get the old chatter back.
-# ---------------------------------------------------------------------------
-PERF_DEBUG = os.environ.get("PSG_DEBUG", "0") not in ("0", "", "false", "False")
+# Prints one line per frame with the time each chart took to refresh. Turn off
+# after diagnosing playback stutter.
+PERF_FRAME_PROFILE = False
+# One summary line per second of playback (no per-frame printing, no repaint, so it
+# does not disturb the thing being measured). Enable WITHOUT editing code:
+#   PowerShell:  $env:PSG_PROFILE=1 ; python main.py
+PERF_SUMMARY = os.environ.get("PSG_PROFILE", "0") not in ("0", "", "false", "False")
+# While playing or scrubbing the Y scale is held (no per-frame "breathing"). After a jump
+# of more than half a window (event click, slider, arrows) the held scale belongs to a
+# different part of the night: Effort looks flat, Snoring clips. True = refit those two
+# channels once on such a page turn (and once per ~30 s of normal playback).
+# False = previous behaviour (scale held until pause / seek release).
+AXIS_REFIT_ON_JUMP = True
+
+def _physical_screen_width():
+    """Real pixel width of the primary display on Windows (0 if unknown).
+
+    GetSystemMetrics(SM_CXSCREEN) returns the DPI-VIRTUALISED width for a process
+    that is not DPI-aware yet.  This module is imported before QApplication exists,
+    so a 1920x1080 laptop at 150 % scaling reports 1280 and was wrongly treated as an
+    old <=1366 px screen (strip playback switched off).  DESKTOPHORZRES is the real
+    pixel width regardless of DPI awareness.
+    """
+    if os.name != "nt":
+        return 0
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        user32.GetDC.restype = ctypes.c_void_p
+        user32.GetDC.argtypes = [ctypes.c_void_p]
+        user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        gdi32.GetDeviceCaps.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        hdc = user32.GetDC(None)
+        if not hdc:
+            return 0
+        try:
+            return int(gdi32.GetDeviceCaps(hdc, 118))      # DESKTOPHORZRES
+        finally:
+            user32.ReleaseDC(None, hdc)
+    except Exception:
+        return 0
 
 
-def dbg(*args, **kwargs):
-    """No-op logger used on the per-frame hot path."""
-    if PERF_DEBUG:
-        print(*args, **kwargs)
+def _is_legacy_display():
+    """True on an old / compact screen (<=1366 physical px wide on Windows) where a
+    full bitmap-tile capture per page cannot keep up with playback. Shared by the
+    strip-mode default below and by _playback_frame_interval_ms() further down,
+    so both react the same way to the same machine."""
+    override = os.environ.get("PSG_LEGACY_DISPLAY", "").strip()
+    if override:
+        return override not in ("0", "", "false", "False")
+    try:
+        if os.name == "nt":
+            width = _physical_screen_width() or int(ctypes.windll.user32.GetSystemMetrics(0))
+            if width and width <= 1366:
+                return True
+    except Exception:
+        pass
+    return False
 
-# Playback advances 0.1 s of data per 50 ms tick, i.e. 2x wall-clock at "1.0x".
-PLAYBACK_TIME_SCALE = 2.0
+
+def _psg_playback_log(message):
+    """Append one line to <temp>/sleep_sense_playback.log.
+
+    The playback code swallows exceptions on purpose (a UI must never crash while
+    scrolling), which also hides WHY the smooth strip path was dropped for the
+    slower translate path.  This leaves a trace on the user's machine / in the .exe.
+    """
+    try:
+        import tempfile
+        path = Path(tempfile.gettempdir()) / "sleep_sense_playback.log"
+        if path.exists() and path.stat().st_size > 256 * 1024:
+            path.unlink()
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(time.strftime("%Y-%m-%d %H:%M:%S ") + str(message) + "\n")
+    except Exception:
+        pass
+
+
+# Playback strip (YouTube-style): while playing, the plot areas are covered by a canvas that only
+# scrolls pre-captured bitmap tiles of the live charts. This is the system the Effort-autoscale
+# work elsewhere in this file (hysteresis, robust fit, attack/release) was built and tuned for, and
+# it is what makes playback smooth on a normal machine - so it stays ON by default there.
+# On an old / compact display (_is_legacy_display()) capturing seven tiles per page can fall behind,
+# which shows as the strip "rebuffering": playback stalls as if stuck loading from the right edge.
+# There it falls back automatically to the lighter translate-based path instead.
+# Set PSG_STRIP=1 / 0 to force it on/off on any machine regardless of the above.
+_PSG_STRIP_ENV = os.environ.get("PSG_STRIP", "").strip()
+if _PSG_STRIP_ENV:
+    PLAYBACK_STRIP_MODE = _PSG_STRIP_ENV not in ("0", "", "false", "False")
+else:
+    PLAYBACK_STRIP_MODE = not _is_legacy_display()
+try:
+    from .live_capture_strip import LiveCaptureStrip
+except Exception:                      # module not installed -> strip mode is simply unavailable
+    LiveCaptureStrip = None
+
+
+class _PlaybackPerf:
+    """Collects playback timings and prints one health line per second.
+
+    When the playing widget is passed as `owner`, the same line is also shown in a
+    small overlay on the charts, so a screen recording carries the numbers with it.
+    """
+
+    def __init__(self):
+        self._hud = None
+        self._last_line = "[PERF] -"
+        self._reset(time.perf_counter())
+
+    def _reset(self, now):
+        self.t0 = now
+        self.gaps = []
+        self.work = []
+        self.translate = []
+        self.refreshes = []
+        self.drops = 0
+
+    def add_drop(self):
+        self.drops += 1
+
+    def add_refresh(self, total_ms, parts):
+        try:
+            self.refreshes.append((float(total_ms), dict(parts)))
+        except Exception:
+            pass
+
+    def _show_hud(self, owner, line):
+        self._last_line = line
+        hud = self._hud
+        if hud is None or sip.isdeleted(hud):
+            hud = QLabel(owner)
+            hud.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            hud.setStyleSheet(
+                "background: rgba(0, 0, 0, 190); color: #7CFC00;"
+                " font: 9pt 'Consolas'; padding: 2px 6px;"
+            )
+            hud.move(70, 2)
+            self._hud = hud
+            # F8 = one-off paint breakdown (see _perf_paint_breakdown).
+            shortcut = QShortcut(QKeySequence("F8"), owner)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(owner._perf_paint_breakdown)
+            self._f8 = shortcut
+        if owner.__dict__.get("_dwm_worker") is not None:
+            pacer = "DWM vsync"
+        else:
+            pacer = "QTimer"
+        if owner.__dict__.get("_strip") is not None:
+            pacer += "+STRIP"
+        speed = owner.__dict__.get("playback_speed", 1.0)
+        text = f"pacer={pacer} speed={speed:g}x | " + line.replace("[PERF] ", "", 1)
+        note = owner.__dict__.get("_perf_note")
+        if note and time.monotonic() < note[1]:
+            text += "\n" + note[0]
+        hud.setText(text)
+        hud.adjustSize()
+        hud.raise_()
+        hud.show()
+
+    def add_tick(self, gap_ms, work_ms, parts, owner=None):
+        # The profiler must never be able to break playback, whatever happens here.
+        try:
+            # A gap this long is a Pause -> Play resume, not a stall: skip it.
+            if gap_ms < 1500.0:
+                self.gaps.append(float(gap_ms))
+            self.work.append(float(work_ms))
+            if "translate" in parts:
+                self.translate.append(float(parts["translate"]))
+            now = time.perf_counter()
+            if now - self.t0 < 1.0:
+                return
+            if not self.gaps or not self.work:
+                self._reset(now)
+                return
+            gaps = np.asarray(self.gaps, dtype=float)
+            work = np.asarray(self.work, dtype=float)
+            line = (
+                f"[PERF] ticks={len(gaps)} dropped={self.drops} | "
+                f"gap ms avg={gaps.mean():.1f} p95={np.percentile(gaps, 95):.1f} max={gaps.max():.0f} | "
+                f"update_playback ms avg={work.mean():.1f} max={work.max():.0f}"
+            )
+            if self.translate:
+                tr = np.asarray(self.translate, dtype=float)
+                line += f" | translate avg={tr.mean():.1f} max={tr.max():.1f}"
+            if self.refreshes:
+                worst = max(self.refreshes, key=lambda item: item[0])
+                detail = " ".join(f"{k}={v:.0f}" for k, v in worst[1].items() if v >= 1.0)
+                line += f" | refresh x{len(self.refreshes)} worst={worst[0]:.0f}ms [{detail}]"
+            pass
+            if owner is not None:
+                self._show_hud(owner, line)
+            self._reset(now)
+        except Exception:
+            try:
+                self._reset(time.perf_counter())
+            except Exception:
+                pass
+
+
+_PERF = _PlaybackPerf()
+
+
+class _DwmVsyncThread(QThread):
+    """Emit at most one queued GUI tick per Windows compositor refresh."""
+
+    frame_ready = pyqtSignal()
+    failed = pyqtSignal(str)
+
+    def __init__(self, parent=None, flush_func=None):
+        super().__init__(parent)
+        self._flush_func = flush_func
+        self._tick_pending = False
+
+    def acknowledge_tick(self):
+        # Python bool access is atomic under the GIL. Keeping this tiny avoids
+        # putting a lock in the once-per-frame hot path.
+        self._tick_pending = False
+
+    @staticmethod
+    def _windows_flush():
+        if os.name != "nt":
+            raise OSError("DwmFlush is available only on Windows")
+        flush = ctypes.WinDLL("dwmapi", use_last_error=True).DwmFlush
+        flush.argtypes = []
+        flush.restype = ctypes.c_long
+        return flush
+
+    def run(self):
+        try:
+            flush = self._flush_func or self._windows_flush()
+        except Exception as error:
+            self.failed.emit(str(error))
+            return
+
+        while not self.isInterruptionRequested():
+            started = time.perf_counter()
+            try:
+                result = int(flush())
+            except Exception as error:
+                self.failed.emit(str(error))
+                return
+            if result != 0:
+                self.failed.emit(f"DwmFlush HRESULT 0x{result & 0xffffffff:08X}")
+                return
+
+            elapsed = time.perf_counter() - started
+            # A healthy DwmFlush blocks until the compositor boundary. If it
+            # returns immediately, cap the loop so a driver anomaly cannot
+            # consume a CPU core or flood Qt's event queue.
+            if elapsed < 0.002:
+                self.msleep(max(1, int(round((1.0 / 60.0 - elapsed) * 1000.0))))
+
+            if self.isInterruptionRequested():
+                return
+            if not self._tick_pending:
+                self._tick_pending = True
+                self.frame_ready.emit()
+            elif PERF_SUMMARY:
+                # The GUI has not consumed the previous compositor boundary.
+                # Count it, but never enqueue it for catch-up playback.
+                _PERF.add_drop()
+
+
+PLAYBACK_LEAN_REPAINT = True
+OVERLAY_FORCE_REPAINT = True
+
+# Keep antialiasing enabled during playback. At 1x the trace moves by less than
+# one physical pixel per captured frame; disabling AA quantizes that motion into
+# repeated frames followed by one-pixel jumps, which looks like jitter.
+PLAYBACK_DISABLE_ANTIALIAS = False
+
+
+# Playback advances in real time at the displayed 1.0x speed.
+PLAYBACK_TIME_SCALE = 1.0
+# Target 60 Hz on normal displays and 30 Hz on compact screens.  The latter
+# halves GUI paint pressure on older 1366x768 machines while the wall-clock
+# playback calculation below keeps the signal position and speed exact.
+def _playback_frame_interval_ms():
+    override = os.environ.get("PSG_FRAME_MS", "").strip()
+    if override:
+        try:
+            return max(16, min(100, int(override)))
+        except (TypeError, ValueError):
+            pass
+    if _is_legacy_display():
+        return 33
+    return 16
+
+
+PLAYBACK_FRAME_INTERVAL_MS = _playback_frame_interval_ms()
+# Keep the pre-rendered playback tiles over a Pause so the next Play starts at once instead of
+# re-rendering three pages first.  Set the environment variable PSG_STRIP_REUSE=0 to switch it off.
+PLAYBACK_STRIP_REUSE = os.environ.get("PSG_STRIP_REUSE", "1").strip() not in ("0", "", "false", "False")
+STRIP_REUSE_MAX_AGE_SEC = 300.0
+PLAYBACK_DECORATION_UPDATE_HZ = 12
+# Rebuilding seven paths (plus labels/events) is substantially more expensive
+# than moving paths that are already on screen. Re-slice the source data once
+# a second; between those refreshes translate the existing graphics at
+# the timer cadence. The result remains data-accurate but no longer advances
+# in visible chunks when one full refresh takes longer than a video frame.
+PLAYBACK_DATA_REFRESH_SEC = 1.0
+# --- Adaptive source-data refresh (fixes the right-edge stall on old PCs) ----------------------
+# During playback most frames only TRANSLATE the existing paths (cheap). Once
+# every PLAYBACK_DATA_REFRESH_SEC the seven paths are fully rebuilt from source
+# (expensive). On a slow machine that single rebuild tick takes far longer than
+# one video frame, so the window freezes for a moment and the right edge appears
+# to "load"/stutter. We therefore let the interval GROW when a rebuild is
+# measured to be expensive (fewer, better-hidden hitches) and stay short when it
+# is cheap (tighter tail on a fast machine). The off-screen tail that the cheap
+# frames scroll into view is sized from the interval ACTUALLY used, so it never
+# runs dry between rebuilds and no blank strip can appear at the right.
+# Timing/position are wall-clock based and unaffected by this.
+PLAYBACK_REFRESH_ADAPTIVE = os.environ.get("PSG_ADAPTIVE_REFRESH", "1") not in ("0", "", "false", "False")
+PLAYBACK_REFRESH_MIN_SEC = 0.8      # fastest full-rebuild cadence (fast machine)
+PLAYBACK_REFRESH_MAX_SEC = 2.5      # slowest (very slow machine) - longer tail covers it
+PLAYBACK_REFRESH_COST_SMOOTHING = 0.25   # EMA weight for the measured rebuild cost
+# A rebuild is "expensive" when it eats more than this fraction of the interval;
+# the interval is then stretched so the hitch is a smaller share of each cycle.
+PLAYBACK_REFRESH_COST_BUDGET = 0.35
+PLAYBACK_DT_SMOOTHING = 0.12
+PLAYBACK_SMOOTHING_MAX_FRAME_SEC = 0.024
+PLAYBACK_SLIDER_UPDATE_HZ = 10
+PLAYBACK_DRIFT_CORRECTION = 0.05
+PLAYBACK_RESYNC_SEC = 0.5
+PLAYBACK_SEGMENTED_LINES = False
+PLAYBACK_THIN_LINES = False
+PLAYBACK_LINE_WIDTH = 1.0   # keep <= 1.0, above 1.0 the speed-up is lost
+PLAYBACK_USE_OPENGL = False
+# Opt-in A/B test: synchronize raster playback ticks to Windows DWM instead
+# of asking a 16 ms QTimer (62.5 Hz) to feed a 60 Hz compositor.
+PLAYBACK_USE_DWM_VSYNC = (
+    os.name == "nt"
+    and os.environ.get("PSG_VSYNC", "0") not in ("0", "", "false", "False")
+)
+
+
+def configure_opengl_for_playback():
+    """Call ONCE before QApplication is created."""
+    if not PLAYBACK_USE_OPENGL:
+        return
+    fmt = QSurfaceFormat()
+    fmt.setSwapInterval(1)        # wait for vsync on every swap
+    fmt.setSamples(4)             # GPU antialiasing
+    QSurfaceFormat.setDefaultFormat(fmt)
+    pg.setConfigOptions(useOpenGL=True, enableExperimental=True)
+
+
+OVERLAY_AXIS_INSET_PX = 1.5
 
 DETECTION_IMPORT_ERROR = None
 try:
-    from ai_models.sleep_apnea.detect_apnea_from_airflow import detect_apnea_events_from_csv
+    from ai_models.sleep_apnea.detect_apnea_from_airflow import detect_apnea_events_from_recording
     from ai_models.sleep_apnea import detect_apnea_from_airflow as _apnea_rules
 except Exception as import_error:
-    detect_apnea_events_from_csv = None
+    detect_apnea_events_from_recording = None
     _apnea_rules = None
     DETECTION_IMPORT_ERROR = str(import_error)
 
-CSV_IMPORT_ERROR = None
+RECORDING_IMPORT_ERROR = None
 try:
-    from ai_models.sleep_apnea.hybrid_pipeline_common import CSV_SIGNAL_NAMES, load_sleep_csv
+    from ai_models.sleep_apnea.hybrid_pipeline_common import (
+        load_sleep_recording,
+        trim_recording_edges,
+    )
 except Exception as import_error:
-    CSV_SIGNAL_NAMES = ()
-    load_sleep_csv = None
-    CSV_IMPORT_ERROR = str(import_error)
+    load_sleep_recording = None
+    trim_recording_edges = None
+    RECORDING_IMPORT_ERROR = str(import_error)
+
+# Sensor readings are unstable immediately after setup and just before removal.
+# These edges are excluded from charts, navigation, detection and all metrics.
+RECORDING_EDGE_TRIM_SECONDS = 5.0 * 60.0
+# Effort belt "not connected" check (display).  Measured: unplugged thorax swings ~1 count of ADC
+# noise around mid-scale; a working belt swings 10-40 counts.  Keep equal to
+# THORAX_MIN_VALID_SWING_COUNTS in detect_apnea_from_airflow.py.
+THORAX_MIN_VALID_SWING_COUNTS = 4.0
+
+# Airflow "cannula not connected" check (display).  Same limit as AIRFLOW_MIN_VALID_AMPLITUDE_COUNTS
+# in detect_apnea_from_airflow.py.  Unplugged airflow measured ~1 count on the enhanced series;
+# real breathing swings tens to hundreds of counts.
+AIRFLOW_MIN_VALID_SWING_COUNTS = 10.0
+MIN_UPLOAD_RECORDING_DURATION_SEC = 60.0 * 60.0
+
+# --- Loading spinner (round rotating circle) -------------------------------
+class LoadingSpinner(QWidget):
+    """Small rotating arc, drawn with QPainter (no image files needed)."""
+
+    def __init__(self, parent=None, size=28, line_width=3, color="#2563EB"):
+        super().__init__(parent)
+        self._angle = 0
+        self._line_width = line_width
+        self._color = QColor(color)
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._rotate)
+        self.hide()
+
+    def start(self):
+        self.show()
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+        self.hide()
+
+    def _rotate(self):
+        self._angle = (self._angle + 8) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        m = self._line_width
+        rect = QRectF(m, m, self.width() - 2 * m, self.height() - 2 * m)
+        track = QColor(self._color)
+        track.setAlpha(45)
+        pen = QPen(track, self._line_width)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawEllipse(rect)
+        pen.setColor(self._color)
+        painter.setPen(pen)
+        # Qt angles are in 1/16 degree, counter-clockwise; minus = clockwise.
+        painter.drawArc(rect, int(-self._angle * 16), int(100 * 16))
+        painter.end()
+
+
+class BusyOverlay(QWidget):
+    """Semi-transparent cover with a centred spinner + message over `target`."""
+
+    def __init__(self, target, message="Loading...", spinner_size=42):
+        super().__init__(target)
+        self._target = target
+        self.setObjectName("BusyOverlay")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            "QWidget#BusyOverlay { background-color: rgba(255, 255, 255, 190);"
+            " border-radius: 8px; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        layout.setSpacing(10)
+        self.spinner = LoadingSpinner(self, size=spinner_size, line_width=4)
+        self.label = QLabel(message, self)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setWordWrap(True)
+        self.label.setStyleSheet(
+            "background: transparent; color: #1e3a8a; font-size: 12px; font-weight: 600;"
+        )
+        layout.addWidget(self.spinner, 0, Qt.AlignHCenter)
+        layout.addWidget(self.label, 0, Qt.AlignHCenter)
+        target.installEventFilter(self)
+        # Panels may add new child widgets while we are shown; keep on top.
+        self._raise_timer = QTimer(self)
+        self._raise_timer.setInterval(300)
+        self._raise_timer.timeout.connect(self.raise_)
+        self.hide()
+
+    def eventFilter(self, obj, event):
+        if obj is self._target and event.type() in (QEvent.Resize, QEvent.Show):
+            self.setGeometry(self._target.rect())
+        return False
+
+    def start(self, message=None):
+        if message is not None:
+            self.label.setText(message)
+        self.setGeometry(self._target.rect())
+        self.show()
+        self.raise_()
+        self.spinner.start()
+        self._raise_timer.start()
+
+    def stop(self):
+        self._raise_timer.stop()
+        self.spinner.stop()
+        self.hide()
+
+    def set_message(self, message):
+        self.label.setText(message)
+
+    # Swallow clicks so nothing underneath is pressed while busy.
+    def mousePressEvent(self, event):
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
+
+    def wheelEvent(self, event):
+        event.accept()
+
+
+class SpeedSelector(QWidget):
+    """Segmented playback-speed selector: [1x | 2x | 3x | 4x].  Click = exactly that speed.
+
+    It replaces the drag slider.  A QSlider moves by its pageStep (10) when its groove is
+    clicked, so on a 1..4 range every click landed on 4x (or back on 1x) instead of on the
+    clicked position.  Preset buttons are also what media / review tools use for discrete
+    speeds.  Same tiny API as QSlider (value / setValue / valueChanged, blockSignals) so the
+    rest of the code does not change.
+    """
+
+    valueChanged = pyqtSignal(int)
+
+    _STYLE = """
+        QPushButton {
+            background-color: #ffffff;
+            color: #475569;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            padding: 0px;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        QPushButton:hover { background-color: #eff6ff; color: #1d4ed8; }
+        QPushButton:checked {
+            background-color: #2563eb;
+            color: #ffffff;
+            border-color: #2563eb;
+        }
+        QPushButton#speedSegFirst {
+            border-top-left-radius: 8px;
+            border-bottom-left-radius: 8px;
+        }
+        QPushButton#speedSegLast {
+            border-top-right-radius: 8px;
+            border-bottom-right-radius: 8px;
+        }
+    """
+
+    def __init__(self, values=(1, 2, 3, 4), parent=None):
+        super().__init__(parent)
+        self.setObjectName("speedSelector")
+        self._values = tuple(int(v) for v in values)
+        self._value = self._values[0]
+        self._buttons = {}
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        gap = 3
+        layout.setSpacing(gap)
+        last = len(self._values) - 1
+        for index, speed in enumerate(self._values):
+            button = QPushButton("%dx" % speed)
+            button.setCheckable(True)
+            button.setFixedSize(30, 23)
+            button.setFocusPolicy(Qt.NoFocus)          # Space must keep toggling Play
+            button.setCursor(Qt.PointingHandCursor)
+            button.setToolTip("Playback speed %dx" % speed)
+            button.setObjectName(
+                "speedSegFirst" if index == 0 else "speedSegLast" if index == last else "speedSegMid"
+            )
+            button.clicked.connect(lambda _checked=False, value=speed: self.setValue(value))
+            layout.addWidget(button)
+            self._buttons[speed] = button
+        self.setFixedSize(30 * len(self._values) + gap * (len(self._values) - 1), 23)
+        self.setStyleSheet(self._STYLE)
+        self._show_checked()
+
+    def _show_checked(self):
+        for speed, button in self._buttons.items():
+            button.setChecked(speed == self._value)
+
+    def value(self):
+        return self._value
+
+    def setValue(self, value):
+        value = min(self._values, key=lambda candidate: abs(candidate - float(value)))
+        changed = value != self._value
+        self._value = value
+        self._show_checked()                        # also re-checks a button that was clicked twice
+        if changed:
+            self.valueChanged.emit(value)
+
+
+class PlayPauseButton(QPushButton):
+    """Play / Pause transport button with DRAWN symbols instead of text / emoji glyphs.
+
+    The old button showed "▶ Play" (a plain text glyph) and "⏸ Pause" (an emoji-font glyph that
+    Windows paints as a coloured square), so the two states did not look like one control.
+    Both states now use the same white, drawn symbol (triangle / two bars), the same label
+    style, the same width and height.  The rest of the code keeps calling
+    setText("▶ Play") / setText("⏸ Pause") / setText("Detecting..."): setText maps those to
+    the right state, so no other call site has to change.
+
+    The symbol is drawn at the screen's real pixel ratio, so Qt never has to rescale it
+    (a scaled bitmap made the triangle's slanted edges look jagged).
+    """
+
+    _ICON_SIZE = 12
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._icons = {}
+        self._state = None
+        self.setIconSize(QSize(self._ICON_SIZE, self._ICON_SIZE))
+        self.setText("Play")
+
+    def _symbol(self, kind):
+        from PyQt5.QtGui import QPolygonF
+        ratio = max(1.0, float(self.devicePixelRatioF()))
+        key = (kind, round(ratio, 2))
+        icon = self._icons.get(key)
+        if icon is None:
+            side = self._ICON_SIZE
+            pixels = max(side, int(round(side * ratio)))
+            pixmap = QPixmap(pixels, pixels)
+            pixmap.fill(Qt.transparent)
+            pixmap.setDevicePixelRatio(pixels / float(side))   # logical size stays exactly 12 x 12
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#ffffff"))
+            if kind == "play":
+                painter.drawPolygon(QPolygonF([QPointF(3.0, 1.0), QPointF(10.8, 6.0), QPointF(3.0, 11.0)]))
+            else:
+                painter.drawRoundedRect(QRectF(2.0, 1.0, 3.0, 10.0), 0.8, 0.8)
+                painter.drawRoundedRect(QRectF(7.0, 1.0, 3.0, 10.0), 0.8, 0.8)
+            painter.end()
+            icon = QIcon(pixmap)
+            self._icons[key] = icon
+        return icon
+
+    def setText(self, text):
+        label = str(text)
+        if "Pause" in label:
+            self._state = "pause"
+            super().setText("Pause")
+            self.setIcon(self._symbol("pause"))
+        elif "Play" in label:
+            self._state = "play"
+            super().setText("Play")
+            self.setIcon(self._symbol("play"))
+        else:                                           # e.g. "Detecting..." (button disabled)
+            self._state = None
+            super().setText(label)
+            self.setIcon(QIcon())
+
+    def showEvent(self, event):
+        # The screen (and so the pixel ratio) is only known once the button is shown / moved.
+        if self._state:
+            self.setIcon(self._symbol(self._state))
+        super().showEvent(event)
+
+
+from PyQt5.QtCore import QObject as _QObject
+
+
+class _StripReuseGuard(_QObject):
+    """Watches the whole application, but ONLY while the tiles of a paused Play are being kept for the next Play.
+
+    A click, key press (except Space) or wheel turn anywhere other than the Play button and the speed buttons
+    could change what the charts show (an event edited or deleted, a Y zoom, a setting).  The first such input
+    marks the kept tiles as dirty and the next Play builds them again from scratch.
+    """
+
+    _WATCHED = (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick, QEvent.Wheel, QEvent.KeyPress)
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self._owner = owner
+
+    def eventFilter(self, obj, event):
+        try:
+            kind = event.type()
+            if kind in self._WATCHED and not (kind == QEvent.KeyPress and event.key() == Qt.Key_Space):
+                if not self._owner._strip_reuse_source_ok(obj):
+                    self._owner._strip_cache_dirty = True
+        except Exception:
+            self._owner._strip_cache_dirty = True
+        return False
+
 
 class SleepMonitorChart(QWidget):
     """Sleep Monitoring Chart Widget"""
@@ -165,30 +1184,132 @@ class SleepMonitorChart(QWidget):
     time_position_updated = pyqtSignal()  # Signal when time position changes
     time_window_mode_changed = pyqtSignal(bool)  # True when All PSG mode is active
     apnea_events_updated = pyqtSignal(object)  # list[dict]
+    detection_busy_changed = pyqtSignal(bool)  # True while events are being detected
+    _fl_ready = pyqtSignal(object)  # (airflow array, flow-limited breaths) from the background FL analysis
 
     class _SaveWorker(QThread):
         """
         Keep saving in a background thread so the UI does not freeze.
         """
-        done = pyqtSignal(int, str, str)  # session_id, saved_at, copied_csv_path
+        done = pyqtSignal(int, str, str)  # session_id, saved_at, copied_recording_path
         failed = pyqtSignal(str)  # error message
 
-        def __init__(self, patient_id, source_csv_path, parent_session_id=None, parent=None):
+        def __init__(self, patient_id, source_recording_path, parent_session_id=None, parent=None):
             super().__init__(parent)
             self.patient_id = patient_id
-            self.source_csv_path = source_csv_path
+            self.source_recording_path = source_recording_path
             self.parent_session_id = parent_session_id
 
         def run(self):
             try:
-                session_id, saved_at, copied_csv_path = save_raw_csv_session(
+                session_id, saved_at, copied_recording_path = save_raw_recording_session(
                     self.patient_id,
-                    self.source_csv_path,
+                    self.source_recording_path,
                     parent_session_id=self.parent_session_id,
                 )
-                self.done.emit(session_id, saved_at, copied_csv_path)
+                self.done.emit(session_id, saved_at, copied_recording_path)
             except Exception as e:
                 self.failed.emit(str(e))
+
+    class _DetectWorker(QThread):
+        """Run the apnea detector off the UI thread."""
+        done = pyqtSignal(object, str)
+        failed = pyqtSignal(str, str)
+
+        def __init__(self, recording_path, output_dir, trim_seconds=0.0, parent=None):
+            super().__init__(parent)
+            self.recording_path = str(recording_path)
+            self.output_dir = output_dir
+            self.trim_seconds = float(trim_seconds)
+
+        def run(self):
+            try:
+                _t_detect = time.perf_counter()
+                result = detect_apnea_events_from_recording(
+                    recording_path=self.recording_path, output_dir=self.output_dir, enable_ai=False,
+                    trim_start_seconds=self.trim_seconds,
+                    trim_end_seconds=self.trim_seconds,
+                )
+                _psg_playback_log("detector worker: %.0f ms" % ((time.perf_counter() - _t_detect) * 1000.0))
+                self.done.emit(result, self.recording_path)
+            except Exception as error:
+                import traceback
+                full_traceback = traceback.format_exc()
+                # Full traceback on the console for debugging.
+                print(full_traceback, file=sys.stderr)
+                # Also keep a log file next to the detector output.
+                try:
+                    log_dir = Path(self.output_dir)
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    with open(log_dir / "detection_error.log", "a", encoding="utf-8") as log_file:
+                        log_file.write(
+                            f"\n===== {datetime.now():%Y-%m-%d %H:%M:%S} | {self.recording_path} =====\n"
+                            f"{full_traceback}"
+                        )
+                except Exception:
+                    pass
+                # Short message for the UI that includes where it failed.
+                location = ""
+                frames = traceback.extract_tb(error.__traceback__)
+                if frames:
+                    last_frame = frames[-1]
+                    location = f" (at {os.path.basename(last_frame.filename)}:{last_frame.lineno})"
+                self.failed.emit(f"{error}{location}", self.recording_path)
+
+    class _CallWorker(QThread):
+        """Run one plain-Python function in a thread (used for file parsing)."""
+
+        def __init__(self, fn, args, parent=None):
+            super().__init__(parent)
+            self.fn = fn
+            self.args = args
+            self.result = None
+            self.error = None
+
+        def run(self):
+            try:
+                self.result = self.fn(*self.args)
+            except Exception as error:
+                import traceback
+                traceback.print_exc()
+                self.error = error
+
+    class _MetricsWorker(QThread):
+        """PERF (upload): calculate_sleep_metrics + JSON save off the UI thread."""
+        done = pyqtSignal(object, object, str)  # results, json_path, recording_path
+        failed = pyqtSignal(str, str)
+
+        def __init__(self, recording_path, time_data, signals, sleep_mask, master_rate,
+                     channel_rates, channel_times, parent=None):
+            super().__init__(parent)
+            self.recording_path = str(recording_path)
+            self.time_data = time_data
+            # Shallow copy: GUI thread may swap entries while this runs.
+            self.signals = dict(signals)
+            self.sleep_mask = sleep_mask
+            self.master_rate = master_rate
+            self.channel_rates = dict(channel_rates)
+            self.channel_times = dict(channel_times)
+
+        def run(self):
+            try:
+                try:
+                    results = calculate_sleep_metrics(
+                        self.time_data, self.signals, sleep_mask=self.sleep_mask,
+                        sample_rate_hz=self.master_rate,
+                        sample_rates=self.channel_rates, channel_times=self.channel_times,
+                    )
+                except TypeError:
+                    results = calculate_sleep_metrics(
+                        self.time_data, self.signals, sleep_mask=self.sleep_mask,
+                        sample_rate_hz=self.master_rate,
+                    )
+                json_path = save_sleep_metrics_json(
+                    results, source_recording=self.recording_path,
+                )
+                self.done.emit(results, json_path, self.recording_path)
+            except Exception as error:
+                self.failed.emit(str(error), self.recording_path)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -205,7 +1326,12 @@ class SleepMonitorChart(QWidget):
         
         # Playback timer for movie-like data scrolling
         self.playback_timer = QTimer()
+        self.playback_timer.setTimerType(Qt.PreciseTimer)
         self.playback_timer.timeout.connect(self.update_playback)
+        self._dwm_worker = None
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._stop_playback_pacer)
         self.hidden_graphs_dropdown = None  # Initialize dropdown reference
         self.hidden_graphs = {}  # Store hidden graph data: {name: {container, plot_curve, color, frequency, amplitude, offset, position}}
         self.graph_order = []  # Track original order of graphs: [name1, name2, ...]
@@ -224,15 +1350,25 @@ class SleepMonitorChart(QWidget):
         
         # Time window data management
         self.spo2_full_data = None  # Store full SpO2 data (time, spo2)
+        self._spo2_display_cache = None
         self.psg_full_data = None  # Store full PSG data for all signals
         self.current_psg_data = None  # Report-friendly full-channel PSG payload
         self.current_time_offset = 0  # Current starting time for window
         self.all_psg_mode = False  # When True, render the entire recording in one view
-        self.current_csv_path = None
+        self.current_recording_path = None
         self.analysis_results = None
         self.analysis_json_path = None
         self._save_in_progress = False
         self._worker = None
+        self._detect_worker = None
+        self._detection_running = False
+        self._metrics_worker = None
+        self._pending_focus_first_event = None
+        self._upload_loading_path = None
+        self._pending_detection_result = None
+        self._upload_overlay = None
+        self._events_panel_overlay = None
+        self._events_panel_widget = None
         # Which saved session (if any) is currently loaded, and the root
         # session it belongs to. Set via set_current_session() when a Records
         # row is opened. A Re-analyze -> "New report" save uses
@@ -257,8 +1393,9 @@ class SleepMonitorChart(QWidget):
         self.selection_labels = {}  # Store selection labels for each chart
         # Dynamic selections storage - store selections in absolute time coordinates
         self.dynamic_selections = {}  # {chart_name: [{'label': 'OSA', 'start_time': 123.5, 'end_time': 125.2, 'color': '#red'}]}
-        self.loaded_csv_path = None
+        self.loaded_recording_path = None
         self.auto_rule_ai_result = None
+        self.sensor_off_shade_segments = []  # airflow sensor-off ranges drawn on the chart
         self.manual_label_overrides = {}
         self.deleted_auto_event_keys = set()
         self._deleted_span_cache = None
@@ -274,6 +1411,7 @@ class SleepMonitorChart(QWidget):
         self._body_position_cache = None
         self._airflow_axis_range_cache = None
         self._auto_axis_range_cache = {}
+        self._snoring_axis_cache = None
         self._last_events_signature = None
         self._last_detection_summary_text = None
         self._playback_busy = False
@@ -324,22 +1462,15 @@ class SleepMonitorChart(QWidget):
         self.navigate_forward()
 
     def _normalize_body_position_signal(self, values):
-        """Convert body position data into the canonical 0..4 categorical codes.
-
-        PERF: this used to run a per-sample Python loop over the WHOLE
-        recording, and it was called on every playback frame. On a 2h50m file
-        that is ~537 ms per frame; on an 8h file ~1.6 s per frame. Both paths
-        below are fully vectorised, and the result is cached by
-        _get_body_position_signal() so it is computed once per loaded file.
-        """
+        """Convert body position data into canonical 0..4 codes; 5 is a gap."""
         array = np.asarray(values)
         if array.size == 0:
             return np.asarray([], dtype=float)
 
         if array.dtype.kind in "iuf":
-            # Fast path: the CSV loader already produced numbers.
+            # Fast path: the loader already produced numbers.
             numeric = array.astype(float).reshape(-1)
-            codes = np.clip(np.rint(numeric), 0, 4)
+            codes = np.rint(numeric)
             codes[~np.isfinite(numeric)] = np.nan
         else:
             # Mixed / label data: still vectorised, no Python loop.
@@ -347,11 +1478,56 @@ class SleepMonitorChart(QWidget):
             mapped = text.map(BODY_POSITION_LABEL_TO_CODE)
             numeric = pd.to_numeric(text, errors="coerce")
             codes = mapped.astype(float).fillna(numeric).to_numpy(dtype=float)
-            codes = np.clip(np.rint(codes), 0, 4)
+            codes = np.rint(codes)
 
+        unknown_mask = ~np.isfinite(codes) | (codes >= BODY_POSITION_UNKNOWN) | (codes < 0)
+        codes = np.where(unknown_mask, np.nan, codes)
+        codes = np.clip(codes, 0, 4)
         series = pd.Series(codes)
-        series = series.interpolate(limit_direction="both").ffill().bfill().fillna(4.0)
-        return series.to_numpy(dtype=float)
+        series = series.interpolate(limit_direction="both").ffill().bfill()
+        result = np.array(series.to_numpy(dtype=float), dtype=float, copy=True)
+        result[unknown_mask] = np.nan
+        return self._finish_body_position_display(result, unknown_mask, codes)
+
+    def _finish_body_position_display(self, result, unknown_mask, codes):
+        """Bridge short unknown stretches and (optionally) de-flicker, display only."""
+        try:
+            rate = float(self.channel_rate("body_position"))
+        except Exception:
+            rate = float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+        if not np.isfinite(rate) or rate <= 0.0:
+            return result
+
+        bridge_samples = int(round(float(BODY_POSITION_BRIDGE_SEC) * rate))
+        if bridge_samples > 0 and unknown_mask.any():
+            held = pd.Series(np.where(unknown_mask, np.nan, codes)).ffill().to_numpy(dtype=float)
+            unknown_idx = np.flatnonzero(unknown_mask)
+            for run in np.split(unknown_idx, np.where(np.diff(unknown_idx) > 1)[0] + 1):
+                if not run.size or run.size > bridge_samples:
+                    continue
+                if np.isfinite(held[run[0]]):
+                    result[run] = held[run]
+                elif run[0] == 0:
+                    # The recording starts with unknown samples (the position sensor is
+                    # still warming up), so there is no earlier position to hold. Draw the
+                    # first known position back to t=0 instead of leaving the chart blank.
+                    following = run[-1] + 1
+                    if following < codes.size and np.isfinite(codes[following]):
+                        result[run] = codes[following]
+
+        window = int(round(float(BODY_POSITION_DEFLICKER_SEC) * rate))
+        if window >= 3:
+            window |= 1
+            finite = np.isfinite(result)
+            if finite.any():
+                filtered = (
+                    pd.Series(result)
+                    .rolling(window=window, center=True, min_periods=1)
+                    .median()
+                    .to_numpy(dtype=float)
+                )
+                result = np.where(finite, np.rint(filtered), np.nan)
+        return result
 
     def _get_body_position_signal(self):
         """Return the normalised body-position channel, computed once per file."""
@@ -371,10 +1547,122 @@ class SleepMonitorChart(QWidget):
     def _invalidate_signal_caches(self):
         """Drop every whole-recording derived value. Call this after loading."""
         self._body_position_cache = None
+        self._spo2_display_cache = None
+        self._slow_display_cache = {}
         self._airflow_axis_range_cache = None
         self._auto_axis_range_cache = {}
+        self._snoring_axis_cache = None
         self._last_events_signature = None
         self._last_detection_summary_text = None
+        self._exclusion_cache = None
+
+    def get_recording_exclusions(self):
+        data = self.psg_full_data or {}
+        if getattr(self, "_exclusion_cache", None) is None or getattr(self, "_exclusion_data", None) is not data:
+            self._exclusion_data = data
+            summary = exclusion_summary(
+                self.channel_time("spo2"), data.get("signals", {}).get("spo2", []),
+                self.channel_rate("spo2"),
+            )
+            if ARTIFACT_MIN_SECONDS > 0:
+                summary = dict(summary)
+                summary["excluded_segments"] = [
+                    segment for segment in summary.get("excluded_segments", [])
+                    if float(segment.get("duration_sec", 0.0)) > float(ARTIFACT_MIN_SECONDS)
+                ]
+            self._exclusion_cache = summary
+        return self._exclusion_cache
+
+    def _render_recording_exclusions(self, plot_widget):
+        """Mark analysis exclusions behind the original displayed waveforms."""
+        for item in getattr(plot_widget, "exclusion_items", []):
+            plot_widget.removeItem(item)
+        plot_widget.exclusion_items = []
+        plot_widget.exclusion_labels = []
+        offset = 0.0 if self.is_all_psg_mode() else float(self.current_time_offset)
+        width = self.get_effective_time_window_seconds()
+        for segment in self.get_recording_exclusions()["excluded_segments"]:
+            start = max(0.0, segment["start_sec"] - offset)
+            end = min(width, segment["end_sec"] - offset)
+            if end <= start:
+                continue
+            region = pg.LinearRegionItem(
+                values=(start, end), movable=False,
+                brush=pg.mkBrush(239, 68, 68, 35),
+                pen=pg.mkPen(239, 68, 68, 100, width=1),
+            )
+            region.setZValue(-5)
+            region.setAcceptedMouseButtons(Qt.NoButton)
+            region._playback_span = (
+                float(segment["start_sec"]),
+                float(segment["end_sec"]),
+            )
+            duration = segment["duration_sec"]
+            label = pg.TextItem(f"{duration:g} sec artifact", color="#b91c1c",
+                                fill=pg.mkBrush(255, 241, 242, 240), anchor=(0.5, 0))
+            label.setFont(QFont("Segoe UI", 8))
+            label.setZValue(20)
+            label.setAcceptedMouseButtons(Qt.NoButton)
+            label._playback_abs_x = (
+                float(segment["start_sec"]) + float(segment["end_sec"])
+            ) / 2.0
+            tooltip = (f"SpO2 = 0 | {segment['start_sec']:g}-{segment['end_sec']:g} sec\n"
+                       "All channels excluded from analysis; raw data retained.")
+            region.setToolTip(tooltip)
+            label.setToolTip(tooltip)
+            plot_widget.addItem(region, ignoreBounds=True)
+            plot_widget.addItem(label, ignoreBounds=True)
+            plot_widget.exclusion_items.extend((region, label))
+            plot_widget.exclusion_labels.append((label, (start + end) / 2))
+        if not getattr(plot_widget, "_exclusion_range_connected", False):
+            plot_widget.getViewBox().sigRangeChanged.connect(
+                lambda *_: self._position_exclusion_labels(plot_widget)
+            )
+            plot_widget._exclusion_range_connected = True
+        self._position_exclusion_labels(plot_widget)
+
+    @staticmethod
+    def _position_exclusion_labels(plot_widget):
+        low, high = plot_widget.getViewBox().viewRange()[1]
+        for label, midpoint in getattr(plot_widget, "exclusion_labels", []):
+            label.setPos(midpoint, high - (high - low) * 0.015)
+
+    def _render_sensor_off_segments(self, plot_widget):
+        """Grey out airflow stretches classified as sensor-off."""
+        for item in getattr(plot_widget, "sensor_off_items", []):
+            plot_widget.removeItem(item)
+        plot_widget.sensor_off_items = []
+        segments = getattr(self, "sensor_off_shade_segments", None) or []
+        if not segments:
+            return
+        offset = 0.0 if self.is_all_psg_mode() else float(self.current_time_offset)
+        width = self.get_effective_time_window_seconds()
+        for segment in segments:
+            try:
+                seg_start = float(segment.get("start_sec", 0.0))
+                seg_end = float(segment.get("end_sec", seg_start))
+            except (TypeError, ValueError):
+                continue
+            start = max(0.0, seg_start - offset)
+            end = min(width, seg_end - offset)
+            if end <= start:
+                continue
+            region = pg.LinearRegionItem(
+                values=(start, end), movable=False,
+                brush=pg.mkBrush(107, 114, 128, 40),
+                pen=pg.mkPen(107, 114, 128, 120, width=1),
+            )
+            region.setZValue(-6)
+            region.setAcceptedMouseButtons(Qt.NoButton)
+            region._playback_span = (seg_start, seg_end)
+            duration = seg_end - seg_start
+            region.setToolTip(
+                f"Airflow sensor off / cannula out | {seg_start:g}-{seg_end:g} sec "
+                f"({duration:.0f} sec)\n"
+                f"{segment.get('reason', 'airflow dead while thorax effort continues')}"
+            )
+            plot_widget.addItem(region, ignoreBounds=True)
+            plot_widget.sensor_off_items.append(region)
 
     def _get_full_signal_for_auto_range(self, chart_name):
         """Return the full-recording array backing an auto-range chart (Airflow/Thorax)."""
@@ -401,11 +1689,28 @@ class SleepMonitorChart(QWidget):
     def _configure_body_position_axis(self, plot_widget):
         """Apply categorical ticks so body position is readable on the dashboard."""
         left_axis = plot_widget.getAxis("left")
+        position_font = QFont("Arial")
+        position_font.setPointSize(9)
+        position_font.setBold(True)
+        left_axis.setTickFont(position_font)
+        left_axis.setTextPen("#000000")
+        left_axis.setPen("#000000")
+        left_axis.setWidth(32)
         try:
             left_axis.setTicks([BODY_POSITION_TICKS])
         except Exception:
             pass
-        plot_widget.setYRange(0, 4, padding=0)
+        # The categories sit at 0 (S) ... 4 (U). A view of exactly 0..4 put S on
+        # the bottom frame line (its trace was half hidden) and cut the U label
+        # in half at the top edge, so leave half a step of room on both sides.
+        plot_widget.setYRange(BODY_POSITION_VIEW_MIN, BODY_POSITION_VIEW_MAX, padding=0)
+
+    def _set_y_view(self, plot_widget, y_min, y_max):
+        """Set an exact Y view without pyqtgraph's default padding."""
+        try:
+            plot_widget.setYRange(y_min, y_max, padding=0)
+        except TypeError:
+            plot_widget.setRange(yRange=[y_min, y_max], padding=0)
 
     def scroll_chart_container_into_view(self, container):
         """Move the chart scrollbar so the clicked chart comes into view."""
@@ -425,9 +1730,9 @@ class SleepMonitorChart(QWidget):
         x_data = x_data[:point_count]
         y_data = y_data[:point_count]
         x_diffs = np.diff(x_data[np.isfinite(x_data)])
-        step = float(np.nanmedian(x_diffs)) if len(x_diffs) > 0 else (1.0 / EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+        step = float(np.nanmedian(x_diffs)) if len(x_diffs) > 0 else (1.0 / self.channel_rate("body_position"))
         if not np.isfinite(step) or step <= 0:
-            step = 1.0 / EXTERNAL_ARRAY_SAMPLE_RATE_HZ
+            step = 1.0 / self.channel_rate("body_position")
 
         step_x = np.append(x_data, x_data[-1] + step)
         return step_x, y_data
@@ -607,7 +1912,7 @@ class SleepMonitorChart(QWidget):
 
     def confirm_and_save_raw_data(self):
         """
-        Copy the raw CSV and save it.
+        Copy the raw recording and save it.
         """
         if not hasattr(self, "patient_id") or self.patient_id in ("", "--------", None):
             msg_box = QMessageBox(self)
@@ -672,11 +1977,11 @@ class SleepMonitorChart(QWidget):
             msg_box.exec_()
             return
 
-        if not getattr(self, "loaded_csv_path", None):
+        if not getattr(self, "loaded_recording_path", None):
             QMessageBox.warning(
                 self,
-                "No CSV Loaded",
-                "Please upload a CSV/TXT file before saving raw data.",
+                "No Recording Loaded",
+                "Please upload an SD-card binary recording before saving raw data.",
             )
             return
 
@@ -801,7 +2106,7 @@ class SleepMonitorChart(QWidget):
                 parent_window.take_screenshot()
                 return
 
-            if not getattr(self, "loaded_csv_path", None):
+            if not getattr(self, "loaded_recording_path", None):
                 show_styled_warning(
                     self,
                     "No Data Uploaded",
@@ -836,13 +2141,13 @@ class SleepMonitorChart(QWidget):
 
     def _do_save_async(self):
         """
-        SQLite me patient/time save hota hai aur uploaded raw CSV copy hoti hai.
+        SQLite me patient/time save hota hai aur uploaded raw recording copy hoti hai.
         """
         self._save_in_progress = True
 
         self._worker = self._SaveWorker(
             self.patient_id,
-            self.loaded_csv_path,
+            self.loaded_recording_path,
             parent_session_id=self.current_session_root_id,
             parent=self,
         )
@@ -850,7 +2155,7 @@ class SleepMonitorChart(QWidget):
         self._worker.failed.connect(self._on_save_failed)
         self._worker.start()
 
-    def _on_save_done(self, session_id: int, saved_at: str, copied_csv_path: str):
+    def _on_save_done(self, session_id: int, saved_at: str, copied_recording_path: str):
         self._save_in_progress = False
         # Remember this save as the currently-loaded session. The first save
         # in a chain (no root yet) becomes the root that later re-analyzed
@@ -863,7 +2168,7 @@ class SleepMonitorChart(QWidget):
         # later still shows them - even though the live session's view
         # gets reloaded right after this (this save flow is exclusively
         # used by Re-analyze -> "New report" - see button_functions.py).
-        self._archive_manual_label_overrides_snapshot(copied_csv_path)
+        self._archive_manual_label_overrides_snapshot(copied_recording_path)
 
         # Reload the original sidecar from disk and re-apply the current
         # overlays. This keeps the original recording's persisted manual
@@ -872,7 +2177,7 @@ class SleepMonitorChart(QWidget):
         self._load_manual_label_overrides()
         self._refresh_auto_rule_ai_views()
         label = f"Session #{session_id} - {self.patient_id}"
-        self.raw_data_saved.emit(copied_csv_path, saved_at)
+        self.raw_data_saved.emit(copied_recording_path, saved_at)
         db_path = get_db_path()
         msg_box = QMessageBox(self)
         msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
@@ -889,8 +2194,8 @@ class SleepMonitorChart(QWidget):
             f'<span style="color:#6b7280;"> : {saved_at}</span><br><br>'
             f'<span style="color:#111827; font-weight:700;">Database</span>'
             f'<span style="color:#6b7280;"> : {db_path}</span><br>'
-            f'<span style="color:#111827; font-weight:700;">CSV copy</span>'
-            f'<span style="color:#6b7280;"> : {copied_csv_path}</span>'
+            f'<span style="color:#111827; font-weight:700;">Recording copy</span>'
+            f'<span style="color:#6b7280;"> : {copied_recording_path}</span>'
         )
         msg_box.setStandardButtons(QMessageBox.Ok)
         msg_box.setStyleSheet("""
@@ -954,12 +2259,12 @@ class SleepMonitorChart(QWidget):
         self._save_in_progress = False
         QMessageBox.critical(self, "Save Failed", f"Could not save data:\n{error_msg}")
 
-    def _archive_manual_label_overrides_snapshot(self, copied_csv_path: str) -> None:
-        """Copy the current manual-label overrides next to an archived CSV copy.
+    def _archive_manual_label_overrides_snapshot(self, copied_recording_path: str) -> None:
+        """Copy current manual-label overrides next to an archived recording.
 
-        Manual events live in a sidecar "<csv-name>_manual_labels.json" file
-        next to whichever CSV is loaded (see _manual_label_overrides_path()).
-        A Re-analyze -> "New report" save archives a *copy* of the CSV under
+        Manual events live in an opaque, signed sidecar in the per-user
+        application-data directory (see _manual_label_overrides_path()).
+        A Re-analyze -> "New report" save archives a recording copy under
         a new file name, and then clears the live session's manual overrides
         so the new analysis starts clean. Without this, that clear would
         wipe out the manual events for good, since the archived copy would
@@ -978,18 +2283,13 @@ class SleepMonitorChart(QWidget):
         ):
             return
         try:
-            dest_overrides_path = Path(copied_csv_path).with_name(
-                f"{Path(copied_csv_path).stem}_manual_labels.json"
-            )
-            dest_overrides_path.parent.mkdir(parents=True, exist_ok=True)
+            dest_overrides_path = _sidecar_path_for(copied_recording_path)
             payload = {
                 "label_overrides": self.manual_label_overrides,
                 "manual_selections": manual_selections,
                 "deleted_auto_events": deleted_auto_events,
             }
-            dest_overrides_path.write_text(
-                json.dumps(payload, indent=2), encoding="utf-8"
-            )
+            _write_signed_json(dest_overrides_path, payload)
         except Exception as error:
             print(f"⚠️ Could not archive manual label overrides for the saved copy: {error}")
 
@@ -1020,8 +2320,97 @@ class SleepMonitorChart(QWidget):
         if dropdown:
             # Get the value from dropdown item data
             seconds = dropdown.itemData(index)
-            print(f"Debug: on_time_window_changed called with index {index}, seconds {seconds}")
+            pass
             self.set_time_window(seconds)
+
+    # Per-channel sample rates and native time axes.
+    def channel_rate(self, channel_name):
+        """Return a loaded channel's native sample rate."""
+        rates = (self.psg_full_data or {}).get("sample_rates") or {}
+        key = signal_key_for_chart(channel_name)
+        return channel_sample_rate(
+            key,
+            rates,
+            default=CHANNEL_SAMPLE_RATES.get(key, EXTERNAL_ARRAY_SAMPLE_RATE_HZ),
+        )
+
+    def channel_time(self, channel_name):
+        """Return the elapsed-seconds axis for a loaded channel."""
+        data = self.psg_full_data or {}
+        times = data.get("times") or {}
+        key = signal_key_for_chart(channel_name)
+        if key in times:
+            return np.asarray(times[key], dtype=float)
+        return np.asarray(data.get("time", []), dtype=float)
+
+    def master_rate(self):
+        data = self.psg_full_data or {}
+        return self.channel_rate(data.get("master_channel", "airflow"))
+
+    # Channels slower than this are drawn sample-and-hold (see _hold_for_display).
+    DISPLAY_HOLD_BELOW_HZ = 5.0
+    # Seconds over which a slow-channel step is drawn as a slope (0 = sharp step).
+    SLOW_CHANNEL_DISPLAY_RAMP_SEC = 1.0
+
+    def _hold_for_display(self, window_time, window_signal, source_rate_hz,
+                          target_rate_hz=EXTERNAL_ARRAY_SAMPLE_RATE_HZ):
+        """Resample slow channels smoothly for plotting only.
+
+        SD SpO2/Pulse readings arrive at 1 Hz.  The raw values remain
+        unchanged, but connecting them directly as steps makes every change
+        look like a sudden jump.  Interpolate only between adjacent finite
+        readings on a display grid; invalid gaps are kept as gaps.
+        """
+        window_time = np.asarray(window_time, dtype=float).reshape(-1)
+        window_signal = np.asarray(window_signal, dtype=float).reshape(-1)
+        count = min(window_time.size, window_signal.size)
+        if count == 0 or not source_rate_hz or source_rate_hz >= self.DISPLAY_HOLD_BELOW_HZ:
+            return window_time[:count], window_signal[:count]
+        source_time = window_time[:count]
+        source_signal = window_signal[:count]
+        finite_time = np.isfinite(source_time)
+        if not finite_time.any():
+            return source_time, source_signal
+
+        finite_source_time = source_time[finite_time]
+        if finite_source_time.size > 1:
+            source_step = float(np.nanmedian(np.diff(finite_source_time)))
+        else:
+            source_step = 1.0 / float(source_rate_hz)
+        if not np.isfinite(source_step) or source_step <= 0.0:
+            source_step = 1.0 / float(source_rate_hz)
+
+        sub_step = 1.0 / float(target_rate_hz)
+        start = float(source_time[0])
+        end = float(source_time[-1]) + source_step
+        display_time = np.arange(start, end + sub_step * 0.5, sub_step)
+        display_signal = np.full(display_time.shape, np.nan, dtype=float)
+
+        finite_signal = np.isfinite(source_signal) & finite_time
+        valid_indices = np.flatnonzero(finite_signal)
+        if valid_indices.size == 0:
+            return display_time, display_signal
+
+        # Interpolate each contiguous finite segment independently. This
+        # prevents a sensor-off gap from becoming a fake diagonal reading.
+        splits = np.where(np.diff(valid_indices) > 1)[0] + 1
+        for segment in np.split(valid_indices, splits):
+            if segment.size == 0:
+                continue
+            segment_time = source_time[segment]
+            segment_signal = source_signal[segment]
+            segment_end = float(segment_time[-1]) + source_step
+            in_segment = (
+                (display_time >= float(segment_time[0]))
+                & (display_time <= segment_end + sub_step * 0.5)
+            )
+            interp_time = np.concatenate([segment_time, [segment_end]])
+            interp_signal = np.concatenate([segment_signal, [segment_signal[-1]]])
+            display_signal[in_segment] = np.interp(
+                display_time[in_segment], interp_time, interp_signal
+            )
+
+        return display_time, display_signal
 
     def _get_playback_sample_count(self):
         """Return sample count from the loaded timeline, regardless of signal source."""
@@ -1041,11 +2430,30 @@ class SleepMonitorChart(QWidget):
         return 0
 
     def _get_playback_max_duration(self):
-        """Return playback duration in seconds for any loaded dataset."""
+        """Return cached playback duration in seconds for the loaded dataset."""
         sample_count = self._get_playback_sample_count()
         if sample_count <= 0:
             return 0.0
-        return sample_count / float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+        time_ref = (self.psg_full_data or {}).get("time")
+        rate = float(self.master_rate())
+        cached = self.__dict__.get("_playback_duration_cache")
+        if (
+            cached is not None
+            and cached[0] is time_ref
+            and cached[1] == sample_count
+            and cached[2] == rate
+        ):
+            return cached[3]
+        value = None
+        time_values = np.asarray([] if time_ref is None else time_ref, dtype=float)
+        if time_values.size:
+            finite = np.flatnonzero(np.isfinite(time_values))
+            if finite.size:
+                value = float(time_values[finite[-1]] - time_values[finite[0]]) + 1.0 / rate
+        if value is None:
+            value = sample_count / rate
+        self._playback_duration_cache = (time_ref, sample_count, rate, value)
+        return value
 
     def _get_playback_max_offset(self):
         """Return the last offset that still keeps the final window visible on screen."""
@@ -1101,7 +2509,7 @@ class SleepMonitorChart(QWidget):
             self.current_time_offset = max(0, self.current_time_offset - self.current_time_window)
             self.refresh_charts()
             self.update_time_position_label()
-            dbg(f"Navigated backward to: {self.current_time_offset}s (max: {max_duration:.1f}s)")
+            pass
     
     def navigate_forward(self):
         """Navigate forward in time"""
@@ -1115,30 +2523,866 @@ class SleepMonitorChart(QWidget):
             self.current_time_offset = min(max_offset, new_offset)
             self.refresh_charts()
             self.update_time_position_label()
-            dbg(f"Navigated forward to: {self.current_time_offset}s (max: {max_duration:.1f}s, max_offset: {max_offset:.1f}s)")
+            pass
     
+    def _set_playback_antialias(self, enabled):
+        """Turn curve antialiasing on/off for every chart (display only)."""
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            plot_widget = getattr(container, "plot_widget", None)
+            curve = getattr(plot_widget, "plot_curve", None)
+            opts = getattr(curve, "opts", None)
+            if isinstance(opts, dict):
+                opts["antialias"] = bool(enabled)
+
+    def _find_vsync_widget(self):
+        if not PLAYBACK_USE_OPENGL:
+            return None
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is None:
+                continue
+            try:
+                vp = plot_widget.viewport()
+            except Exception:
+                continue
+            if isinstance(vp, QOpenGLWidget) and vp.isVisible():
+                return vp
+        return None
+
+    def _start_playback_pacer(self):
+        self.playback_timer.stop()
+        self._playback_vsync_widget = None
+        self._playback_tick_pending = False
+
+        if PLAYBACK_USE_DWM_VSYNC:
+            worker = _DwmVsyncThread(parent=self)
+            worker.frame_ready.connect(self._on_dwm_frame)
+            worker.failed.connect(
+                lambda message, active=worker: self._on_dwm_failed(active, message)
+            )
+            worker.finished.connect(worker.deleteLater)
+            self._dwm_worker = worker
+            worker.start()
+            if PERF_SUMMARY:
+                pass
+            return
+
+        vp = self._find_vsync_widget()
+        if vp is not None:
+            try:
+                vp.frameSwapped.connect(self._on_frame_swapped)
+                self._playback_vsync_widget = vp
+                QTimer.singleShot(0, self.update_playback)
+                if PERF_SUMMARY:
+                    pass
+                return
+            except Exception:
+                self._playback_vsync_widget = None
+        self._start_qtimer_pacer()
+
+    def _perf_paint_breakdown(self):
+        """F8 while profiling: how long one full paint of the charts takes, and how
+        much of it disappears without antialiasing / overlay boxes / digit labels /
+        curves. One-off (stalls the UI for about a second); shown in the HUD for 25 s."""
+        try:
+            plots = []
+            for i in range(self.charts_layout.count()):
+                container = self.charts_layout.itemAt(i).widget()
+                plot_widget = getattr(container, "plot_widget", None)
+                if plot_widget is not None:
+                    plots.append(plot_widget)
+            target = getattr(self, "charts_widget", None) or self
+
+            def grab_ms(widget, repeats=3):
+                times = []
+                for _ in range(repeats):
+                    t0 = time.perf_counter()
+                    widget.grab()
+                    times.append((time.perf_counter() - t0) * 1000.0)
+                return float(np.median(times))
+
+            def with_hidden(items):
+                saved = []
+                for item in items:
+                    try:
+                        saved.append((item, item.isVisible()))
+                        item.setVisible(False)
+                    except Exception:
+                        pass
+                try:
+                    return grab_ms(target)
+                finally:
+                    for item, was_visible in saved:
+                        try:
+                            item.setVisible(was_visible)
+                        except Exception:
+                            pass
+
+            total = grab_ms(target)
+            per_chart = " ".join(
+                f"{str(getattr(pw, 'chart_name', '?')).strip()[:7]}={grab_ms(pw):.0f}"
+                for pw in plots
+            )
+            self._set_playback_antialias(False)
+            try:
+                no_aa = grab_ms(target)
+            finally:
+                self._set_playback_antialias(True)
+            overlays = [o for pw in plots for o in (getattr(pw, "selection_overlays", None) or ())]
+            digits = [
+                t
+                for pw in plots
+                for attr in ("value_labels", "pulse_value_labels")
+                for t in (getattr(pw, attr, None) or ())
+            ]
+            no_overlays = with_hidden(overlays)
+            no_digits = with_hidden(digits)
+            no_curves = with_hidden(list(self._iter_chart_curves()))
+            text = (
+                f"PAINT (one full render, ms): total={total:.0f} | no-AA={no_aa:.0f} "
+                f"no-boxes={no_overlays:.0f} no-digits={no_digits:.0f} no-curves={no_curves:.0f}"
+                f"\nper chart: {per_chart}  (boxes={len(overlays)} digits={len(digits)})"
+            )
+            pass
+            self._perf_note = (text, time.monotonic() + 25.0)
+            _PERF._show_hud(self, _PERF._last_line)
+        except Exception:
+            pass
+
+    # ---- Playback strip (opt-in: PSG_STRIP=1) -------------------------------------------------
+    def _strip_panels(self):
+        """[(plot_widget, geometry)] for every chart; geometry() = (x_origin, width, y, height) of the ViewBox
+        pixels that show the [0, window] range, in the plot widget's own coordinates."""
+        window = float(self.get_effective_time_window_seconds())
+        panels = []
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            pw = getattr(container, "plot_widget", None)
+            if pw is None or not pw.isVisible():
+                continue
+
+            def geom(pw=pw):
+                if not pw.isVisible():
+                    return (0, 0.0, 0, 0)
+                vb = pw.getViewBox()
+                vp = pw.viewport()
+                s0 = vb.mapViewToScene(QPointF(0.0, 0.0)).x()
+                s1 = vb.mapViewToScene(QPointF(window, 0.0)).x()
+                box = vb.sceneBoundingRect()
+                origin = vp.mapTo(pw, pw.mapFromScene(QPointF(s0, box.top())))
+                return (origin.x(), s1 - s0, origin.y(), int(round(box.height())))
+
+            panels.append((pw, geom))
+        return panels
+
+    def _strip_hold_y_ranges(self):
+        """Strip pages are fitted one by one, but two neighbouring pages drawn with different Y ranges make the curve
+        jump at their join (a visible cut). Keep the previous page's range unless the new fit is clearly different:
+        the data would not fit into the held range, or the trace would be drawn much smaller than it could be."""
+        held = self.__dict__.setdefault("_strip_y_held", {})
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is None or not plot_widget.isVisible():
+                continue
+            try:
+                view_box = plot_widget.getViewBox()
+                low, high = (float(value) for value in view_box.viewRange()[1])
+                key = plot_widget.chart_name
+                previous = held.get(key)
+                if previous is not None:
+                    held_low, held_high = previous
+                    span = held_high - held_low
+                    # Waveform tiles must all use one identical transform. Letting a
+                    # later page choose a "better" fit changes the Y coordinate of
+                    # the same sample on the two sides of a tile boundary, which is
+                    # seen as a broken peak while playing.  The range remembered at
+                    # Play start is exactly the range visible in the paused chart.
+                    if str(key).strip() in ("Airflow", "Thorax", "Snoring") and span > 0:
+                        view_box.setYRange(held_low, held_high, padding=0)
+                        continue
+                    contained = low >= held_low - 0.05 * span and high <= held_high + 0.05 * span
+                    similar = (high - low) >= 0.7 * span
+                    if span > 0 and contained and similar:
+                        view_box.setYRange(held_low, held_high, padding=0)
+                        continue
+                if previous is not None and PERF_SUMMARY:
+                    pass
+                held[key] = (low, high)
+            except Exception:
+                pass
+
+    def _strip_drive(self, offset):
+        """Make the live charts show a strip page using the same fitted Y scale as the paused/live view."""
+        self.current_time_offset = float(offset)
+        self._last_playback_decoration_update = 0.0      # draw digits / boxes for this page
+        self._strip_force_axis_fit = True
+        try:
+            self.refresh_charts()
+        finally:
+            self._strip_force_axis_fit = False
+        self._strip_hold_y_ranges()
+
+    def _log_strip_session(self, strip):
+        """One log line per Play: where the start-up time went (see _psg_playback_log)."""
+        def average(values):
+            return sum(values) / len(values) if values else 0.0
+        startup = strip.buffer_ms[0] if strip.buffer_ms else -1.0
+        _psg_playback_log(
+            "strip session: start-up buffering %.0f ms (first pages: drive %.0f ms + tile grabs %.0f ms each), "
+            "rebuffers=%d (%.0f ms), seeks=%d"
+            % (startup, average(strip.drive_ms[:3]), average(strip.grab_ms[:3]),
+               strip.rebuffers, strip.rebuffer_ms, strip.seeks)
+        )
+
+    def _strip_cache_watch(self, on):
+        """Install / remove the application-wide watcher that notices clicks, keys and wheel turns."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        guard = self.__dict__.get("_strip_reuse_guard")
+        if on:
+            if guard is None:
+                guard = _StripReuseGuard(self)
+                self._strip_reuse_guard = guard
+                for signal in (self.apnea_events_updated, self.detection_busy_changed, self.time_window_mode_changed):
+                    try:
+                        signal.connect(self._strip_cache_mark_dirty)
+                    except Exception:
+                        pass
+            app.installEventFilter(guard)
+        elif guard is not None:
+            app.removeEventFilter(guard)
+
+    def _strip_cache_mark_dirty(self, *_args):
+        self._strip_cache_dirty = True
+
+    def _strip_reuse_source_ok(self, obj):
+        """True when an input event came from the Play button or the speed buttons (they cannot change the charts)."""
+        allowed = [w for w in (self.__dict__.get("play_pause_btn"), self.__dict__.get("slider_speed")) if w is not None]
+        node, depth = obj, 0
+        while node is not None and depth < 10:
+            if any(node is widget for widget in allowed):
+                return True
+            node = node.parent() if hasattr(node, "parent") else None
+            depth += 1
+        return False
+
+    def _strip_held_signature(self):
+        held = self.__dict__.get("_strip_y_held") or {}
+        return {str(key).strip(): (float(value[0]), float(value[1])) for key, value in held.items() if value is not None}
+
+    def _strip_cache_clear(self):
+        self._strip_cache = None
+        self._strip_cache_watch(False)
+
+    def _strip_cache_store(self, strip):
+        """Remember the tiles of a strip that is being released because of a Pause."""
+        if not PLAYBACK_STRIP_REUSE or not hasattr(strip, "export_tiles"):
+            return
+        exported = strip.export_tiles()
+        if not exported["tiles"]:
+            return
+        self._strip_cache = {
+            "export": exported,
+            "ranges": self._strip_held_signature(),
+            "names": [str(getattr(widget, "chart_name", "")).strip() for widget, _geom in strip.panels],
+            "data": id(self.psg_full_data),
+            "time": time.monotonic(),
+        }
+        self._strip_cache_dirty = False
+        self._strip_cache_watch(True)
+
+    def _strip_try_reuse(self, strip):
+        """Right after strip.start(): take over the tiles of the previous Pause if nothing could have changed.
+
+        Layers, each of which makes the next Play build everything again when it fails: no click / key / event
+        signal since the Pause, same recording, same charts, same Y ranges, same window and layout, and finally the
+        picture the tiles would show must match the live snapshot of what is on screen now.
+        Returns a short text for the log.
+        """
+        cache = self.__dict__.get("_strip_cache")
+        self._strip_cache = None
+        self._strip_cache_watch(False)
+        if not PLAYBACK_STRIP_REUSE:
+            return "reuse off"
+        if cache is None:
+            return "no kept tiles"
+        try:
+            if self.__dict__.get("_strip_cache_dirty", False):
+                return "not reused: something was clicked / changed since the Pause"
+            if time.monotonic() - cache["time"] > STRIP_REUSE_MAX_AGE_SEC:
+                return "not reused: paused too long"
+            if cache["data"] != id(self.psg_full_data):
+                return "not reused: another recording"
+            names = [str(getattr(widget, "chart_name", "")).strip() for widget, _geom in strip.panels]
+            if names != cache["names"]:
+                return "not reused: charts changed"
+            now, before = self._strip_held_signature(), cache["ranges"]
+            if set(now) != set(before) or any(
+                abs(now[key][0] - before[key][0]) > 1e-6 * (abs(before[key][0]) + 1.0)
+                or abs(now[key][1] - before[key][1]) > 1e-6 * (abs(before[key][1]) + 1.0)
+                for key in now
+            ):
+                return "not reused: Y ranges differ"
+            taken = strip.adopt(cache["export"])
+            if not taken:
+                return "not reused: window / layout differ"
+            ok, miss_global, miss_local = strip.verify_reuse()
+            if ok:
+                return "REUSED %d kept tile pages (picture check %.3f / %.3f)" % (taken, miss_global, miss_local)
+            return "not reused: kept tiles do not match the screen (%.3f / %.3f)" % (miss_global, miss_local)
+        except Exception as error:
+            try:
+                strip.tiles.clear()
+                strip.tile_left_margin.clear()
+            except Exception:
+                pass
+            return "not reused: %r" % (error,)
+
+    def _strip_release(self, keep_tiles=False):
+        strip = self.__dict__.get("_strip")
+        self._strip = None
+        self._strip_pending_release = False
+        if strip is not None:
+            try:
+                self._log_strip_session(strip)
+            except Exception:
+                pass
+            if keep_tiles:
+                try:
+                    self._strip_cache_store(strip)
+                except Exception:
+                    self._strip_cache_clear()
+            else:
+                self._strip_cache_clear()
+            try:
+                strip.release()
+            except Exception:
+                pass
+
+    def _strip_begin(self):
+        """Called from start_playback. The live charts are showing the paused view at current_time_offset."""
+        if self.__dict__.get("_strip_pending_release"):
+            # Paused and resumed within one event-loop turn: make the live charts exact before covering them again.
+            self._strip_release(keep_tiles=True)
+            was_playing = self.is_playing
+            self.is_playing = False
+            try:
+                self.refresh_charts()
+            finally:
+                self.is_playing = was_playing
+        self._strip_release()
+        if not PLAYBACK_STRIP_MODE or LiveCaptureStrip is None or self.is_all_psg_mode():
+            _psg_playback_log(
+                "strip OFF at play start: PLAYBACK_STRIP_MODE=%s LiveCaptureStrip_imported=%s "
+                "all_psg_mode=%s legacy_display=%s physical_width=%s"
+                % (PLAYBACK_STRIP_MODE, LiveCaptureStrip is not None, self.is_all_psg_mode(),
+                   _is_legacy_display(), _physical_screen_width())
+            )
+            return
+        try:
+            # A page refresh can change an AxisItem's preferred width (for
+            # example when Airflow ticks settle from the startup range).  That
+            # changes the ViewBox width by a few pixels.  Building the strip
+            # before this layout pass makes its seconds-per-pixel differ from
+            # every subsequently captured page, so the same sample lands 1-2
+            # pixels apart at tile joins.  Settle the exact playback ranges and
+            # pending layout requests first, then measure the panels once.
+            _t_begin = time.perf_counter()
+            self._strip_y_held = {}
+            self._strip_hold_y_ranges()
+            self._strip_force_axis_fit = True
+            try:
+                self.refresh_charts()
+            finally:
+                self._strip_force_axis_fit = False
+            QApplication.sendPostedEvents()
+            QApplication.processEvents()
+            _t_refresh = (time.perf_counter() - _t_begin) * 1000.0
+            panels = self._strip_panels()
+            if not panels:
+                return
+            strip = LiveCaptureStrip(
+                panels,
+                self._strip_drive,
+                float(self.get_effective_time_window_seconds()),
+                max_offset=float(self._get_playback_max_offset()),
+                budget_ms=7.0,
+                # Integer tile motion avoids the half-pixel sampling seam that
+                # SmoothPixmapTransform can introduce between two transparent
+                # pixmaps.  Source margins still preserve the full curve at joins.
+                smooth=False,
+            )
+            strip.clock.speed = float(self.playback_speed)
+            strip.start(float(self.current_time_offset))
+            _reuse_note = self._strip_try_reuse(strip)
+            _t_total = (time.perf_counter() - _t_begin) * 1000.0
+            self._strip = strip
+            self._strip_last_pos = float(self.current_time_offset)
+            _psg_playback_log(
+                "strip ON (window=%ss speed=%sx): before the first page %.0f ms "
+                "(forced refresh %.0f ms, strip.start + tiles %.0f ms); %s"
+                % (strip.window_s, self.playback_speed, _t_total, _t_refresh, _t_total - _t_refresh, _reuse_note)
+            )
+        except Exception:
+            import traceback
+            _psg_playback_log("strip could not start -> translate fallback:\n" + traceback.format_exc())
+            self._strip_release()
+
+    def _strip_fallback(self, error=None):
+        """Anything unexpected: drop the strip and carry on with the normal live playback path."""
+        _psg_playback_log("strip dropped during playback: %r" % (error,))
+        strip = self.__dict__.get("_strip")
+        pos = float(self.current_time_offset)
+        if strip is not None:
+            try:
+                pos = float(strip.position())
+            except Exception:
+                pass
+        self._strip_release()
+        try:
+            self.current_time_offset = pos
+            self._reset_playback_transforms()
+            self.refresh_charts()
+            self._capture_playback_anchor()
+            self._last_playback_data_refresh = time.perf_counter()
+            self._reset_playback_pacing()
+            self._playback_clock.start()
+        except Exception:
+            pass
+
+    def _strip_restart(self, reason):
+        """Window size or chart layout changed while playing: rebuild the strip for the new geometry and keep playing
+        (instead of dropping to the slow normal path). Gives up after 3 restarts within 5 s."""
+        now = time.perf_counter()
+        recent = [t for t in self.__dict__.get("_strip_restarts", []) if now - t < 5.0]
+        if len(recent) >= 3:
+            self._strip_fallback(f"{reason} (kept changing)")
+            return False
+        recent.append(now)
+        self._strip_restarts = recent
+        strip = self.__dict__.get("_strip")
+        pos = float(self.current_time_offset)
+        if strip is not None and abs(pos - self._strip_last_pos) <= 1e-6:
+            try:
+                pos = float(strip.position())                  # layout-only change: continue where the strip was
+            except Exception:
+                pass
+        # (after a window change set_time_window already moved current_time_offset: continue from there)
+        pass
+        self._strip_release()
+        try:
+            self.current_time_offset = pos
+            self._reset_playback_transforms()
+            self.refresh_charts()                              # live charts show exactly `pos` in the new layout
+            self._strip_begin()
+        except Exception as error:
+            self._strip_fallback(error)
+            return False
+        if self.__dict__.get("_strip") is None:
+            self._strip_fallback(f"{reason} (strip could not restart)")
+            return False
+        return True
+
+    def _strip_tick(self, max_offset):
+        """One playback frame in strip mode. Returns False if the strip was dropped (caller continues normally)."""
+        strip = self._strip
+        try:
+            if abs(float(self.current_time_offset) - self._strip_last_pos) > 1e-6:
+                strip.seek(float(self.current_time_offset))      # event click / arrows redrew the live charts elsewhere
+            if abs(strip.clock.speed - float(self.playback_speed)) > 1e-9:
+                strip.clock.set_speed(float(self.playback_speed))
+            if abs(float(self.get_effective_time_window_seconds()) - strip.window_s) > 1e-6:
+                raise RuntimeError("time window changed")
+            if strip.geometry_changed():
+                raise RuntimeError("chart layout changed")
+            pos = strip.tick()
+        except Exception as error:
+            if str(error) in ("time window changed", "chart layout changed") and self._strip_restart(error):
+                return True
+            self._strip_fallback(error)
+            return False
+        self.current_time_offset = pos
+        self._strip_last_pos = pos
+        if pos >= max_offset - 1e-6:
+            self.pause_playback()
+            return True
+        self.update_time_position_label(throttle=True)
+        return True
+
+    def _start_qtimer_pacer(self, reason=None):
+        self.playback_timer.start(int(PLAYBACK_FRAME_INTERVAL_MS))
+        if PERF_SUMMARY:
+            suffix = f" (DWM fallback: {reason})" if reason else ""
+            pass
+
+    def _on_dwm_frame(self):
+        worker = self.__dict__.get("_dwm_worker")
+        if worker is None:
+            return
+        try:
+            if self.is_playing:
+                self.update_playback()
+        finally:
+            try:
+                worker.acknowledge_tick()
+            except RuntimeError:
+                pass
+
+    def _on_dwm_failed(self, worker, message):
+        if worker is not self.__dict__.get("_dwm_worker"):
+            return
+        self._dwm_worker = None
+        worker.requestInterruption()
+        if self.is_playing:
+            self._start_qtimer_pacer(reason=message)
+
+    def _stop_playback_pacer(self):
+        self.playback_timer.stop()
+        worker = self.__dict__.get("_dwm_worker")
+        self._dwm_worker = None
+        if worker is not None:
+            try:
+                worker.requestInterruption()
+                # DwmFlush normally returns at the next refresh boundary.
+                # Do not leave a live QThread parented to a closing widget.
+                worker.wait(250)
+            except RuntimeError:
+                pass
+        vp = self.__dict__.get("_playback_vsync_widget")
+        if vp is not None:
+            try:
+                vp.frameSwapped.disconnect(self._on_frame_swapped)
+            except Exception:
+                pass
+        self._playback_vsync_widget = None
+        self._playback_tick_pending = False
+
+    def _on_frame_swapped(self):
+        if not self.is_playing or self.__dict__.get("_playback_tick_pending"):
+            return
+        self._playback_tick_pending = True
+        QTimer.singleShot(0, self._vsync_tick)
+
+    def _vsync_tick(self):
+        self._playback_tick_pending = False
+        if not self.is_playing:
+            return
+        self.update_playback()
+        vp = self.__dict__.get("_playback_vsync_widget")
+        if vp is not None:
+            vp.update()
+
+    def _reset_playback_pacing(self):
+        self._pace_dt = None
+        self._pace_target = None
+        self._pace_shown = None
+
+    def _reset_playback_transforms(self):
+        """Remove the cheap between-refresh translation from plotted curves."""
+        for curve in self._iter_chart_curves():
+            try:
+                curve.setPos(0.0, 0.0)
+            except Exception:
+                pass
+
+    def _get_adaptive_refresh_interval(self):
+        """How often to fully rebuild the charts from source during playback.
+
+        Normally PLAYBACK_DATA_REFRESH_SEC. If a rebuild is measured (see
+        _record_refresh_cost) to cost more than PLAYBACK_REFRESH_COST_BUDGET of
+        that interval - the translate-fallback path on an old machine, since a
+        capable machine stays on the smooth strip and rarely reaches this code
+        at all - the interval is stretched (up to PLAYBACK_REFRESH_MAX_SEC) so
+        the expensive rebuild happens less often. refresh_charts() sizes its
+        off-screen tail from this same value, so the cheap translated frames
+        always have enough pre-rendered data to scroll into view and the right
+        edge never goes blank while it waits for the next rebuild.
+        """
+        base = float(PLAYBACK_DATA_REFRESH_SEC)
+        if not PLAYBACK_REFRESH_ADAPTIVE:
+            return base
+        cost = self.__dict__.get("_refresh_cost_ema_sec")
+        if cost is None:
+            return base
+        budget = base * float(PLAYBACK_REFRESH_COST_BUDGET)
+        if cost <= budget:
+            return base
+        stretched = cost / float(PLAYBACK_REFRESH_COST_BUDGET)
+        return max(float(PLAYBACK_REFRESH_MIN_SEC), min(float(PLAYBACK_REFRESH_MAX_SEC), stretched))
+
+    def _record_refresh_cost(self, cost_sec):
+        """Smoothed (EMA) cost of a full chart rebuild, used by
+        _get_adaptive_refresh_interval(). A couple of slow rebuilds move the
+        average; one slow outlier (a GC pause, a background task) does not."""
+        if not PLAYBACK_REFRESH_ADAPTIVE:
+            return
+        prev = self.__dict__.get("_refresh_cost_ema_sec")
+        self._refresh_cost_ema_sec = (
+            float(cost_sec) if prev is None
+            else prev + (float(cost_sec) - prev) * float(PLAYBACK_REFRESH_COST_SMOOTHING)
+        )
+
+    def _capture_playback_anchor(self):
+        """Remember item positions produced by the latest full data refresh."""
+        self._playback_data_anchor_offset = float(self.current_time_offset)
+        self._last_playback_data_refresh = time.perf_counter()
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is None:
+                continue
+            for attr in ("value_labels", "pulse_value_labels"):
+                for label in getattr(plot_widget, attr, ()) or ():
+                    try:
+                        label._playback_anchor_pos = QPointF(label.pos())
+                    except Exception:
+                        pass
+
+    def _translate_playback_items(self):
+        """Move existing paths/labels for a smooth frame without rebuilding."""
+        anchor = self.__dict__.get("_playback_data_anchor_offset")
+        if anchor is None:
+            self._capture_playback_anchor()
+            return
+        delta = max(0.0, float(self.current_time_offset) - float(anchor))
+        for curve in self._iter_chart_curves():
+            try:
+                curve.setPos(-delta, 0.0)
+            except Exception:
+                pass
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is None:
+                continue
+            for attr in ("value_labels", "pulse_value_labels"):
+                for label in getattr(plot_widget, attr, ()) or ():
+                    try:
+                        base = getattr(label, "_playback_anchor_pos", None)
+                        if base is not None:
+                            label.setPos(base.x() - delta, base.y())
+                    except Exception:
+                        pass
+
+            # These background regions are independent GraphicsItems. Moving
+            # only plot_curve made them freeze for a second and then snap on
+            # the next full refresh. Keep every timed region on the same clock.
+            for attr in ("exclusion_items", "sensor_off_items"):
+                for item in getattr(plot_widget, attr, ()) or ():
+                    try:
+                        span = getattr(item, "_playback_span", None)
+                        if span is not None and hasattr(item, "setRegion"):
+                            item.setRegion(
+                                [
+                                    float(span[0]) - self.current_time_offset,
+                                    float(span[1]) - self.current_time_offset,
+                                ]
+                            )
+                        abs_x = getattr(item, "_playback_abs_x", None)
+                        if abs_x is not None and hasattr(item, "pos"):
+                            pos = item.pos()
+                            item.setPos(float(abs_x) - self.current_time_offset, pos.y())
+                    except Exception:
+                        pass
+
+        for item, _plot_widget in getattr(self, "airflow_event_items", ()) or ():
+            try:
+                span = getattr(item, "_playback_span", None)
+                if span is not None and hasattr(item, "setRegion"):
+                    item.setRegion(
+                        [
+                            float(span[0]) - self.current_time_offset,
+                            float(span[1]) - self.current_time_offset,
+                        ]
+                    )
+            except Exception:
+                pass
+
+        # Event / DE-SATURATION boxes: re-place every frame so they glide with the curve
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is None:
+                continue
+            vb = plot_widget.getViewBox()
+            for overlay in getattr(plot_widget, "selection_overlays", ()) or ():
+                try:
+                    span = getattr(overlay, "_playback_span", None)
+                    if span is None or sip.isdeleted(overlay) or not overlay.isVisible():
+                        continue
+                    x0 = plot_widget.mapFromScene(
+                        vb.mapViewToScene(QPointF(span[0] - self.current_time_offset, 0))
+                    ).x()
+                    x1 = plot_widget.mapFromScene(
+                        vb.mapViewToScene(QPointF(span[1] - self.current_time_offset, 0))
+                    ).x()
+                    self._place_overlay_in_plot_area(plot_widget, overlay, x0, x1)
+                except Exception:
+                    pass
+
+    def _next_playback_offset(self, elapsed_sec):
+        rate = float(PLAYBACK_TIME_SCALE) * float(self.playback_speed)
+        current = float(self.current_time_offset)
+        shown = getattr(self, "_pace_shown", None)
+        if shown is None or abs(current - shown) > 1e-6:
+            self._pace_target = current
+            self._pace_dt = None
+
+        self._pace_target = float(self._pace_target) + elapsed_sec * rate
+
+        alpha = float(PLAYBACK_DT_SMOOTHING)
+        steady = (
+            self._pace_dt is not None
+            and elapsed_sec <= float(PLAYBACK_SMOOTHING_MAX_FRAME_SEC)
+            and abs(elapsed_sec - self._pace_dt) <= 0.5 * self._pace_dt
+        )
+        if self._pace_dt is None or alpha <= 0.0 or not steady:
+            self._pace_dt = elapsed_sec
+        else:
+            self._pace_dt += alpha * (elapsed_sec - self._pace_dt)
+
+        new_offset = current + self._pace_dt * rate
+        error = self._pace_target - new_offset
+        if abs(error) > float(PLAYBACK_RESYNC_SEC) * max(rate, 1e-6):
+            new_offset = self._pace_target
+        else:
+            new_offset += error * float(PLAYBACK_DRIFT_CORRECTION)
+        new_offset = max(new_offset, current)
+        self._pace_shown = new_offset
+        return new_offset
+
+    def _iter_chart_curves(self):
+        for i in range(self.charts_layout.count()):
+            container = self.charts_layout.itemAt(i).widget()
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is None:
+                continue
+            curve = getattr(plot_widget, "plot_curve", None)
+            if curve is not None:
+                yield curve
+            for extra in (getattr(plot_widget, "snore_phase_curves", None) or {}).values():
+                yield extra
+
+    def _set_playback_thin_lines(self, enabled):
+        saved = self.__dict__.setdefault("_playback_saved_pens", {})
+        if enabled:
+            for curve in self._iter_chart_curves():
+                try:
+                    if id(curve) in saved:
+                        continue
+                    pen = curve.opts.get("pen")
+                    if pen is None:
+                        continue
+                    original = QPen(pg.mkPen(pen))
+                    if original.widthF() <= float(PLAYBACK_LINE_WIDTH):
+                        continue
+                    thin = QPen(original)
+                    thin.setWidthF(float(PLAYBACK_LINE_WIDTH))
+                    saved[id(curve)] = (curve, original)
+                    curve.setPen(thin)
+                except Exception:
+                    pass
+        else:
+            for curve, original in list(saved.values()):
+                try:
+                    curve.setPen(original)
+                except Exception:
+                    pass
+            saved.clear()
+
+    def _set_playback_segmented_lines(self, enabled):
+        saved = self.__dict__.setdefault("_playback_saved_line_modes", {})
+        if enabled:
+            for curve in self._iter_chart_curves():
+                try:
+                    inner = getattr(curve, "curve", None)
+                    if inner is None or "segmentedLineMode" not in inner.opts:
+                        continue
+                    if curve.opts.get("stepMode") or id(inner) in saved:
+                        continue
+                    saved[id(inner)] = (inner, inner.opts["segmentedLineMode"])
+                    inner.opts["segmentedLineMode"] = "on"
+                except Exception:
+                    pass
+        else:
+            for inner, previous in list(saved.values()):
+                try:
+                    inner.opts["segmentedLineMode"] = previous
+                    inner.update()
+                except Exception:
+                    pass
+            saved.clear()
+
+    @staticmethod
+    def _x_range_is_current(plot_widget, vb, window_seconds):
+        try:
+            tol = max(1e-6, float(window_seconds) * 1e-6)
+            low, high = vb.viewRange()[0]
+            axis_range = getattr(plot_widget.getAxis("bottom"), "range", None)
+            return bool(
+                abs(low) <= tol
+                and abs(high - window_seconds) <= tol
+                and axis_range is not None
+                and abs(axis_range[0]) <= tol
+                and abs(axis_range[1] - window_seconds) <= tol
+            )
+        except Exception:
+            return False
+
     def start_playback(self):
         """Start movie-like playback of recorded data"""
         sample_count = self._get_playback_sample_count()
-        dbg(f"🎬 start_playback called - active sample count: {sample_count}")
+
+        if self.is_detection_running():
+            QMessageBox.information(
+                self,
+                "Detection in progress",
+                "Please wait for event detection to finish before starting playback.",
+            )
+            return
+        pass
         
         if self.block_if_selection_active():
-            dbg("🎬 Blocked by selection active")
+            pass
             return
         
         if sample_count == 0:
-            dbg("No data available for playback")
+            pass
             return
 
         self.current_time_offset = min(self.current_time_offset, self._get_playback_max_offset())
         
         self.is_playing = True
         self._playback_busy = False
+        # Show the new state at once.  Starting the strip below needs ~0.5 s (a full refresh plus
+        # three pre-rendered pages); the button used to change only after all of that, so Play
+        # looked ignored while Pause (which only stops a clock) reacted instantly.
+        if self.play_pause_btn:
+            self.play_pause_btn.setText("⏸ Pause")
+            self.play_pause_btn.repaint()
+        if PLAYBACK_DISABLE_ANTIALIAS:
+            self._set_playback_antialias(False)
+        if PLAYBACK_THIN_LINES:
+            self._set_playback_thin_lines(True)
+        elif PLAYBACK_SEGMENTED_LINES:
+            self._set_playback_segmented_lines(True)
+        self._reset_playback_pacing()
+        self._last_playback_decoration_update = 0.0
+        self._reset_playback_transforms()
+        self._capture_playback_anchor()
+        # The first timer tick primes the off-screen right-hand data tail.
+        self._last_playback_data_refresh = 0.0
         self._playback_clock.start()
-        dbg(f"🎬 Timer starting... is_playing: {self.is_playing}")
-        self.playback_timer.start(50)  
-        dbg(f"🎬 Timer started - Timer active: {self.playback_timer.isActive()}")
-        dbg("▶️ Playback started")
+        self._pause_hold = None
+        self._strip_begin()
+        pass
+        self._start_playback_pacer()
+        pass
+        pass
         
         # Update button if it exists
         if self.play_pause_btn:
@@ -1146,15 +3390,130 @@ class SleepMonitorChart(QWidget):
     
     def pause_playback(self):
         """Pause the playback"""
+        was_playing = self.is_playing
         self.is_playing = False
         self._playback_busy = False
         self._playback_clock.invalidate()
-        self.playback_timer.stop()
-        dbg("⏸ Playback paused")
+        self._stop_playback_pacer()
+        self._reset_playback_pacing()
+        strip = self.__dict__.get("_strip")
+        if strip is not None:
+            try:
+                self.current_time_offset = float(strip.stop())
+            except Exception:
+                pass
+            try:
+                self._remember_play_scale_for_pause()
+            except Exception:
+                pass
+            if getattr(self, "_slider_scrubbing", False):
+                try:
+                    self.refresh_charts()                 # bring the live charts to the paused position, then uncover them
+                except Exception:
+                    pass
+                self._strip_release()
+            else:
+                self._strip_pending_release = True        # released by _refresh_after_pause once the live charts are exact
+        # Pause button while playing: do NOT drag the curves back to their one-second
+        # anchor here. That painted a frame 6-30 px behind, and the refresh below then
+        # jumped forward again (visible back-and-forth on every click). That refresh
+        # resets the translation and redraws at the exact offset in one step.
+        if not was_playing and not getattr(self, "_slider_scrubbing", False):
+            self._reset_playback_transforms()
+        if PLAYBACK_THIN_LINES:
+            self._set_playback_thin_lines(False)
+        if PLAYBACK_SEGMENTED_LINES:
+            self._set_playback_segmented_lines(False)
+        if PLAYBACK_DISABLE_ANTIALIAS and was_playing:
+            self._set_playback_antialias(True)
+        pass
+        if was_playing:
+            try:
+                self.update_time_position_label()
+            except Exception:
+                pass
         
         # Update button if it exists
         if self.play_pause_btn:
             self.play_pause_btn.setText("▶ Play")
+
+        # Paint the button state first, then do one complete refresh so
+        # throttled labels and overlays settle at the exact paused position.
+        if was_playing:
+            QTimer.singleShot(0, self._refresh_after_pause)
+
+    def _remember_play_scale_for_pause(self):
+        """Pause must show what Play showed.
+
+        While playing, Airflow / Thorax run on ONE fixed Y range (the range of the paused
+        chart at Play start).  On Pause the charts used to be re-fitted from scratch to the
+        visible window: a movement or a big recovery breath in that window then widened
+        the axis and the breathing was drawn flat.  Real PSG keeps the gain fixed, so the
+        Play range is remembered here and re-applied while paused (see
+        _pause_hold_range).  "R" returns to it, seeking far away / another time window /
+        another recording / Play again drop it.
+        """
+        held = self.__dict__.get("_strip_y_held") or {}
+        ranges = {}
+        for key, value in held.items():
+            name = str(key).strip()
+            if name in AXIS_SMOOTH_CHARTS and value is not None:
+                low, high = float(value[0]), float(value[1])
+                if high > low:
+                    ranges[name] = (low, high)
+        if not ranges:
+            self._pause_hold = None
+            return
+        self._pause_hold = {
+            "ranges": ranges,
+            "offset": float(self.current_time_offset),
+            "window": float(self.get_effective_time_window_seconds()),
+            "data": id(self.psg_full_data),
+        }
+
+    def _pause_hold_range(self, chart_name):
+        """The remembered Play range for this chart while it is still valid, else None."""
+        hold = self.__dict__.get("_pause_hold")
+        if not hold or self.is_playing:
+            return None
+        try:
+            window = float(self.get_effective_time_window_seconds())
+            offset = float(self.current_time_offset)
+            if (
+                hold["data"] != id(self.psg_full_data)
+                or abs(window - hold["window"]) > 1e-6
+                or abs(offset - hold["offset"]) > 3.0 * hold["window"]
+            ):
+                self._pause_hold = None
+                return None
+            return hold["ranges"].get(str(chart_name).strip())
+        except Exception:
+            self._pause_hold = None
+            return None
+
+    def _log_axis_widened(self, chart_name, typical, normal_span, recording_amplitude, movement_limit):
+        """Diagnostics (throttled): the fitted axis is much wider than the breathing."""
+        now = time.monotonic()
+        if now - float(self.__dict__.get("_axis_widen_log_t", -1e9)) < 2.0:
+            return
+        self._axis_widen_log_t = now
+        _psg_playback_log(
+            "%s axis wider than the breathing: typical amplitude=%.4g, axis span=%.4g (x%.1f), "
+            "recording amplitude=%s, movement limit=%s, offset=%.1fs"
+            % (chart_name, typical, normal_span, normal_span / max(typical, 1e-9),
+               recording_amplitude, movement_limit,
+               float(getattr(self, "current_time_offset", 0.0) or 0.0))
+        )
+
+    def _refresh_after_pause(self):
+        if self.is_playing or getattr(self, "_slider_scrubbing", False):
+            return
+        try:
+            self.refresh_charts()
+        except Exception:
+            pass
+        if self.__dict__.get("_strip_pending_release") and not self.is_playing:
+            self._strip_release(keep_tiles=True)
     
     def update_playback(self):
         """Main playback logic - auto-scroll data like a movie.
@@ -1173,8 +3532,14 @@ class SleepMonitorChart(QWidget):
         if not self.is_playing:
             return
         if self._playback_busy:
+            if PERF_SUMMARY:
+                _PERF.add_drop()
             return
 
+        _tick_t0 = time.perf_counter()
+        _tick_gap = (_tick_t0 - self.__dict__.get("_last_tick_t", _tick_t0)) * 1000.0
+        self._last_tick_t = _tick_t0
+        _tick_parts = {}
         self._playback_busy = True
         try:
             max_time = self._get_playback_max_duration()
@@ -1184,29 +3549,61 @@ class SleepMonitorChart(QWidget):
 
             max_offset = self._get_playback_max_offset()
 
+            if self.__dict__.get("_strip") is not None:
+                if self._strip_tick(max_offset):
+                    return
+
             # Move forward by the real elapsed time, scaled to keep the old feel.
             if self._playback_clock.isValid():
                 elapsed_sec = self._playback_clock.restart() / 1000.0
             else:
                 self._playback_clock.start()
-                elapsed_sec = 0.05
+                elapsed_sec = float(PLAYBACK_FRAME_INTERVAL_MS) / 1000.0
             # Guard against a huge jump after the app was blocked/minimised.
             elapsed_sec = min(elapsed_sec, 0.5)
-            self.current_time_offset += elapsed_sec * PLAYBACK_TIME_SCALE * self.playback_speed
+            self.current_time_offset = self._next_playback_offset(elapsed_sec)
 
             # Stop on the last full visible window instead of sliding past the final samples.
             if self.current_time_offset >= max_offset:
                 self.current_time_offset = max_offset
+                self._reset_playback_pacing()
                 self.refresh_charts()
                 self.update_time_position_label()
                 self.pause_playback()
-                dbg(f"🎬 Playback completed: offset={max_offset:.1f}s, duration={max_time:.1f}s")
+                pass
                 return
 
-            self.refresh_charts()
-            self.update_time_position_label()
+            _t = time.perf_counter()
+            last_refresh = self.__dict__.get("_last_playback_data_refresh", 0.0)
+            refresh_interval = self._get_adaptive_refresh_interval()
+            if _t - last_refresh >= refresh_interval:
+                # setData() does not clear a GraphicsItem translation, so put
+                # paths back at their origin before replacing their samples.
+                self._reset_playback_transforms()
+                self.refresh_charts()
+                self._capture_playback_anchor()
+                refresh_cost_sec = time.perf_counter() - _t
+                _tick_parts["refresh"] = refresh_cost_sec * 1000.0
+                self._record_refresh_cost(refresh_cost_sec)
+            else:
+                self._translate_playback_items()
+                _tick_parts["translate"] = (time.perf_counter() - _t) * 1000.0
+            _t = time.perf_counter()
+            self.update_time_position_label(throttle=True)
+            _tick_parts["label+slider"] = (time.perf_counter() - _t) * 1000.0
         finally:
             self._playback_busy = False
+            if PERF_SUMMARY:
+                _PERF.add_tick(
+                    _tick_gap,
+                    (time.perf_counter() - _tick_t0) * 1000.0,
+                    _tick_parts,
+                    owner=self,
+                )
+            if PERF_FRAME_PROFILE and _tick_parts:
+                inside = (time.perf_counter() - _tick_t0) * 1000.0
+                detail = " ".join(f"{key}={value:.0f}" for key, value in _tick_parts.items())
+                pass
     
     def toggle_playback(self):
         """Toggle between play and pause states"""
@@ -1225,11 +3622,12 @@ class SleepMonitorChart(QWidget):
         }
 
         if isinstance(speed_value, (int, float)):
-            self.playback_speed = float(speed_value) / 2.0
+            # Slider position is the actual multiplier: 1 -> 1x, 2 -> 2x, 3 -> 3x, 4 -> 4x.
+            self.playback_speed = min(4.0, max(1.0, float(speed_value)))
         else:
             self.playback_speed = speed_map.get(str(speed_value), 1.0)
             if hasattr(self, "slider_speed"):
-                target_value = int(round(self.playback_speed * 2.0))
+                target_value = int(round(self.playback_speed))
                 if self.slider_speed.value() != target_value:
                     self.slider_speed.blockSignals(True)
                     self.slider_speed.setValue(target_value)
@@ -1238,9 +3636,9 @@ class SleepMonitorChart(QWidget):
         if hasattr(self, "lbl_speed_val"):
             self.lbl_speed_val.setText(f"{self.playback_speed:.1f}x")
 
-        print(f"?? Playback speed changed to {self.playback_speed}x")
+        pass
     
-    def update_time_position_label(self):
+    def update_time_position_label(self, throttle=False):
         """Show the visible time range and the complete recording duration."""
         total_duration = self._get_playback_max_duration()
         def format_time(value):
@@ -1261,12 +3659,18 @@ class SleepMonitorChart(QWidget):
         self.time_position_label.setText(format_time(displayed_time))
         
         # Emit signal to update dashboard slider
+        if throttle and PLAYBACK_SLIDER_UPDATE_HZ > 0:
+            now = time.perf_counter()
+            last = self.__dict__.get("_last_time_position_emit", 0.0)
+            if now - last < 1.0 / float(PLAYBACK_SLIDER_UPDATE_HZ):
+                return
+            self._last_time_position_emit = now
         self.time_position_updated.emit()
     
     def refresh_charts_minimal(self):
         """Refresh charts during playback without overlay rendering to prevent crashes"""
         window_seconds = self.get_effective_time_window_seconds()
-        dbg(f"Debug: refresh_charts_minimal called with time_window={window_seconds}s, offset={self.current_time_offset}s")
+        pass
         
         for i in range(self.charts_layout.count()):
             container = self.charts_layout.itemAt(i).widget()
@@ -1279,7 +3683,7 @@ class SleepMonitorChart(QWidget):
                 vb = plot_widget.getViewBox()
                 if hasattr(vb, 'set_time_window_limits'):
                     vb.set_time_window_limits(0, window_seconds)
-                    dbg(f"Debug: ViewBox limits set to 0 → {window_seconds}, offset={self.current_time_offset}")
+                    pass
                 
                 # Force X-axis range to be fixed (prevent any sliding)
                 plot_widget.setXRange(0, window_seconds, padding=0)
@@ -1310,14 +3714,90 @@ class SleepMonitorChart(QWidget):
                 plot_widget.setXRange(0, plot_end, padding=0)
         plot_widget.fixed_range = [0, plot_end]
 
+    @staticmethod
+    def _visible_part_of_playback_tail(x_data, y_data, window_seconds, data_window_seconds):
+        """Return the samples that lie inside the visible window.
+
+        refresh_charts() asks for window + tail seconds while playing so that the
+        translated curve always has data to scroll into view.  The tail must be
+        DRAWN but must not feed axis fitting / event marking / labels, which assume
+        the arrays cover the visible window only.  When there is no tail (not
+        playing, all-PSG mode) the arrays are returned untouched.
+        """
+        if float(data_window_seconds) <= float(window_seconds) + 1e-9:
+            return x_data, y_data
+        x = np.asarray(x_data, dtype=float).reshape(-1)
+        y = np.asarray(y_data, dtype=float).reshape(-1)
+        n = min(x.size, y.size)
+        if n == 0:
+            return x[:0], y[:0]
+        inside = int(np.count_nonzero(x[:n] <= float(window_seconds)))
+        keep = min(n, inside + 2)          # +2: same slight overshoot the old slice had
+        return x[:keep], y[:keep]
+
     def refresh_charts(self):
         """Refresh all charts with current time window and offset."""
+        # Event jumps, the slider arrows and navigation can move current_time_offset
+        # while playback is running. The per-frame translation on the curves belongs
+        # to the OLD offset; leaving it on a freshly drawn window pushes the curves
+        # off screen until the next periodic refresh. Always draw from a clean origin.
+        self._reset_playback_transforms()
         window_seconds = self.get_effective_time_window_seconds()
-        dbg(f"Debug: refresh_charts called with time_window={window_seconds}s, offset={self.current_time_offset}s")
+        # Keep a small off-screen tail ready at the right edge. During the
+        # cheap translated frames this tail scrolls into view, preventing a
+        # blank strip before the next source-data refresh.
+        data_window_seconds = float(window_seconds)
+        if self.is_playing and not self.is_all_psg_mode():
+            _refresh_interval = self._get_adaptive_refresh_interval()
+            # Between two rebuilds the curve is only translated, so the tail must cover
+            # (interval + the rebuild's own cost + a short GUI stall) * speed seconds.
+            # 1.5x was only just enough on a clean run; 2x + 0.5 s leaves real margin.
+            data_window_seconds += max(
+                0.5,
+                _refresh_interval * float(self.playback_speed) * 2.0 + 0.5,
+            )
+        pass
 
-        self.setUpdatesEnabled(False)
+        _frame_t0 = time.perf_counter()
+        _chart_ms = {}
+        _lean = bool(
+            PLAYBACK_LEAN_REPAINT
+            and (self.is_playing or getattr(self, "_slider_scrubbing", False))
+        )
+        # Changing a Y range while the trace is moving reads as a full-graph
+        # flash. Keep the current scale locked throughout playback and refit
+        # once after pause/seek.
+        # Strip pages are rendered infrequently in the background. Fit them
+        # through the same axis path as a paused refresh so weak Effort/Snoring
+        # signals do not look compressed during Play and jump larger on Pause.
+        _axis_updates_due = not _lean or bool(self.__dict__.get("_strip_force_axis_fit", False))
+        _axis_page_turn = False
+        if _lean and AXIS_REFIT_ON_JUMP:
+            _fit_at = self.__dict__.get("_axis_fit_offset")
+            _turn = max(
+                self.AXIS_OFFSET_JUMP_MIN_SEC,
+                min(float(window_seconds) * 0.5, self.AXIS_OFFSET_JUMP_MAX_SEC),
+            )
+            _axis_page_turn = (
+                _fit_at is None
+                or abs(float(self.current_time_offset) - float(_fit_at)) > _turn
+            )
+        if _axis_updates_due or _axis_page_turn:
+            self._axis_fit_offset = float(self.current_time_offset)
+        _decorations_due = True
+        if _lean and PLAYBACK_DECORATION_UPDATE_HZ > 0:
+            _now = time.perf_counter()
+            _last = self.__dict__.get("_last_playback_decoration_update", 0.0)
+            _decorations_due = (
+                _now - _last >= 1.0 / float(PLAYBACK_DECORATION_UPDATE_HZ)
+            )
+            if _decorations_due:
+                self._last_playback_decoration_update = _now
+        if not _lean:
+            self.setUpdatesEnabled(False)
         try:
             for i in range(self.charts_layout.count()):
+                _chart_t0 = time.perf_counter()
                 container = self.charts_layout.itemAt(i).widget()
                 if not (container and hasattr(container, 'plot_widget')):
                     continue
@@ -1329,30 +3809,31 @@ class SleepMonitorChart(QWidget):
                     vb = plot_widget.getViewBox()
                     if hasattr(vb, 'set_time_window_limits'):
                         vb.set_time_window_limits(0, window_seconds)
-                        dbg(f"Debug: ViewBox limits set to 0 -> {window_seconds}, offset={self.current_time_offset}")
+                        pass
 
                     # Store current Y-axis range to preserve zoom settings
                     if not hasattr(plot_widget, 'zoom_y_range'):
                         plot_widget.zoom_y_range = None
 
-                    self.remove_stale_plot_curves(plot_widget)
+                    if _decorations_due:
+                        self.remove_stale_plot_curves(plot_widget)
 
                     if not self.is_all_psg_mode():
-                        plot_widget.setXRange(0, window_seconds, padding=0)
-                        bottom_axis = plot_widget.getAxis('bottom')
-                        bottom_axis.setRange(0, window_seconds)
+                        if not self._x_range_is_current(plot_widget, vb, window_seconds):
+                            plot_widget.setXRange(0, window_seconds, padding=0)
+                            bottom_axis = plot_widget.getAxis('bottom')
+                            bottom_axis.setRange(0, window_seconds)
 
-                        if hasattr(vb, 'setRange'):
-                            try:
-                                # Force the exact range with no padding
-                                vb.setRange(x=[0, window_seconds], padding=0)
-                            except Exception:
-                                plot_widget.setXRange(0, window_seconds, padding=0)
+                            if hasattr(vb, 'setRange'):
+                                try:
+                                    vb.setRange(x=[0, window_seconds], padding=0)
+                                except Exception:
+                                    plot_widget.setXRange(0, window_seconds, padding=0)
 
                         plot_widget.fixed_range = [0, window_seconds]
 
                     if chart_name.strip() == "SpO2":
-                        x, y = self.get_spo2_data_for_window(window_seconds, self.current_time_offset)
+                        x, y = self.get_spo2_data_for_window(data_window_seconds, self.current_time_offset)
                         if len(x) > 0 and len(y) > 0:
                             # Update normal line plot
                             plot_widget.plot_curve.setData(x, y, connect='finite')
@@ -1361,34 +3842,28 @@ class SleepMonitorChart(QWidget):
                             if self.is_all_psg_mode():
                                 self._apply_all_psg_mode_range_fixup(plot_widget, vb, x, window_seconds)
 
-                            if hasattr(plot_widget, 'axis_properties'):
+                            zero_axis_applied = self._apply_spo2_zero_axis_if_needed(
+                                plot_widget, y
+                            )
+                            if zero_axis_applied:
+                                pass
+                            elif hasattr(plot_widget, 'axis_properties') and _axis_updates_due:
                                 properties = plot_widget.axis_properties
                                 low_value = properties.get('low_value', 35.0)
                                 high_value = properties.get('high_value', 100.0)
-                                finite_spo2 = y[np.isfinite(y)]
-                                has_zero_dropout = bool(
-                                    finite_spo2.size and np.nanmin(finite_spo2) <= 0.0
-                                )
-                                if has_zero_dropout:
-                                    low_value = 0.0
-                                    high_value = max(float(high_value), 100.0)
                                 try:
                                     plot_widget.setYRange(low_value, high_value, padding=0)
                                 except TypeError:
                                     plot_widget.setRange(yRange=[low_value, high_value], padding=0)
-                                if has_zero_dropout:
-                                    try:
-                                        plot_widget.setLimits(yMin=0.0, yMax=high_value)
-                                    except TypeError:
-                                        plot_widget.setLimits(yMin=0.0, yMax=high_value)
                             else:
-                                self._apply_dropout_axis(plot_widget, "SpO2", y)
+                                # Match Airflow/Thorax: fit the visible data window.
+                                self._apply_windowed_auto_axis(plot_widget, "SpO2", y)
 
                             # Labels on every window - raw samples on short ones,
                             # bucket averages on long ones.
-                            dbg(f"Creating/Updating SpO2 value labels for {window_seconds}s time window")
+                            pass
                             self.create_spo2_markers_and_labels(plot_widget, x, y)
-                            dbg(f"Updated SpO2 value labels with {len(x)} points for time offset {self.current_time_offset}s")
+                            pass
                         else:
                             plot_widget.plot_curve.setData([], [])
                             # The curve is empty here, but SpO2 labels are
@@ -1397,22 +3872,35 @@ class SleepMonitorChart(QWidget):
                             # over a file that has no SpO2 channel.
                             self.create_spo2_markers_and_labels(plot_widget, [], [])
                     else:
-                        x, y = self.get_signal_data_for_window(chart_name, window_seconds, self.current_time_offset)
-                        
+                        # PLAYBACK RIGHT-EDGE GAP FIX.
+                        # During playback the curves are only TRANSLATED between full
+                        # rebuilds (see update_playback).  The pre-loaded off-screen tail
+                        # (data_window_seconds) used to be requested for SpO2 only, so
+                        # Airflow / Effort / Snoring / Pulse / Body Position ran out of data
+                        # ~interval*speed seconds before the next rebuild and a blank strip
+                        # opened at the right edge, then snapped shut on every rebuild.
+                        # Draw the curve from the tail-extended data, but hand the
+                        # visible-window part (x, y) to everything else (axis fit, events,
+                        # labels) so their behaviour is exactly what it was before.
+                        x_draw, y_draw = self.get_signal_data_for_window(
+                            chart_name, data_window_seconds, self.current_time_offset)
+                        x, y = self._visible_part_of_playback_tail(
+                            x_draw, y_draw, window_seconds, data_window_seconds)
+
                         if len(x) > 0 and len(y) > 0:
                             if self.is_all_psg_mode():
                                 self._apply_all_psg_mode_range_fixup(plot_widget, vb, x, window_seconds)
-                            # Use real data from CSV
+                            # Use real data from the uploaded recording.
                             if chart_name.strip() == "Body Position":
                                 self._configure_body_position_axis(plot_widget)
-                                x_step, y_step = self._build_body_position_step_data(x, y)
+                                x_step, y_step = self._build_body_position_step_data(x_draw, y_draw)
                                 plot_widget.plot_curve.setData(x_step, y_step, connect='finite', stepMode=True)
                             else:
-                                plot_widget.plot_curve.setData(x, y, connect='finite')
-                            dbg(f"Updated {chart_name} with real data: {len(x)} points")
+                                plot_widget.plot_curve.setData(x_draw, y_draw, connect='finite')
+                            pass
                         else:
                             plot_widget.plot_curve.setData([], [])
-                            dbg(f"Left {chart_name} blank because no active signal data is mapped")
+                            pass
 
                         if hasattr(plot_widget, 'axis_properties'):
                             properties = plot_widget.axis_properties
@@ -1423,7 +3911,7 @@ class SleepMonitorChart(QWidget):
                             except TypeError:
                                 plot_widget.setRange(yRange=[low_value, high_value], padding=0)
                         elif chart_name.strip() == "Pulse":
-                            self._apply_dropout_axis(plot_widget, "Pulse", y)
+                            self._apply_windowed_auto_axis(plot_widget, "Pulse", y)
                         elif chart_name.strip() == "Airflow":
                             self._apply_windowed_auto_axis(plot_widget, chart_name.strip(), y)
                             _event_x, detection_y = self.get_airflow_detection_data_for_window(
@@ -1438,6 +3926,8 @@ class SleepMonitorChart(QWidget):
                             )
                         elif chart_name.strip() == "Thorax":
                             self._apply_windowed_auto_axis(plot_widget, chart_name.strip(), y)
+                        elif chart_name.strip() == "Snoring":
+                            self._apply_windowed_auto_axis(plot_widget, "Snoring", y)
                         elif chart_name.strip() in AUTO_RANGE_SIGNAL_NAMES:
                             auto_y_min, auto_y_max = self.get_signal_auto_axis_range(
                                 chart_name.strip()
@@ -1446,22 +3936,122 @@ class SleepMonitorChart(QWidget):
                             self._lock_auto_axis(
                                 plot_widget, auto_y_min, auto_y_max, hard_min, hard_max
                             )
+                    if chart_name.strip() == "Pulse":
+                        # After the axis has been applied, so "row" mode sees this frame's range.
+                        if len(x) > 0 and len(y) > 0:
+                            self.create_pulse_markers_and_labels(plot_widget, x, y)
+                        else:
+                            self.create_pulse_markers_and_labels(plot_widget, [], [])
+                    if chart_name.strip() == "Snoring":
+                        self._update_snoring_phase_overlays(plot_widget, data_window_seconds)
+                    if chart_name.strip() == "Airflow":
+                        self.mark_dashboard_fl(plot_widget, x, y)
+                        self._render_sensor_off_segments(plot_widget)
+                    self._render_recording_exclusions(plot_widget)
+                    _chart_ms[chart_name.strip()] = (
+                        time.perf_counter() - _chart_t0
+                    ) * 1000.0
                 except Exception as chart_error:
-                    dbg(f"⚠️ {chart_name if 'chart_name' in locals() else 'unknown chart'} refresh failed: {chart_error}")
+                    pass
                     continue
 
+            _t = time.perf_counter()
             self.render_dynamic_selections()
+            _chart_ms["selections"] = (time.perf_counter() - _t) * 1000.0
+            _t = time.perf_counter()
             self.update_apnea_events_display()
+            _chart_ms["events_label"] = (time.perf_counter() - _t) * 1000.0
         finally:
-            self.setUpdatesEnabled(True)
-            self.update()
+            if self.is_playing:
+                # Re-anchor the translation baseline to this fresh draw (see the top
+                # of this function) so the next playback frames continue from it.
+                self._capture_playback_anchor()
+            _t = time.perf_counter()
+            if not _lean:
+                self.setUpdatesEnabled(True)
+                self.update()
+            _chart_ms["repaint"] = (time.perf_counter() - _t) * 1000.0
+            if self.__dict__.get("_log_first_draw"):
+                self._log_first_draw = False
+                _psg_playback_log(
+                    "first draw after load: %.0f ms | %s"
+                    % ((time.perf_counter() - _frame_t0) * 1000.0,
+                       " ".join("%s=%.0f" % (key, value) for key, value in _chart_ms.items()))
+                )
+            if PERF_SUMMARY:
+                _PERF.add_refresh((time.perf_counter() - _frame_t0) * 1000.0, _chart_ms)
+            if PERF_FRAME_PROFILE:
+                # Profiling only: paint right now so the real painting cost shows up
+                # in the log (normally Qt paints after this function returns).
+                _t = time.perf_counter()
+                self.repaint()
+                _chart_ms["PAINT"] = (time.perf_counter() - _t) * 1000.0
+                total = (time.perf_counter() - _frame_t0) * 1000.0
+                parts = " ".join(f"{key}={value:.0f}" for key, value in _chart_ms.items())
+                pass
+
+    def _snoring_phase_window(self, phase_code, time_window_seconds, time_offset=0):
+        """Return snoring samples of one phase for the visible window."""
+        empty = np.array([]), np.array([])
+        signals = (self.psg_full_data or {}).get("signals", {})
+        packets = signals.get("snoring_packets")
+        full = signals.get("snoring")
+        if packets is None or full is None or self.is_all_psg_mode():
+            return empty
+        packets = np.asarray(packets, dtype=float)
+        if packets.ndim != 2 or packets.shape[0] == 0:
+            return empty
+        rate = self.channel_rate("snoring")
+        window_time, window_signal = self._slice_signal_for_window(
+            full, time_window_seconds, time_offset, sample_rate_hz=rate)
+        if window_signal.size == 0:
+            return empty
+        first = max(0, int(np.floor(float(time_offset) * rate)))
+        last = first + window_signal.size
+        wanted = (packets[:, 2] == float(phase_code)) & (packets[:, 1] > first) & (packets[:, 0] < last)
+        mask = np.zeros(window_signal.size, dtype=bool)
+        for start_idx, end_idx in packets[wanted][:, :2]:
+            i0 = max(0, int(start_idx) - first)
+            i1 = min(window_signal.size, int(end_idx) - first)
+            if i1 > i0:
+                mask[i0:i1] = True
+        if not mask.any():
+            return empty
+        return self._prepare_plot_data_for_window(
+            window_time, np.where(mask, window_signal, np.nan), time_window_seconds)
+
+    def _update_snoring_phase_overlays(self, plot_widget, window_seconds):
+        """Redraw exhale snore packets over the red inhale trace."""
+        curves = getattr(plot_widget, "snore_phase_curves", None)
+        if not curves:
+            return
+        if not SNORE_PHASE_OVERLAYS_ENABLED:
+            for curve in curves.values():
+                try:
+                    if len(curve.xData or ()) > 0:
+                        curve.setData([], [])
+                except Exception:
+                    pass
+            return
+        for key, code in (("exhale", SNORE_PHASE_EXHALE_CODE), ("review", SNORE_PHASE_ISOLATED_CODE)):
+            curve = curves.get(key)
+            if curve is None:
+                continue
+            x, y = self._snoring_phase_window(code, window_seconds, self.current_time_offset)
+            if len(x) and np.isfinite(y).any():
+                curve.setData(x, y, connect="finite")
+            else:
+                curve.setData([], [])
 
     def remove_stale_plot_curves(self, plot_widget):
-        """Keep only the primary signal curve so refreshes cannot leave duplicate traces."""
+        """Keep primary and snoring phase curves during chart refreshes."""
         primary_curve = getattr(plot_widget, "plot_curve", None)
+        keep_ids = {id(primary_curve)} | {
+            id(curve) for curve in (getattr(plot_widget, "snore_phase_curves", None) or {}).values()
+        }
         try:
             for data_item in list(plot_widget.listDataItems()):
-                if primary_curve is not None and data_item is primary_curve:
+                if id(data_item) in keep_ids:
                     continue
                 plot_widget.removeItem(data_item)
         except Exception:
@@ -1469,7 +4059,7 @@ class SleepMonitorChart(QWidget):
     
     def set_time_window(self, seconds):
         """Set the time window for the sleep monitoring chart (legacy method for compatibility)"""
-        print(f"🔍 DEBUG: set_time_window({seconds}) called in sleep_monitor_chart.py")
+        pass
         previous_window = self.get_effective_time_window_seconds()
         previous_visible_end = self.current_time_offset + previous_window
         # Normalize "All PSG" into a real duration so the plot never receives a negative range.
@@ -1491,13 +4081,19 @@ class SleepMonitorChart(QWidget):
         
         # Changing the time window means a different stretch of signal, with a
         # different amplitude - so any held zoom/axis state from the previous
-        # window is stale.
-        for chart_index in range(self.charts_layout.count()):
-            chart_container = self.charts_layout.itemAt(chart_index).widget()
-            if chart_container is None or not hasattr(chart_container, "plot_widget"):
-                continue
-            chart_container.plot_widget.zoom_y_range = None
-            chart_container.plot_widget.stable_y_range = None
+        # window is stale. Only when the window ACTUALLY changed: this method
+        # can be called with the same value on every dashboard sync, and that
+        # must not throw the held playback axis away each time.
+        window_changed = abs(float(self.get_effective_time_window_seconds()) - float(previous_window)) > 1e-6
+        if window_changed:
+            self._clear_axis_hold()
+            for chart_index in range(self.charts_layout.count()):
+                chart_container = self.charts_layout.itemAt(chart_index).widget()
+                if chart_container is None or not hasattr(chart_container, "plot_widget"):
+                    continue
+                chart_container.plot_widget.zoom_y_range = None
+                chart_container.plot_widget.stable_y_range = None
+                chart_container.plot_widget.stable_y_range_offset = None
 
         # Use dashboard controls if available, otherwise use local controls
         dropdown = getattr(self, 'dashboard_time_window_dropdown', None) or getattr(self, 'time_window_dropdown', None)
@@ -1513,27 +4109,27 @@ class SleepMonitorChart(QWidget):
             
             # Check if charts exist before refreshing
             chart_count = self.charts_layout.count()
-            print(f"Debug: set_time_window called with {seconds}s, charts exist: {chart_count > 0}, count: {chart_count}")
+            pass
             
             # Update charts with new time window (refresh data only, don't recreate charts)
             if chart_count > 0:
-                print(f"Debug: Calling refresh_charts from set_time_window")
+                pass
                 self.refresh_charts()
                 self.restore_all_selections()
             else:
-                print(f"Debug: No charts exist, calling update_charts_for_time_window instead")
+                pass
                 self.update_charts_for_time_window(seconds)
 
             # Keep dashboard slider and time label in sync with the new window.
             self.update_time_position_label()
             self.time_window_mode_changed.emit(self.is_all_psg_mode())
             
-            print(f"Time window set to: {seconds} seconds")
+            pass
 
     
     def update_charts_for_time_window(self, seconds):
         """Update chart data based on time window selection"""
-        print(f"Debug: update_charts_for_time_window called with {seconds} seconds")
+        pass
         
         # Clear existing charts
         for i in reversed(range(self.charts_layout.count())):
@@ -1619,7 +4215,7 @@ class SleepMonitorChart(QWidget):
         controls_layout.addWidget(self.time_position_label)
         controls_layout.addSpacing(10)
 
-        self.play_pause_btn = QPushButton(" Play")
+        self.play_pause_btn = PlayPauseButton()
         self.play_pause_btn.setObjectName("playbackPlayButton")
         self.play_pause_btn.clicked.connect(self.toggle_playback)
         self.play_pause_btn.setFixedHeight(23)
@@ -1630,13 +4226,15 @@ class SleepMonitorChart(QWidget):
                 color: #ffffff;
                 border: none;
                 border-radius: 8px;
-                padding: 2px 8px;
+                padding: 2px 10px;
+                font-family: 'Segoe UI', Arial, sans-serif;
                 font-size: 10px;
-                font-weight: 500;
-                min-width: 80px;
+                font-weight: 600;
+                min-width: 84px;
             }
             QPushButton#playbackPlayButton:hover { background-color: #1d4ed8; }
             QPushButton#playbackPlayButton:pressed { background-color: #1e40af; }
+            QPushButton#playbackPlayButton:disabled { background-color: #cbd5e1; color: #64748b; }
         """)
         
         # Add all controls to container
@@ -1649,39 +4247,15 @@ class SleepMonitorChart(QWidget):
         controls_layout.addWidget(self.lbl_speed_title)
         controls_layout.addSpacing(10)
 
-        self.slider_speed = QSlider(Qt.Horizontal)
-        self.slider_speed.setObjectName("speedSlider")
-        self.slider_speed.setMinimum(1)
-        self.slider_speed.setMaximum(8)
-        self.slider_speed.setValue(2)
-        self.slider_speed.setFixedWidth(84)
-        self.slider_speed.setCursor(Qt.PointingHandCursor)
+        # Click-to-select speed presets (1x / 2x / 3x / 4x).  A drag slider jumped to 4x on
+        # any click (see SpeedSelector), and a preset row is the standard control for this.
+        self.slider_speed = SpeedSelector((1, 2, 3, 4))
         self.slider_speed.valueChanged.connect(self.change_playback_speed)
-        self.slider_speed.setStyleSheet("""
-            QSlider#speedSlider::groove:horizontal {
-                height: 4px;
-                background: #e2e8f0;
-                border-radius: 2px;
-            }
-            QSlider#speedSlider::sub-page:horizontal {
-                background: #2563eb;
-                border-radius: 2px;
-            }
-            QSlider#speedSlider::handle:horizontal {
-                width: 9px;
-                height: 9px;
-                margin: -3px 0;
-                background: #2563eb;
-                border-radius: 7px;
-            }
-        """)
         controls_layout.addWidget(self.slider_speed)
-        controls_layout.addSpacing(6)
 
+        # The selected button already shows the speed, so the old "1.0x" text is not shown.
         self.lbl_speed_val = QLabel("1.0x")
-        self.lbl_speed_val.setFixedWidth(28)
-        self.lbl_speed_val.setStyleSheet("font-size: 13px; font-weight: 500; color: #374151;")
-        controls_layout.addWidget(self.lbl_speed_val)
+        self.lbl_speed_val.setVisible(False)
 
         controls_layout.addWidget(self._divider())
 
@@ -1703,6 +4277,10 @@ class SleepMonitorChart(QWidget):
                 font-weight: 500;
             }
         """)
+        self.detection_status_spinner = LoadingSpinner(self, size=16, line_width=2)
+        controls_layout.addSpacing(6)
+        controls_layout.addWidget(self.detection_status_spinner)
+        controls_layout.addSpacing(4)
         controls_layout.addWidget(self.detection_summary_label)
         controls_layout.addStretch()
 
@@ -1735,19 +4313,19 @@ class SleepMonitorChart(QWidget):
         pg.setConfigOptions(antialias=True)
 
         for position, (name, color, freq, amp, offset, y_min, y_max) in enumerate(ACTIVE_SIGNAL_CONFIGS):
-            dbg(f"DEBUG: Creating chart for {name} with range {y_min}-{y_max}")
+            pass
             chart = self.create_signal_chart(name, color, freq, amp, offset, y_min, y_max)
             self.charts_layout.addWidget(chart, stretch=1)
             # Track the original order
             self.graph_order.append(name)
         
-        dbg("DEBUG: All charts created in init_charts")
+        pass
         # INITIAL VIEWBOX SYNC (Fix first-time rendering)
         QTimer.singleShot(150, self._initial_viewbox_sync)
     
     def _initial_viewbox_sync(self):
         """Initial ViewBox synchronization to fix first-time rendering issue"""
-        dbg("Debug: _initial_viewbox_sync called - fixing first-time rendering")
+        pass
         for i in range(self.charts_layout.count()):
             container = self.charts_layout.itemAt(i).widget()
             if hasattr(container, 'plot_widget'):
@@ -1761,7 +4339,7 @@ class SleepMonitorChart(QWidget):
                 # Force redraw
                 pw.getViewBox().update()
                 pw.repaint()
-                dbg(f"Initial ViewBox sync for {pw.chart_name}: {start} → {end}")
+                pass
 
     def _prepare_external_array_signal(
         self,
@@ -1804,61 +4382,326 @@ class SleepMonitorChart(QWidget):
             limit_direction="both",
             limit=fill_limit,
         )  # sample_rate_hz par max ~5 second ka gap bharega
-        return series.to_numpy(dtype=float)
+        return series.to_numpy(dtype=float, copy=True)
 
-    def _load_uploaded_psg_signals(self, csv_path):
-        """Load chart signals directly from an uploaded PSG CSV."""
-        if load_sleep_csv is None:
+    def _load_uploaded_psg_signals(self, recording_path):
+        """Load chart signals from an uploaded binary SD recording.
+
+        Returns ``(time_data, signals, times, sample_rates, source_format)``.
+        ``time_data`` is the master timeline (airflow for SD recordings);
+        ``times[name]`` is each channel's own time axis at its native rate.
+        """
+        if load_sleep_recording is None:
             raise RuntimeError(
-                "CSV loader import failed."
-                + (f" {CSV_IMPORT_ERROR}" if CSV_IMPORT_ERROR else "")
+                "Recording loader import failed."
+                + (f" {RECORDING_IMPORT_ERROR}" if RECORDING_IMPORT_ERROR else "")
             )
 
-        signal_df = load_sleep_csv(csv_path)
-        if signal_df.empty:
-            raise ValueError("Uploaded CSV did not contain any usable rows.")
+        _t_load = time.perf_counter()
+        recording = load_sleep_recording(recording_path, preserve_recorded_airflow=True)
+        _t_parsed = time.perf_counter()
+        recording = trim_recording_edges(
+            recording,
+            start_seconds=RECORDING_EDGE_TRIM_SECONDS,
+            end_seconds=RECORDING_EDGE_TRIM_SECONDS,
+        )
+        _t_trimmed = time.perf_counter()
+        source_format = recording.get("source_format", "csv")
+        raw_signals = recording.get("signals", {})
+        times = {name: np.asarray(values, dtype=float) for name, values in recording.get("times", {}).items()}
+        sample_rates = {name: float(rate) for name, rate in recording.get("sample_rates", {}).items()}
+        time_data = np.asarray(recording.get("time", []), dtype=float)
+        if time_data.size == 0 or not raw_signals:
+            raise ValueError("Uploaded PSG file did not contain any usable rows.")
 
-        time_data = signal_df["time_sec"].to_numpy(dtype=float)
         signals = {}
-        for signal_name in CSV_SIGNAL_NAMES:
-            if signal_name not in signal_df.columns:
+        if "airflow_recorded" in raw_signals:
+            signals["airflow_recorded"] = np.asarray(raw_signals["airflow_recorded"], dtype=float)
+            if source_format == "smf":
+                # SD recordings: the airflow time axis IS the recorded time.
+                signals["airflow_recorded_time"] = times["airflow_recorded"].copy()
+            else:
+                signals["airflow_recorded_time"] = np.asarray(raw_signals["timestamp"], dtype=float) / 1000.0
+            times["airflow_recorded_time"] = times.get("airflow_recorded", time_data).copy()
+            sample_rates["airflow_recorded_time"] = sample_rates.get("airflow_recorded", sample_rates.get("airflow", EXTERNAL_ARRAY_SAMPLE_RATE_HZ))
+
+        # Binary SD recordings expose channels at their native rates. Keep the
+        # processing list explicit so derived/metadata aliases are not treated
+        # as ordinary waveform channels.
+        binary_signal_names = (
+            "body_position", "pulse", "spo2", "body_movement",
+            "airflow", "thorax", "snoring",
+        )
+        for signal_name in binary_signal_names:
+            if signal_name not in raw_signals:
                 continue
+            raw_signal = np.asarray(raw_signals[signal_name], dtype=float)
+            rate = sample_rates.get(signal_name, EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
             prepared_signal = self._prepare_external_array_signal(
-                signal_df[signal_name].to_numpy(dtype=float),
+                raw_signal,
+                sample_rate_hz=rate,
                 valid_range=SIGNAL_VALID_RANGES.get(signal_name),
                 fill_gaps=signal_name not in SIGNAL_NO_GAP_FILL,
             )
+            if signal_name == "spo2":
+                # A zero SpO2 value is a device no-signal sentinel, not a
+                # physiological reading. Keep the cleaned series so the
+                # display can hold the preceding valid value through it.
+                signals["spo2_display"] = prepared_signal.copy()
+                times["spo2_display"] = times.get("spo2", time_data)
+                sample_rates["spo2_display"] = rate
             signals[signal_name] = prepared_signal
 
             if signal_name == "airflow":
                 raw_airflow = np.asarray(prepared_signal, dtype=float)
+                # Filter kernels are in SAMPLES; scale them with the channel
+                # rate so a "~1 s" median stays ~1 s at 125 Hz as it was at 10 Hz.
+                kernel_scale = max(1.0, rate / EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+                kernel_size = int(round(11 * kernel_scale)) | 1
+                savgol_window = int(round(11 * kernel_scale)) | 1
                 enhanced_airflow = enhance_airflow_for_graph_and_detection(
                     raw_airflow,
                     amplitude=1.10,
                     max_limit=None,
                     spike_threshold=15.0,
-                    kernel_size=11,
+                    kernel_size=kernel_size,
                     low_protect_margin=2.0,
                     keep_integer=False,
-                    savgol_window=11,
+                    savgol_window=savgol_window,
                     savgol_order=3,
                 )
                 signals["airflow_raw"] = raw_airflow
                 signals["airflow_enhanced"] = enhanced_airflow
-                signals["airflow_display"] = enhanced_airflow
+                signals["airflow_display"] = self._airflow_display_series(
+                    raw_airflow, enhanced_airflow, rate, source_format,
+                )
                 signals["airflow_detection"] = enhanced_airflow
+                if self._signal_swing_below(enhanced_airflow, rate, AIRFLOW_MIN_VALID_SWING_COUNTS):
+                    # No cannula connected: draw a flat line from the FIRST draw. Otherwise the chart
+                    # auto-zooms ~2 counts of ADC noise into a fake breathing wave until detection
+                    # finishes and the sensor-off masking flattens it.  (Display copy only.)
+                    shown = np.asarray(signals["airflow_display"], dtype=float)
+                    finite_shown = shown[np.isfinite(shown)]
+                    level = float(np.median(finite_shown)) if finite_shown.size else 0.0
+                    signals["airflow_display"] = np.where(np.isfinite(shown), level, np.nan)
+                if AIRFLOW_DEBUG_FLAT_TOPS:
+                    self._airflow_flat_top_report("raw sensor signal", raw_airflow, rate)
+                    self._airflow_flat_top_report(
+                        "enhanced copy (what was drawn before)", enhanced_airflow, rate,
+                    )
+                for alias in ("airflow_raw", "airflow_enhanced", "airflow_display", "airflow_detection"):
+                    times[alias] = times.get("airflow", time_data)
+                    sample_rates[alias] = rate
             elif signal_name == "thorax":
                 raw_thorax = np.asarray(prepared_signal, dtype=float)
+                kernel_scale = max(1.0, rate / EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
                 smoothed_thorax = self.smooth_data(
                     np.arange(len(raw_thorax), dtype=float),
                     raw_thorax,
-                    window_size=11,
+                    window_size=int(round(11 * kernel_scale)) | 1,
                 )
+                display_thorax = self._smooth_thorax_for_display(raw_thorax, rate)
+                display_series = (
+                    display_thorax if display_thorax is not None else smoothed_thorax
+                )
+                # DISPLAY copy only: take out the slow belt-baseline drift so the fixed
+                # Play-time Y range keeps framing the whole breath (raw / smoothed copies,
+                # used for analysis, are not touched).
+                if THORAX_BASELINE_REMOVE:
+                    try:
+                        flattened = remove_slow_baseline(display_series, rate)
+                    except Exception:
+                        flattened = None
+                    if flattened is not None:
+                        display_series = flattened
+                if self._thorax_is_unplugged(raw_thorax, rate):
+                    # No belt connected: draw a flat line at the recorded level. Without this the
+                    # low-pass + auto-zoom blows ~1 count of ADC noise up into a fake breathing wave.
+                    finite_thorax = raw_thorax[np.isfinite(raw_thorax)]
+                    level = float(np.median(finite_thorax)) if finite_thorax.size else 0.0
+                    display_series = np.where(np.isfinite(raw_thorax), level, np.nan)
                 signals["thorax_raw"] = raw_thorax
                 signals["thorax_smoothed"] = smoothed_thorax
-                signals["thorax_display"] = smoothed_thorax
+                signals["thorax_display"] = display_series
+                for alias in ("thorax_raw", "thorax_smoothed", "thorax_display"):
+                    times[alias] = times.get("thorax", time_data)
+                    sample_rates[alias] = rate
 
-        return time_data, signals
+        # Show SD snore vibration on the airflow display copy only.
+        if (
+            source_format == "smf"
+            and "airflow_display" in signals
+            and "snoring" in raw_signals
+            and len(raw_signals["snoring"]) == len(signals["airflow_display"])
+        ):
+            signals["airflow_display"] = add_snore_texture_to_airflow_display(
+                signals["airflow_display"],
+                np.asarray(raw_signals["snoring"], dtype=float),
+            )
+        if "airflow_display" in signals:
+            signals["airflow_display_base"] = np.array(
+                signals["airflow_display"], dtype=float, copy=True
+            )
+
+        # Keep the original accelerometer axes alongside the derived movement.
+        for axis_name in ("body_movement_x", "body_movement_y", "body_movement_z",
+                          "accel_x", "accel_y", "accel_z"):
+            if axis_name in raw_signals:
+                signals[axis_name] = np.asarray(raw_signals[axis_name], dtype=float)
+
+        # ECG is parsed from SD recordings but intentionally NOT plotted yet.
+        if "ecg" in raw_signals:
+            signals["ecg"] = np.asarray(raw_signals["ecg"], dtype=float)
+
+        # Snore packets with their breath phase (inhale / exhale), SD
+        # recordings only. One row per packet; see sd_record_reader.PACKET_COLUMNS.
+        if "snoring_packets" in raw_signals:
+            signals["snoring_packets"] = np.asarray(raw_signals["snoring_packets"], dtype=float)
+
+        _psg_playback_log(
+            "upload worker: read+parse %.0f ms (a parse started by the detector is shared), trim %.0f ms, "
+            "channel processing %.0f ms"
+            % ((_t_parsed - _t_load) * 1000.0, (_t_trimmed - _t_parsed) * 1000.0,
+               (time.perf_counter() - _t_trimmed) * 1000.0)
+        )
+        return time_data, signals, times, sample_rates, source_format
+
+    def _airflow_for_fl_detection(self, raw):
+        """Return recorded airflow with breathing IN as the upward peak."""
+        from .fl_waveform_widget import FL_LEGACY_LOGIC
+        values = np.asarray(raw, dtype=float)
+        data = self.psg_full_data or {}
+        if (
+            not FL_LEGACY_LOGIC
+            and FL_DETECT_ON_INHALE_SIDE
+            and INSPIRATION_IS_LOW_AIRFLOW
+            and str(data.get("source_format", "")) == "smf"
+        ):
+            return -values
+        return values
+
+    def _snoring_for_fl_detection(self, signals, raw):
+        """Return SD snore packets as ATS inspiratory confirmation evidence."""
+        from .fl_waveform_widget import FL_LEGACY_LOGIC
+        data = self.psg_full_data or {}
+        if FL_LEGACY_LOGIC or str(data.get("source_format", "")) != "smf":
+            return None
+        snoring = signals.get("snoring")
+        if snoring is None or raw is None or len(snoring) != len(raw):
+            return None
+        return np.asarray(snoring, dtype=float)
+
+    def _fl_start_background(self, raw, signals):
+        """Run the whole-night flow-limitation analysis in a worker thread.
+
+        It used to run inside the first draw of the Airflow chart (GUI thread) and made "Drawing graphs"
+        1.5-3 s longer.  Now the graphs are drawn at once and _on_fl_ready adds the markers when the
+        analysis is done; the numbers are exactly those the synchronous call produced.
+        """
+        job = self.__dict__.get("_fl_job")
+        if job is not None and job.get("source") is raw:
+            return
+        import threading
+        from .fl_waveform_widget import plateau_breaths
+        try:
+            airflow = self._airflow_for_fl_detection(raw)
+            times = signals["airflow_recorded_time"]
+            snoring = self._snoring_for_fl_detection(signals, raw)
+        except Exception:
+            self._fl_cached_source = raw
+            self._fl_cached_breaths = []
+            return
+        if not self.__dict__.get("_fl_signal_connected"):
+            self._fl_ready.connect(self._on_fl_ready)
+            self._fl_signal_connected = True
+        self._fl_job = {"source": raw}
+        signal = self._fl_ready
+
+        def work():
+            started = time.perf_counter()
+            try:
+                breaths = [b for b in plateau_breaths(airflow, times, snoring=snoring) if b["kind"] == "fl"]
+            except Exception:
+                breaths = []
+            _psg_playback_log(
+                "FL analysis (background): %.0f ms, %d flow-limited breaths"
+                % ((time.perf_counter() - started) * 1000.0, len(breaths))
+            )
+            signal.emit((raw, breaths))
+
+        threading.Thread(target=work, name="fl-analysis", daemon=True).start()
+
+    def _on_fl_ready(self, payload):
+        """GUI thread: the background FL analysis finished -> keep the result and draw the markers."""
+        raw, breaths = payload
+        job = self.__dict__.get("_fl_job")
+        if job is not None and job.get("source") is raw:
+            self._fl_job = None
+        data = self.psg_full_data
+        current = (data.get("signals", {}) if data else {}).get("airflow_recorded")
+        if current is not raw:
+            return                                   # another recording was loaded meanwhile
+        self._fl_cached_source = raw
+        self._fl_cached_breaths = breaths
+        if not self.is_playing:
+            self.refresh_charts()
+
+    def mark_dashboard_fl(self, plot_widget, x, y):
+        """Mark raw-sample plateau candidates at their dashboard waveform positions."""
+        from .fl_waveform_widget import plateau_breaths, draw_dashboard_fl_labels
+
+        data = self.psg_full_data
+        signals = data.get("signals", {}) if data else {}
+        raw = signals.get("airflow_recorded")
+        fl_exclusions = list(self.get_recording_exclusions()["excluded_segments"]) + list(
+            getattr(self, "sensor_off_shade_segments", None) or []
+        )
+        if getattr(self, "_fl_cached_source", None) is not raw and raw is not None and FL_COMPUTE_IN_BACKGROUND:
+            self._fl_start_background(raw, signals)
+            if getattr(self, "_fl_cached_source", None) is not raw:
+                # Not ready yet: draw the chart without FL markers; _on_fl_ready redraws when the result exists.
+                draw_dashboard_fl_labels(
+                    plot_widget, [],
+                    data.get("time", []) if data else [], x, y,
+                    offset=0.0 if self.is_all_psg_mode() else self.current_time_offset,
+                    exclusions=fl_exclusions,
+                )
+                return
+        if getattr(self, "_fl_cached_source", None) is not raw:
+            self._fl_cached_source = raw
+            self._fl_cached_breaths = []
+            if raw is not None:
+                try:
+                    self._fl_cached_breaths = [
+                        b for b in plateau_breaths(
+                            self._airflow_for_fl_detection(raw),
+                            signals["airflow_recorded_time"],
+                            snoring=self._snoring_for_fl_detection(signals, raw),
+                        )
+                        if b["kind"] == "fl"
+                    ]
+                except ValueError as error:
+                    pass
+            full_time_arr = np.asarray(data.get("time", []) if data else [], dtype=float)
+            total_detected = len(self._fl_cached_breaths)
+            excluded_count = 0
+            for breath in self._fl_cached_breaths:
+                if breath["end"] >= len(full_time_arr):
+                    continue
+                segment = {
+                    "start_sec": float(full_time_arr[breath["start"]]),
+                    "end_sec": float(full_time_arr[breath["end"]]),
+                }
+                if overlaps_exclusion(segment, fl_exclusions):
+                    excluded_count += 1
+            pass
+        draw_dashboard_fl_labels(
+            plot_widget,
+            getattr(self, "_fl_cached_breaths", []) if raw is not None else [],
+            data.get("time", []) if data else [], x, y,
+            offset=0.0 if self.is_all_psg_mode() else self.current_time_offset,
+            exclusions=fl_exclusions,
+        )
 
     def _get_airflow_signal_variant(self, variant="raw"):
         """Return the preferred airflow series for raw or enhanced airflow use."""
@@ -1877,6 +4720,170 @@ class SleepMonitorChart(QWidget):
             selected = signals.get("airflow", np.array([]))
         return np.asarray(selected, dtype=float)
 
+    def _airflow_display_series(self, raw_airflow, enhanced_airflow, rate, source_format):
+        """The airflow series that is DRAWN (detection always uses the enhanced series)."""
+        if CLASSIC_PLOT_LOGIC:
+            if source_format == "smf":
+                return orient_airflow_for_display(enhanced_airflow)
+            return enhanced_airflow
+        aasm_function = getattr(self, "_aasm_airflow_for_display", None)
+        aasm_airflow = aasm_function(raw_airflow, rate) if aasm_function is not None else None
+        return orient_airflow_for_display(
+            aasm_airflow if aasm_airflow is not None else enhanced_airflow
+        )
+
+    def _aasm_airflow_for_display(self, values, rate):
+        """Airflow for drawing: AASM band-pass, zero phase."""
+        if not AIRFLOW_AASM_FILTER_ENABLED:
+            return None
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError):
+            return None
+        y = np.asarray(values, dtype=float).reshape(-1)
+        low_hz = float(AIRFLOW_AASM_LOW_HZ)
+        high_hz = float(AIRFLOW_AASM_HIGH_HZ)
+        if rate <= 0.0 or y.size < int(40.0 * rate):
+            return None
+        finite = np.flatnonzero(np.isfinite(y))
+        if finite.size < int(40.0 * rate):
+            return None
+        try:
+            from scipy.signal import butter, sosfiltfilt
+        except Exception:
+            return None
+        sections = []
+        if low_hz > 0.0:
+            sections.append(
+                butter(
+                    2,
+                    low_hz * 0.41421356 ** 0.25 / (rate / 2.0),
+                    btype="high",
+                    output="sos",
+                )
+            )
+        if high_hz > 0.0 and rate > 2.2 * high_hz:
+            cutoff = min(high_hz / (0.41421356 ** 0.125), 0.45 * rate)
+            sections.append(butter(4, cutoff / (rate / 2.0), output="sos"))
+        if not sections:
+            return None
+        baseline = float(np.median(y[finite]))
+        out = np.full_like(y, np.nan)
+        pad = int(30.0 * rate)
+        for segment in np.split(finite, np.where(np.diff(finite) > 1)[0] + 1):
+            if segment.size < int(30.0 * rate):
+                out[segment] = y[segment]
+                continue
+            values_in = y[segment] - baseline
+            for sos in sections:
+                values_in = sosfiltfilt(
+                    sos,
+                    values_in,
+                    padtype="odd",
+                    padlen=min(segment.size - 1, pad),
+                )
+            out[segment] = values_in + baseline
+        return out
+
+    @staticmethod
+    def _thorax_is_unplugged(values, rate):
+        """True when the RAW thorax is only ADC noise (no belt connected).
+
+        Per 5 s block (95th - 5th percentile), then the 90th percentile over the night; a single
+        spike cannot fake a breath and a belt that works for part of the night is not flagged.
+        """
+        try:
+            x = np.asarray(values, dtype=float).reshape(-1)
+            n = max(1, int(round(float(rate) * 5.0)))
+            k = x.size // n
+            if k < 1:
+                return False
+            blocks = x[: k * n].reshape(k, n)
+            blocks = blocks[np.isfinite(blocks).all(axis=1)]
+            if blocks.shape[0] == 0:
+                return False
+            # 90th percentile over the night = the best-connected stretch (same rule as the detector)
+            swing = float(np.percentile(np.percentile(blocks, 95, axis=1) - np.percentile(blocks, 5, axis=1), 90))
+            return swing < float(THORAX_MIN_VALID_SWING_COUNTS)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _signal_swing_below(values, rate, limit):
+        """True when even the best-connected stretch of ``values`` swings less than ``limit`` counts.
+
+        Per 5 s block (95th - 5th percentile), then the 90th percentile over the night.
+        """
+        try:
+            x = np.asarray(values, dtype=float).reshape(-1)
+            n = max(1, int(round(float(rate) * 5.0)))
+            k = x.size // n
+            if k < 1:
+                return False
+            blocks = x[: k * n].reshape(k, n)
+            blocks = blocks[np.isfinite(blocks).all(axis=1)]
+            if blocks.shape[0] == 0:
+                return False
+            swing = float(np.percentile(np.percentile(blocks, 95, axis=1) - np.percentile(blocks, 5, axis=1), 90))
+            return swing < float(limit)
+        except Exception:
+            return False
+
+    def _airflow_flat_top_report(self, label, values, rate):
+        """Debug whether many breaths end at one clipped level."""
+        try:
+            from scipy.signal import find_peaks
+            rate = float(rate)
+            y = np.asarray(values, dtype=float).reshape(-1)
+            ok = y[np.isfinite(y)]
+            if ok.size < int(60 * rate):
+                return
+            filled = np.where(np.isfinite(y), y, np.nanmedian(ok))
+            spread = float(np.percentile(ok, 95) - np.percentile(ok, 5))
+            parts = []
+            for name, series, sign in (("tops", filled, 1.0), ("bottoms", -filled, -1.0)):
+                peaks, _ = find_peaks(
+                    series,
+                    distance=max(1, int(1.5 * rate)),
+                    prominence=0.4 * spread,
+                )
+                if peaks.size < 5:
+                    parts.append(f"{name}: too few breaths")
+                    continue
+                levels = series[peaks]
+                at_one_level = int(np.sum(levels >= levels.max() - 0.01 * spread))
+                parts.append(
+                    f"{name}: {at_one_level} of {peaks.size} breaths end within 1% of the single "
+                    f"{'highest' if sign > 0 else 'lowest'} level"
+                )
+            pass
+        except Exception:
+            pass
+
+    def _smooth_thorax_for_display(self, values, rate):
+        """Zero-phase low-pass of the Thorax trace, for the DISPLAY copy only."""
+        cutoff = float(THORAX_DISPLAY_LOWPASS_HZ)
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError):
+            return None
+        y = np.asarray(values, dtype=float).reshape(-1)
+        if cutoff <= 0.0 or rate <= 2.5 * cutoff or y.size < 40:
+            return None
+        try:
+            from scipy.signal import butter, filtfilt
+            b, a = butter(2, cutoff / (rate / 2.0))
+        except Exception:
+            return None
+        out = y.copy()
+        finite = np.flatnonzero(np.isfinite(y))
+        if finite.size == 0:
+            return None
+        for segment in np.split(finite, np.where(np.diff(finite) > 1)[0] + 1):
+            if segment.size >= 30:
+                out[segment] = filtfilt(b, a, y[segment])
+        return out
+
     def _get_thorax_signal_variant(self, variant="display"):
         """Return the preferred thorax series for raw or smoothed thorax use."""
         if self.psg_full_data is None or "signals" not in self.psg_full_data:
@@ -1886,21 +4893,21 @@ class SleepMonitorChart(QWidget):
         variant_map = {
             "raw": signals.get("thorax_raw"),
             "smoothed": signals.get("thorax_smoothed"),
-            "display": signals.get("thorax_smoothed", signals.get("thorax_display")),
+            "display": signals.get("thorax_display", signals.get("thorax_smoothed")),
         }
         selected = variant_map.get(variant)
         if selected is None:
             selected = signals.get("thorax", np.array([]))
         return np.asarray(selected, dtype=float)
 
-    def save_airflow_smoothing_debug_report(self, csv_path, raw_airflow, enhanced_airflow):
+    def save_airflow_smoothing_debug_report(self, recording_path, raw_airflow, enhanced_airflow):
         """Write a text report showing how the shared enhanced airflow differs from raw data."""
         try:
             report_dir = get_configured_path("debug_reports_dir")
             report_dir.mkdir(parents=True, exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            source_name = Path(csv_path).stem if csv_path else "airflow"
+            source_name = Path(recording_path).stem if recording_path else "airflow"
             report_path = report_dir / f"{source_name}_airflow_debug_{timestamp}.txt"
 
             raw_airflow = np.asarray(raw_airflow, dtype=float).reshape(-1)
@@ -1921,10 +4928,10 @@ class SleepMonitorChart(QWidget):
                 "",
                 "SECTION 1: FILE INFO",
                 "--------------------",
-                f"Source CSV: {csv_path}",
+                f"Source recording: {recording_path}",
                 f"Generated: {datetime.now().isoformat()}",
                 f"Samples compared: {point_count}",
-                f"Sample rate used for timestamps: {EXTERNAL_ARRAY_SAMPLE_RATE_HZ} Hz",
+                f"Sample rate used for timestamps: {self.channel_rate('airflow')} Hz",
                 "",
                 "SECTION 2: QUICK ANSWER",
                 "-----------------------",
@@ -1943,7 +4950,7 @@ class SleepMonitorChart(QWidget):
             if point_count:
                 enhanced_top_indices = np.argsort(enhanced_diff)[-20:][::-1]
                 for rank, index in enumerate(enhanced_top_indices, start=1):
-                    time_sec = index / float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+                    time_sec = index / float(self.channel_rate("airflow"))
                     lines.append(
                         f"{rank:02d} | {index:05d} | {time_sec:8.2f} | "
                         f"{raw_airflow[index]:.6f} | {enhanced_airflow[index]:.6f} | {enhanced_diff[index]:.6f}"
@@ -1960,7 +4967,7 @@ class SleepMonitorChart(QWidget):
 
             preview_count = min(120, point_count)
             for index in range(preview_count):
-                time_sec = index / float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+                time_sec = index / float(self.channel_rate("airflow"))
                 lines.append(
                     f"{index:05d} | {time_sec:8.2f} | "
                     f"{raw_airflow[index]:.6f} | "
@@ -1969,14 +4976,14 @@ class SleepMonitorChart(QWidget):
                 )
 
             report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            print(f"📝 Airflow debug report saved: {report_path}")
-        except Exception as error:
-            print(f"⚠️ Could not save airflow debug report: {error}")
+            pass
+        except Exception:
+            pass
 
-    def _slice_signal_for_window(self, signal_values, time_window_seconds, time_offset=0):
-        """Slice a full signal into the requested fixed-duration time window."""
+    def _slice_signal_for_window(self, signal_values, time_window_seconds, time_offset=0, sample_rate_hz=None):
+        """Slice a full signal into a fixed-duration window at its own rate."""
         signal_values = np.asarray(signal_values, dtype=float)
-        samples_per_second = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
+        samples_per_second = float(sample_rate_hz) if sample_rate_hz else EXTERNAL_ARRAY_SAMPLE_RATE_HZ
         expected_samples = int(round(time_window_seconds * samples_per_second))
 
         if expected_samples == 0:
@@ -1985,25 +4992,45 @@ class SleepMonitorChart(QWidget):
         if len(signal_values) == 0:
             return np.arange(expected_samples) / samples_per_second, np.full(expected_samples, np.nan)
 
-        start_sample = max(0, int(round(time_offset * samples_per_second)))
-        end_sample = min(len(signal_values), start_sample + expected_samples)
+        # Slow SD channels are sampled once per second.  Rounding the
+        # playback offset to an integer sample makes the trace freeze for
+        # almost one second and then jump.  Sample at the fractional position
+        # instead so playback advances continuously.  Invalid samples are not
+        # interpolated across.
+        if samples_per_second < self.DISPLAY_HOLD_BELOW_HZ:
+            positions = float(max(0.0, time_offset)) * samples_per_second + np.arange(expected_samples, dtype=float)
+            left = np.floor(positions).astype(int)
+            right = np.minimum(left + 1, len(signal_values) - 1)
+            fraction = positions - left
+            in_bounds = (left >= 0) & (left < len(signal_values))
+            left = np.clip(left, 0, len(signal_values) - 1)
+            left_values = signal_values[left]
+            right_values = signal_values[right]
+            finite_pair = np.isfinite(left_values) & np.isfinite(right_values)
+            window_signal = np.full(expected_samples, np.nan, dtype=float)
+            usable = in_bounds & finite_pair
+            window_signal[usable] = (
+                left_values[usable]
+                + fraction[usable] * (right_values[usable] - left_values[usable])
+            )
+            window_time = np.arange(expected_samples, dtype=float) / samples_per_second
+            return window_time, window_signal
+
+        offset = float(time_offset)
+        start_sample = max(0, int(np.floor(offset * samples_per_second)))
+        want = expected_samples + 2
+        end_sample = min(len(signal_values), start_sample + want)
 
         window_signal = signal_values[start_sample:end_sample]
-        if len(window_signal) < expected_samples:
-            pad = np.full(expected_samples - len(window_signal), np.nan)
+        if len(window_signal) < want:
+            pad = np.full(want - len(window_signal), np.nan)
             window_signal = np.concatenate([window_signal, pad])
 
-        window_time = np.arange(expected_samples) / samples_per_second
+        window_time = (start_sample + np.arange(want, dtype=float)) / samples_per_second - offset
         return window_time, window_signal
 
     def _smart_downsample(self, time_data, signal_data, max_points=2500):
-        """
-        Aggressively downsample large time-series data using bin averages.
-
-        This keeps the overall shape of the signal while reducing the number of
-        points sent to pyqtgraph, which is the main bottleneck for large PSG
-        recordings shown in a single view.
-        """
+        """Peak-preserving downsample for plotting (minimum and maximum per bin)."""
         time_data = np.asarray(time_data, dtype=float).reshape(-1)
         signal_data = np.asarray(signal_data, dtype=float).reshape(-1)
 
@@ -2014,7 +5041,8 @@ class SleepMonitorChart(QWidget):
         time_data = time_data[:sample_count]
         signal_data = signal_data[:sample_count]
 
-        bin_size = int(np.ceil(sample_count / float(max_points)))
+        bins = max(1, int(max_points) // 2)
+        bin_size = int(np.ceil(sample_count / float(bins)))
         if bin_size <= 1:
             return time_data, signal_data
 
@@ -2022,24 +5050,27 @@ class SleepMonitorChart(QWidget):
         if usable_count < bin_size:
             return time_data, signal_data
 
-        trimmed_time = time_data[:usable_count]
-        trimmed_signal = signal_data[:usable_count]
-
+        t = time_data[:usable_count].reshape(-1, bin_size)
+        v = signal_data[:usable_count].reshape(-1, bin_size)
+        all_nan = ~np.isfinite(v).any(axis=1)
+        v_safe = np.where(np.isfinite(v), v, np.nan)
         with np.errstate(invalid="ignore"):
-            binned_signal = np.nanmean(trimmed_signal.reshape(-1, bin_size), axis=1)
-            binned_time = np.nanmean(trimmed_time.reshape(-1, bin_size), axis=1)
+            i_min = np.nanargmin(np.where(all_nan[:, None], 0.0, v_safe), axis=1)
+            i_max = np.nanargmax(np.where(all_nan[:, None], 0.0, v_safe), axis=1)
+        rows = np.arange(v.shape[0])
+        first = np.minimum(i_min, i_max)
+        second = np.maximum(i_min, i_max)
+        binned_time = np.column_stack([t[rows, first], t[rows, second]]).ravel()
+        binned_signal = np.column_stack([v[rows, first], v[rows, second]]).ravel()
+        binned_signal[np.repeat(all_nan, 2)] = np.nan
 
         if usable_count < sample_count:
             remainder_time = time_data[usable_count:]
             remainder_signal = signal_data[usable_count:]
-            with np.errstate(invalid="ignore"):
-                binned_time = np.concatenate([binned_time, [np.nanmean(remainder_time)]])
-                binned_signal = np.concatenate([binned_signal, [np.nanmean(remainder_signal)]])
+            binned_time = np.concatenate([binned_time, remainder_time])
+            binned_signal = np.concatenate([binned_signal, remainder_signal])
 
-        dbg(
-            f"🔽 Downsampled plot data {sample_count} → {len(binned_signal)} "
-            f"(bin_size={bin_size}, max_points={max_points})"
-        )
+        pass
         return binned_time, binned_signal
 
     def _prepare_plot_data_for_window(self, time_data, signal_data, time_window_seconds):
@@ -2056,13 +5087,19 @@ class SleepMonitorChart(QWidget):
             signal_data = signal_data[:sample_count]
 
         # Full-recording views are the expensive case; keep them compact enough
-        # to render smoothly even for multi-hour CSV files.
+        # to render smoothly even for multi-hour recordings.
         if self.is_all_psg_mode():
             return self._smart_downsample(time_data, signal_data, max_points=2500)
 
-        # Normal windows stay untouched unless they become unusually large.
-        if sample_count > 5000 or float(time_window_seconds) >= 300:
-            return self._smart_downsample(time_data, signal_data, max_points=5000)
+        # While the user is dragging the timeline, prioritize immediate visual
+        # feedback. The release handler redraws the final window at full detail.
+        if getattr(self, "_slider_scrubbing", False) and sample_count > 2500:
+            return self._smart_downsample(time_data, signal_data, max_points=2500)
+
+        # Keep normal high-rate windows at native samples to preserve snore
+        # vibration; downsample only unusually large windows.
+        if sample_count > 20000 or float(time_window_seconds) >= 300:
+            return self._smart_downsample(time_data, signal_data, max_points=8000)
 
         return time_data, signal_data
 
@@ -2091,6 +5128,184 @@ class SleepMonitorChart(QWidget):
             display_signal[last_valid + 1 :] = signal_data[last_valid]
 
         return time_data, display_signal
+
+    def _fill_leading_slow_channel_start(self, signal_data):
+        """Fill leading SD warm-up zeros for display only.
+
+        SpO2/Pulse use zero as an invalid sentinel.  Those startup samples
+        fall outside the physiological Y-axis and make the trace look as if
+        it starts late. Interior sensor-off zeros remain untouched.
+        """
+        signal = np.asarray(signal_data, dtype=float).reshape(-1).copy()
+        if signal.size == 0:
+            return signal
+        valid = np.isfinite(signal) & (signal > 0.0)
+        first_valid = np.flatnonzero(valid)
+        if first_valid.size:
+            first = int(first_valid[0])
+            if first > 0:
+                signal[:first] = signal[first]
+        return signal
+
+    def _bridge_slow_channel_dropouts(self, values, sample_rate_hz, max_gap_seconds=None):
+        """Hold the preceding valid slow-channel value through no-signal zeros.
+
+        SpO2/Pulse zero is a device sentinel. Once a valid value is available,
+        zero/NaN runs up to ``max_gap_seconds`` are drawn as that preceding
+        valid value; longer runs remain missing for the caller to show as zero.
+        """
+        signal = np.asarray(values, dtype=float).reshape(-1).copy()
+        missing = ~np.isfinite(signal) | (signal <= 0.0)
+        if not missing.any() or missing.all():
+            return np.where(missing, np.nan, signal)
+        signal[missing] = np.nan
+        max_gap = (
+            None if max_gap_seconds is None
+            else int(round(float(max_gap_seconds) * float(sample_rate_hz)))
+        )
+        edges = np.diff(np.r_[False, missing, False].astype(np.int8))
+        for start, stop in zip(
+            np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+        ):
+            if start > 0 and (max_gap is None or stop - start <= max_gap):
+                signal[start:stop] = signal[start - 1]
+        return signal
+
+    def _spo2_display_full(self):
+        """Return the cached, display-only SpO2 series for the whole recording."""
+        if self.spo2_full_data is None:
+            return np.array([], dtype=float)
+        full_time, full_spo2 = self.spo2_full_data
+        full_time = np.asarray(full_time, dtype=float).reshape(-1)
+        full_spo2 = np.asarray(full_spo2, dtype=float).reshape(-1)
+        sample_rate_hz = self.channel_rate("spo2")
+        key = (
+            id(self.spo2_full_data[0]), len(full_time),
+            id(self.spo2_full_data[1]), len(full_spo2),
+            float(sample_rate_hz),
+        )
+        cached = getattr(self, "_spo2_display_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        # Some uploads contain a recording timeline and a Pulse channel but no
+        # SpO2 column at all. That is a no-signal state, not an empty chart.
+        if full_spo2.size == 0:
+            missing_channel = np.zeros(full_time.size, dtype=float)
+            self._spo2_display_cache = (key, missing_channel)
+            return missing_channel
+
+        bridged = self._bridge_slow_channel_dropouts(
+            full_spo2,
+            sample_rate_hz,
+            SPO2_DISPLAY_BRIDGE_MAX_SECONDS,
+        )
+        # Runs longer than the bridge threshold are genuine no-signal periods
+        # for display purposes and must remain visible at zero.
+        bridged = np.where(np.isfinite(bridged), bridged, 0.0)
+        real = np.flatnonzero(
+            np.isfinite(bridged) & (bridged >= SPO2_DISPLAY_WARMUP_MIN)
+        )
+        if real.size:
+            first = int(real[0])
+            if first > 0:
+                bridged[:first] = bridged[first]
+
+        if full_time.size > bridged.size:
+            bridged = np.pad(
+                bridged,
+                (0, full_time.size - bridged.size),
+                mode="constant",
+                constant_values=np.nan,
+            )
+        self._spo2_display_cache = (key, bridged)
+        return bridged
+
+    @staticmethod
+    def _zero_where_reference_has_no_signal(
+        target_values, target_times, reference_values, reference_times, reference_rate_hz
+    ):
+        """Force target samples to zero wherever the held reference is missing/zero."""
+        target = np.asarray(target_values, dtype=float).reshape(-1).copy()
+        target_time = np.asarray(target_times, dtype=float).reshape(-1)
+        reference = np.asarray(reference_values, dtype=float).reshape(-1)
+        reference_time = np.asarray(reference_times, dtype=float).reshape(-1)
+        target_count = min(target.size, target_time.size)
+        reference_count = min(reference.size, reference_time.size)
+        if target_count == 0 or reference_count == 0:
+            return target
+
+        reference = reference[:reference_count]
+        reference_time = reference_time[:reference_count]
+        finite_time = np.isfinite(reference_time)
+        reference = reference[finite_time]
+        reference_time = reference_time[finite_time]
+        if reference_time.size == 0:
+            return target
+
+        order = np.argsort(reference_time, kind="stable")
+        reference = reference[order]
+        reference_time = reference_time[order]
+        lookup_time = target_time[:target_count]
+        reference_index = np.searchsorted(reference_time, lookup_time, side="right") - 1
+        period = 1.0 / max(float(reference_rate_hz), 1e-9)
+        covered = (
+            np.isfinite(lookup_time)
+            & (reference_index >= 0)
+            & (lookup_time < reference_time[-1] + period)
+        )
+        safe_index = np.clip(reference_index, 0, reference.size - 1)
+        no_signal = covered & (
+            ~np.isfinite(reference[safe_index]) | (reference[safe_index] <= 0.0)
+        )
+        target[np.flatnonzero(no_signal)] = 0.0
+        return target
+
+    def _cached_slow_display(self, key, full_values, prepare):
+        """Whole-recording display array of a slow channel, built once and cached."""
+        full_values = np.asarray(full_values, dtype=float)
+        cache = self.__dict__.setdefault("_slow_display_cache", {})
+        hit = cache.get(key)
+        if hit is not None and hit[0] is full_values and hit[1] == len(full_values):
+            return hit[2]
+        prepared = prepare(full_values)
+        cache[key] = (full_values, len(full_values), prepared)
+        return prepared
+
+    def _step_display_window(self, full_values, sample_rate_hz, time_window_seconds, time_offset):
+        """Slow channel as exact sample-and-hold steps on the display grid."""
+        full = np.asarray(full_values, dtype=float).reshape(-1)
+        grid_hz = float(EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
+        offset = max(0.0, float(time_offset))
+        first_tick = int(np.floor(offset * grid_hz + 1e-9))
+        count = int(round(float(time_window_seconds) * grid_hz)) + 2
+        abs_time = (first_tick + np.arange(count, dtype=float)) / grid_hz
+        display_time = abs_time - offset
+        source_index = np.floor(abs_time * float(sample_rate_hz) + 1e-9).astype(int)
+        inside = (source_index >= 0) & (source_index < len(full))
+        display_values = np.full(count, np.nan, dtype=float)
+        display_values[inside] = full[source_index[inside]]
+        return display_time, display_values
+
+    def _smooth_slow_channel_for_display(self, signal_data, window=3):
+        """Remove isolated 1 Hz SpO2/Pulse spikes for display only."""
+        signal = np.asarray(signal_data, dtype=float).reshape(-1).copy()
+        if signal.size < 3:
+            return signal
+
+        finite_idx = np.flatnonzero(np.isfinite(signal))
+        if finite_idx.size == 0:
+            return signal
+        splits = np.where(np.diff(finite_idx) > 1)[0] + 1
+        for segment in np.split(finite_idx, splits):
+            if segment.size >= 3:
+                signal[segment] = (
+                    pd.Series(signal[segment])
+                    .rolling(window=int(window), center=True, min_periods=1)
+                    .median()
+                    .to_numpy(dtype=float)
+                )
+        return signal
 
     def _smooth_display_signal(self, signal_data, window_size=5):
         """Apply a small display-only median filter within contiguous finite segments."""
@@ -2142,6 +5357,7 @@ class SleepMonitorChart(QWidget):
             self._get_airflow_signal_variant("detection"),
             time_window_seconds,
             time_offset,
+            sample_rate_hz=self.channel_rate("airflow"),
         )
 
     def get_airflow_event_baseline(self, airflow, min_occurrence=AIRFLOW_BASELINE_MIN_OCCURRENCE):
@@ -2211,18 +5427,27 @@ class SleepMonitorChart(QWidget):
 
         # ADC signals (0..4095) cannot go negative, so keep the zoom-out floor
         # clamped at 0 to prevent the chart from drifting below zero.
-        limit_min = max(min(y_min, float(default_min)) - headroom, 0.0)
+        floor = -float("inf") if chart_name in BIPOLAR_SIGNAL_NAMES else 0.0
+        limit_min = max(min(y_min, float(default_min)) - headroom, floor)
         limit_max = max(y_max, float(default_max)) + headroom
+        hard = AXIS_HARD_LIMITS.get(chart_name)
+        if hard is not None:
+            limit_min = max(limit_min, float(hard[0]))
+            limit_max = min(limit_max, float(hard[1]))
+
+        # Open the limits first. If the previous frame was constrained to a
+        # narrower medical range (for example SpO2 35..135), setting the new
+        # 0-based range before widening the limits silently clamps it back to
+        # the old floor. The later setLimits call does not reapply that range.
+        try:
+            plot_widget.setLimits(yMin=limit_min, yMax=limit_max)
+        except TypeError:
+            plot_widget.setLimits(yMin=limit_min, yMax=limit_max)
 
         try:
             plot_widget.setYRange(y_min, y_max, padding=0)
         except TypeError:
             plot_widget.setRange(yRange=[y_min, y_max], padding=0)
-
-        try:
-            plot_widget.setLimits(yMin=limit_min, yMax=limit_max)
-        except TypeError:
-            plot_widget.setLimits(yMin=limit_min, yMax=limit_max)
 
         plot_widget.original_y_min = y_min
         plot_widget.original_y_max = y_max
@@ -2310,6 +5535,15 @@ class SleepMonitorChart(QWidget):
     AXIS_MAX_ZOOM_IN = 1.5
     AXIS_MAX_ZOOM_OUT = 2.5
     AXIS_FIT_PAD = 0.08
+    # ---- Playback axis hold (how PSG viewers behave) -----------------------
+    # Commercial PSG software keeps a channel's gain FIXED while paging or
+    # scrolling; auto-scale is something that happens once (on demand, on a
+    # page turn, on a jump), never continuously frame by frame. Refitting on
+    # every ~50ms playback tick makes the trace "breathe" up and down even
+    # though the data has not changed.
+    AXIS_OFFSET_JUMP_MIN_SEC = 4.5
+    AXIS_OFFSET_JUMP_MAX_SEC = 30.0
+    AXIS_SHRINK_HOLD_SEC = 8.0
 
     def _nice_axis_step(self, span, divisions=None):
         """Round a raw span to a 1/2/5/10 x 10^n gridline step."""
@@ -2405,6 +5639,130 @@ class SleepMonitorChart(QWidget):
 
         return current
 
+    def _pin_spo2_ticks(self, plot_widget, y_min, y_max):
+        """SpO2 ticks and numbers stop at 100 % even though the view goes a little higher."""
+        try:
+            axis = plot_widget.getAxis('left')
+        except Exception:
+            return
+        step = float(self._nice_axis_step(float(y_max) - float(y_min)))
+        if step <= 0:
+            return
+        first = np.ceil(float(y_min) / step) * step
+        majors = [float(v) for v in np.arange(first, 100.0 + 1e-9, step)]
+        minors = [float(v) for v in np.arange(first - step / 2.0, 100.0 + 1e-9, step / 2.0)
+                  if float(y_min) <= v <= 100.0 and v not in majors]
+        try:
+            axis.setTicks([[(v, f"{v:g}") for v in majors], [(v, "") for v in minors]])
+        except Exception:
+            pass
+
+    def _pulse_strip_axis_reference(self):
+        """Whole-recording Pulse exactly as the chart draws it (bridged, warm-up
+        filled, zero where SpO2 has no signal), cached once per loaded file."""
+        signals = (self.psg_full_data or {}).get("signals", {})
+        raw = signals.get("pulse")
+        if raw is None:
+            return np.array([], dtype=float)
+        raw = np.asarray(raw, dtype=float)
+        cache = self.__dict__.setdefault("_slow_display_cache", {})
+        hit = cache.get("pulse_strip_axis_ref")
+        if hit is not None and hit[0] is raw and hit[1] == len(raw):
+            return hit[2]
+        rate = self.channel_rate("pulse")
+        full = self._bridge_slow_channel_dropouts(
+            raw, rate, SPO2_DISPLAY_BRIDGE_MAX_SECONDS
+        )
+        full = self._fill_leading_slow_channel_start(full)
+        full = self._smooth_slow_channel_for_display(full)
+        try:
+            if self.spo2_full_data is not None:
+                spo2_time, raw_spo2 = self.spo2_full_data
+                if np.asarray(raw_spo2).size == 0:
+                    full = np.zeros_like(full, dtype=float)
+                else:
+                    full = self._zero_where_reference_has_no_signal(
+                        full, np.asarray(self.channel_time("pulse"), dtype=float)[: full.size],
+                        self._bridge_slow_channel_dropouts(
+                            raw_spo2,
+                            self.channel_rate("spo2"),
+                            SPO2_DISPLAY_BRIDGE_MAX_SECONDS,
+                        ),
+                        spo2_time,
+                        self.channel_rate("spo2"),
+                    )
+        except Exception:
+            pass
+        full = np.where(np.isfinite(full), full, 0.0)
+        cache["pulse_strip_axis_ref"] = (raw, len(raw), full)
+        return full
+
+    def _strip_axis_reference_values(self, chart_name, y_values):
+        """Y values the SpO2 / Pulse axis is fitted to: the WHOLE recording.
+
+        SpO2 and Pulse use a fixed clinical range whose floor/ceiling step out only
+        when the DRAWN data goes past it (a 54 % dip -> floor 50, a sensor-off 0 ->
+        floor 0).  Strip playback captures the charts page by page, so a page that
+        contains such a dip was drawn on a different Y scale than its neighbours
+        and the trace showed a vertical cut at the tile join.  Fitting these two
+        charts to the whole recording gives every page one identical scale.
+
+        It has to be the same while paused: fitting only the visible window when
+        paused and the whole recording while playing made the axis jump (Pulse
+        40-140 <-> 50-200) on every Play and every Pause.  Like a real PSG, the
+        SpO2 / Pulse scale is now one fixed scale per recording, in every state.
+        """
+        try:
+            name = str(chart_name).strip()
+            if name == "SpO2":
+                display_spo2 = self._spo2_display_full()
+                full = self._cached_slow_display(
+                    "spo2", display_spo2, self._smooth_slow_channel_for_display)
+            elif name == "Pulse":
+                full = self._pulse_strip_axis_reference()
+            else:
+                return y_values
+            full = np.asarray(full, dtype=float).reshape(-1)
+            return full if np.isfinite(full).any() else y_values
+        except Exception:
+            return y_values
+
+    def _apply_spo2_zero_axis_if_needed(self, plot_widget, y_values):
+        """Make a zero SpO2 trace visible instead of clipping it below the axis.
+
+        SpO2 normally uses a clinical 60-100-ish scale. When the sensor has no
+        value, however, both the curve and its labels sit at y=0. Every render
+        path (initial chart creation, upload refresh, playback and reset) must
+        widen the axis to zero or a valid zero series looks like a blank chart.
+        """
+        y_values = self._strip_axis_reference_values("SpO2", y_values)
+        drawn = np.asarray(y_values, dtype=float).reshape(-1)
+        drawn = drawn[np.isfinite(drawn)]
+        if drawn.size == 0 or float(drawn.min()) > 0.0:
+            return False
+
+        fixed_low = 0.0
+        fixed_high = float(SPO2_FIXED_AXIS[1]) if SPO2_FIXED_AXIS is not None else 100.0
+        if hasattr(plot_widget, "axis_properties"):
+            try:
+                fixed_high = max(
+                    fixed_high,
+                    float(plot_widget.axis_properties.get("high_value", fixed_high)),
+                )
+            except (TypeError, ValueError):
+                pass
+        room = float(SPO2_LABEL_ROOM_FRACTION)
+        if 0.0 < room < 0.6:
+            fixed_high = fixed_high / (1.0 - room)
+
+        plot_widget.stable_y_range = (fixed_low, fixed_high)
+        plot_widget.stable_y_range_offset = float(
+            getattr(self, "current_time_offset", 0.0) or 0.0
+        )
+        self._lock_auto_axis(plot_widget, fixed_low, fixed_high)
+        self._pin_spo2_ticks(plot_widget, fixed_low, fixed_high)
+        return True
+
     def _pin_axis_tick_spacing(self, plot_widget, y_min, y_max):
         """Fix gridline spacing so tick density does not flip between refreshes."""
         try:
@@ -2418,17 +5776,16 @@ class SleepMonitorChart(QWidget):
             pass
 
     def _apply_dropout_axis(self, plot_widget, chart_name, y_values):
-        """Show zero-valued SpO2/Pulse dropouts without hiding them below limits."""
-        default_min, default_max = SIGNAL_Y_RANGES.get(chart_name, (0.0, 100.0))
-        values = np.asarray(y_values, dtype=float).reshape(-1)
-        finite = values[np.isfinite(values)]
-        has_zero_dropout = bool(finite.size and np.nanmin(finite) <= 0.0)
-
-        limit_min = 0.0 if has_zero_dropout else float(default_min)
-        limit_max = float(default_max)
-        edge_margin = max(limit_max - limit_min, 1e-6) * 0.06
-        limit_min -= edge_margin
-        limit_max += edge_margin
+        """Keep SpO2/Pulse on the Y range declared in ACTIVE_SIGNAL_CONFIGS."""
+        limit_min, limit_max = SIGNAL_Y_RANGES.get(chart_name, (0.0, 100.0))
+        limit_min, limit_max = float(limit_min), float(limit_max)
+        finite_values = np.asarray(y_values, dtype=float).reshape(-1)
+        finite_values = finite_values[np.isfinite(finite_values)]
+        has_zero_dropout = bool(
+            finite_values.size and float(finite_values.min()) <= 0.0
+        )
+        if has_zero_dropout:
+            limit_min = 0.0
         try:
             plot_widget.setLimits(yMin=limit_min, yMax=limit_max)
         except TypeError:
@@ -2437,7 +5794,7 @@ class SleepMonitorChart(QWidget):
         zoom_range = getattr(plot_widget, "zoom_y_range", None)
         if zoom_range is not None:
             y_min, y_max = float(zoom_range[0]), float(zoom_range[1])
-            dbg(f"Preserving zoom range during playback: {y_min} - {y_max}")
+            pass
             if has_zero_dropout and y_min > 0.0:
                 y_min = limit_min
         else:
@@ -2448,31 +5805,788 @@ class SleepMonitorChart(QWidget):
         except TypeError:
             plot_widget.setRange(yRange=[y_min, y_max], padding=0)
 
+    def _axis_typical_levels(self, y_values, window_seconds, offset_seconds, reference=None, reach_factor=None, ahead=None, movement_limit=None):
+        """(typical_low, typical_high, normal_low, normal_high) of the visible signal, or None."""
+        y = np.asarray(y_values, dtype=float).reshape(-1)
+        n = int(y.size)
+        window_seconds = float(window_seconds)
+        if n < 16 or window_seconds <= 0.0:
+            return None
+        finite = np.isfinite(y)
+        if int(finite.sum()) < 12:
+            return None
+        chunk = float(min(max(window_seconds / 10.0, 4.0), 10.0))
+        if window_seconds < 3.0 * chunk:
+            return None  # too short to chunk; caller falls back
+        offset_seconds = float(offset_seconds)
+        t = offset_seconds + np.linspace(0.0, window_seconds, n)
+        expected = chunk * (n - 1) / window_seconds
+        y_for_max = np.where(finite, y, -np.inf)
+        y_for_min = np.where(finite, y, np.inf)
+        all_max = []
+        all_min = []
+        env_max = []
+        env_min = []
+        for shift in (0.0, 0.5 * chunk):
+            ids = np.floor((t - shift) / chunk + 1e-9).astype(np.int64)
+            first = int(np.ceil((offset_seconds - shift) / chunk - 1e-9))
+            last = int(np.floor((offset_seconds + window_seconds - shift) / chunk + 1e-9)) - 1
+            starts = np.concatenate(([0], np.flatnonzero(np.diff(ids)) + 1))
+            chunk_ids = ids[starts]
+            counts = np.add.reduceat(finite.astype(np.int64), starts)
+            maxima = np.maximum.reduceat(y_for_max, starts)
+            minima = np.minimum.reduceat(y_for_min, starts)
+            ok = (
+                (chunk_ids >= first) & (chunk_ids <= last)
+                & (counts >= 0.6 * expected)
+                & np.isfinite(maxima) & np.isfinite(minima)
+            )
+            all_max.append(maxima[ok])
+            all_min.append(minima[ok])
+            # Include partly visible edge chunks so incoming large breaths widen the axis early.
+            ok_edge = (
+                (counts >= max(3.0, 0.08 * expected))
+                & np.isfinite(maxima) & np.isfinite(minima)
+            )
+            env_max.append(maxima[ok_edge])
+            env_min.append(minima[ok_edge])
+        maxima = np.concatenate(all_max)
+        minima = np.concatenate(all_min)
+        edge_maxima = np.concatenate(env_max)
+        edge_minima = np.concatenate(env_min)
+        if ahead is not None and np.size(ahead) > 0:
+            edge_maxima = np.append(edge_maxima, float(np.max(ahead)))
+            edge_minima = np.append(edge_minima, float(np.min(ahead)))
+        if maxima.size < 6:
+            return None
+        if movement_limit is not None and float(movement_limit) > 0.0:
+            # Measure "typical breathing" on the calm chunks only (see
+            # AXIS_MOVEMENT_AMPLITUDE_FACTOR_BY_CHART).  Too few calm chunks (the
+            # whole window really is that big) -> keep the old behaviour.
+            calm = (maxima - minima) <= float(movement_limit)
+            if int(np.count_nonzero(calm)) >= 6:
+                maxima = maxima[calm]
+                minima = minima[calm]
+        pct = float(AXIS_SMOOTH_TYPICAL_PCT)
+        high = float(np.percentile(maxima, pct))
+        low = float(np.percentile(minima, 100.0 - pct))
+        if not (high > low):
+            return None
+        factor = float(AXIS_SMOOTH_NORMAL_REACH if reach_factor is None else reach_factor)
+        fence_amplitude = high - low
+        if reference is not None and float(reference) > fence_amplitude:
+            fence_amplitude = float(reference)
+        reach = factor * fence_amplitude
+        upper = edge_maxima[edge_maxima <= high + reach]
+        lower = edge_minima[edge_minima >= low - reach]
+        high_normal = float(max(high, upper.max())) if upper.size else high
+        low_normal = float(min(low, lower.min())) if lower.size else low
+        return low, high, low_normal, high_normal
+
+    def _axis_lookahead_values(self, chart_name, window_seconds, offset_seconds):
+        """The samples just beyond the right edge of the window, or None."""
+        seconds = float(AXIS_SMOOTH_LOOKAHEAD_SEC)
+        if seconds <= 0.0 or str(chart_name).strip() not in AXIS_SMOOTH_NORMAL_REACH_BY_CHART:
+            return None
+        try:
+            if self.is_all_psg_mode():
+                return None
+            speed = float(getattr(self, "playback_speed", 1.0) or 1.0)
+            seconds = min(seconds * max(1.0, speed), 30.0)
+            full = np.asarray(self._get_full_signal_for_auto_range(chart_name), dtype=float).reshape(-1)
+            rate = float(self.channel_rate(chart_name))
+        except Exception:
+            return None
+        if full.size == 0 or not np.isfinite(rate) or rate <= 0.0:
+            return None
+        start = int((float(offset_seconds) + float(window_seconds)) * rate)
+        end = min(int(full.size), start + int(seconds * rate) + 1)
+        if start < 0 or end - start < 3:
+            return None
+        segment = full[start:end]
+        segment = segment[np.isfinite(segment)]
+        return segment if segment.size >= 3 else None
+
+    def _axis_smooth_target(self, y_values, chart_name, window_seconds, offset_seconds, reference=None, ahead=None):
+        """Return the ideal (centre, half_span, typical_amplitude), or None for a flat/empty window."""
+        reach_factor = AXIS_SMOOTH_NORMAL_REACH_BY_CHART.get(
+            str(chart_name).strip(), AXIS_SMOOTH_NORMAL_REACH,
+        )
+        if str(chart_name).strip() not in AXIS_SMOOTH_NORMAL_REACH_BY_CHART:
+            reference = None
+        movement_limit = None
+        recording_amplitude = None
+        movement_factor = AXIS_MOVEMENT_AMPLITUDE_FACTOR_BY_CHART.get(str(chart_name).strip())
+        if movement_factor:
+            recording_amplitude = self._axis_reference_amplitude(chart_name)
+            if recording_amplitude:
+                movement_limit = float(movement_factor) * float(recording_amplitude)
+        levels = self._axis_typical_levels(
+            y_values, window_seconds, offset_seconds, reference, reach_factor, ahead,
+            movement_limit,
+        )
+        if levels is not None:
+            low, high, low_normal, high_normal = levels
+            if movement_factor and (high_normal - low_normal) > 4.0 * max(high - low, 1e-9):
+                self._log_axis_widened(
+                    chart_name, high - low, high_normal - low_normal,
+                    recording_amplitude, movement_limit,
+                )
+            amplitude = high - low
+            centre = (high_normal + low_normal) / 2.0
+            core_half = 0.5 * (high_normal - low_normal) + float(AXIS_SMOOTH_MARGIN) * amplitude
+            band = self._axis_band_fraction()
+            half = core_half / (1.0 - 2.0 * band)
+            typical_amplitude = float(amplitude)
+        else:
+            typical_amplitude = None
+            # Short window or too few chunks: use the classic trimmed fit.
+            series = np.asarray(y_values, dtype=float).reshape(-1)
+            series = series[np.isfinite(series)]
+            if series.size < 8 or float(series.max()) <= float(series.min()):
+                return None
+            fallback_min, fallback_max = SIGNAL_Y_RANGES.get(chart_name, (0.0, 100.0))
+            raw_min, raw_max = self._windowed_axis_range_from_values(
+                series, fallback_min, fallback_max,
+            )
+            centre = (float(raw_max) + float(raw_min)) / 2.0
+            half = (float(raw_max) - float(raw_min)) / 2.0
+            # the classic fit is padded by ~8% on each side
+            typical_amplitude = 2.0 * half / 1.16
+        half = max(float(half), float(AXIS_SMOOTH_MIN_HALF))
+        return float(centre), half, typical_amplitude
+
+    @staticmethod
+    def _axis_band_fraction():
+        """Height of one compress band (0 when the compress display is off)."""
+        if str(AXIS_SMOOTH_OVERFLOW) == "compress":
+            return min(max(float(AXIS_SMOOTH_BAND), 0.0), 0.4)
+        return 0.0
+
+    def _axis_half_for_amplitude(self, amplitude):
+        """View half-span that suits normal breathing of the given typical amplitude."""
+        band = self._axis_band_fraction()
+        core_half = (0.65 + float(AXIS_SMOOTH_MARGIN)) * float(amplitude)
+        return max(core_half / (1.0 - 2.0 * band), float(AXIS_SMOOTH_MIN_HALF))
+
+    def _axis_reference_amplitude(self, chart_name):
+        """Typical breathing amplitude of the whole recording (cached), or None."""
+        try:
+            full = np.asarray(self._get_full_signal_for_auto_range(chart_name), dtype=float).reshape(-1)
+            rate = float(self.channel_rate(chart_name))
+        except Exception:
+            return None
+        if full.size < 200 or not np.isfinite(rate) or rate <= 0.0:
+            return None
+        cache = self.__dict__.setdefault("_axis_reference_cache", {})
+        fingerprint = (
+            str(chart_name), int(full.size),
+            float(np.nansum(full[:: max(1, full.size // 64)])),
+        )
+        if fingerprint in cache:
+            return cache[fingerprint]
+        levels = self._axis_typical_levels(full, full.size / rate, 0.0)
+        value = float(levels[1] - levels[0]) if levels is not None else None
+        if value is not None and not value > 0.0:
+            value = None
+        for stale in [key for key in cache if key[0] == fingerprint[0]]:
+            del cache[stale]
+        cache[fingerprint] = value
+        return value
+
+    @staticmethod
+    def _axis_smooth_step(state, centre_target, half_target, now):
+        """Ease the shown axis (state) toward the target."""
+        dt = min(max(float(now) - float(state["t"]), 0.0), 30.0)
+        centre = float(state["c"])
+        half = float(state["h"])
+
+        # Half-span: quick to zoom out, slow to zoom in, with a start/stop latch.
+        ratio = half_target / half
+        if state["h_moving"]:
+            if 0.93 <= ratio <= 1.07:
+                state["h_moving"] = False
+        elif ratio > 1.20 or ratio < 0.80:
+            state["h_moving"] = True
+        if state["h_moving"]:
+            tau = AXIS_SMOOTH_ZOOM_OUT_SEC if half_target > half else AXIS_SMOOTH_ZOOM_IN_SEC
+            alpha = 1.0 - math.exp(-dt / max(float(tau), 1e-3))
+            half = math.exp(math.log(half) + alpha * (math.log(half_target) - math.log(half)))
+
+        # Centre (baseline drift).
+        offset = (centre_target - centre) / half
+        if state["c_moving"]:
+            if abs(offset) < 0.06:
+                state["c_moving"] = False
+        elif abs(offset) > 0.22:
+            state["c_moving"] = True
+        if state["c_moving"]:
+            alpha = 1.0 - math.exp(-dt / max(float(AXIS_SMOOTH_SHIFT_SEC), 1e-3))
+            centre += alpha * (centre_target - centre)
+
+        state["c"] = centre
+        state["h"] = half
+        state["t"] = float(now)
+
+    @staticmethod
+    def _compress_knee(reach):
+        """Knee width W so that the log compression has slope 1 where it starts."""
+        reach = max(float(reach), 2.0)
+        low, high = 1e-6, reach
+        for _ in range(60):
+            mid = 0.5 * (low + high)
+            if mid * math.log1p(reach / mid) < 1.0:
+                low = mid
+            else:
+                high = mid
+        return 0.5 * (low + high)
+
+    def _pin_core_ticks(self, plot_widget, core_low, core_high, step):
+        """Y ticks only inside the linear part (the compress bands have no labels)."""
+        try:
+            axis = plot_widget.getAxis('left')
+        except Exception:
+            return
+        if str(getattr(plot_widget, "chart_name", "")).strip() in HIDDEN_Y_AXIS_VALUE_CHARTS:
+            axis.setStyle(showValues=False, tickLength=0)
+            axis.setTicks([[]])
+            plot_widget._core_ticks_active = False
+            return
+        step = float(step)
+        if step <= 0.0:
+            return
+        first = np.ceil(core_low / step - 1e-9) * step
+        majors = [float(v) for v in np.arange(first, core_high + 1e-9, step)]
+        half = step / 2.0
+        first_minor = np.ceil(core_low / half - 1e-9) * half
+        minors = [
+            float(v) for v in np.arange(first_minor, core_high + 1e-9, half)
+            if all(abs(v - m) > half * 0.25 for m in majors)
+        ]
+        if not majors:
+            return
+        try:
+            axis.setTicks([[(v, f"{v:g}") for v in majors], [(v, "") for v in minors]])
+            plot_widget._core_ticks_active = True
+        except Exception:
+            pass
+
+    def _release_core_ticks(self, plot_widget):
+        """Give the axis back its automatic ticks (used when the user zooms by hand)."""
+        if getattr(plot_widget, "_core_ticks_active", False):
+            try:
+                axis = plot_widget.getAxis('left')
+                if str(getattr(plot_widget, "chart_name", "")).strip() in HIDDEN_Y_AXIS_VALUE_CHARTS:
+                    axis.setStyle(showValues=False, tickLength=0)
+                    axis.setTicks([[]])
+                else:
+                    axis.setTicks(None)
+            except Exception:
+                pass
+            plot_widget._core_ticks_active = False
+
+    def _apply_axis_overflow(self, plot_widget, y_min, y_max, core_low, core_high, mode):
+        """Redraw the trace so a big movement stays visible instead of running off the chart."""
+        curve = getattr(plot_widget, "plot_curve", None)
+        if curve is None:
+            return
+        x = getattr(curve, "xData", None)
+        y = getattr(curve, "yData", None)
+        if x is None or y is None:
+            return
+        y = np.asarray(y, dtype=float)
+        if y.size == 0:
+            return
+        finite = np.isfinite(y)
+        span = float(y_max) - float(y_min)
+        if mode == "edge":
+            inset = 0.012 * span
+            over = finite & ((y > y_max - inset) | (y < y_min + inset))
+            if not over.any():
+                return
+            drawn = np.clip(y, y_min + inset, y_max - inset)
+        else:
+            over_high = finite & (y > core_high)
+            over_low = finite & (y < core_low)
+            if not (over_high.any() or over_low.any()):
+                return
+            band = float(core_low) - float(y_min)
+            if band <= 0.0:
+                return
+            reach = float(AXIS_SMOOTH_COMPRESS_RANGE)
+            knee = self._compress_knee(reach)
+            norm = math.log1p(reach / knee)
+            drawn = y.copy()
+            u = (y[over_high] - core_high) / band
+            drawn[over_high] = core_high + band * 0.97 * np.minimum(np.log1p(u / knee) / norm, 1.0)
+            u = (core_low - y[over_low]) / band
+            drawn[over_low] = core_low - band * 0.97 * np.minimum(np.log1p(u / knee) / norm, 1.0)
+        try:
+            curve.setData(x, drawn, connect='finite')
+        except Exception:
+            pass
+
+    def _apply_smooth_auto_axis(self, plot_widget, chart_name, y_values):
+        """Smooth, artifact-proof auto-scale. Returns False if it could not run."""
+        hold_map = self._axis_hold_map()
+        state = hold_map.get(chart_name)
+        now = time.monotonic()
+        try:
+            current_offset = float(getattr(self, "current_time_offset", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            current_offset = 0.0
+        try:
+            window_seconds = float(self.get_effective_time_window_seconds())
+        except Exception:
+            window_seconds = float(getattr(self, "current_time_window", 60.0) or 60.0)
+
+        jump_threshold = max(
+            self.AXIS_OFFSET_JUMP_MIN_SEC,
+            min(window_seconds * 0.5, self.AXIS_OFFSET_JUMP_MAX_SEC),
+        )
+        if state is not None and (
+            state.get("kind") != "smooth"
+            or abs(current_offset - float(state["offset"])) > jump_threshold
+        ):
+            state = None  # seek / new window: fit straight away, no easing
+
+        # Typical breathing amplitude of this recording controls the Airflow fence and gain hold.
+        reference = state.get("amp_ref") if state is not None else None
+        if reference is None:
+            reference = self._axis_reference_amplitude(chart_name)
+        ahead = self._axis_lookahead_values(chart_name, window_seconds, current_offset)
+        target = self._axis_smooth_target(
+            y_values, chart_name, window_seconds, current_offset, reference, ahead,
+        )
+
+        # Gain hold: a flat / dead window must not make the axis zoom in on noise.
+        amplitude = target[2] if target is not None else None
+        # No target at all = the window is flat or empty: nothing to measure = dead.
+        dead_window = target is None
+        hold = False
+        if amplitude is not None or dead_window:
+            if reference is not None and reference > 0.0:
+                share = 0.0 if dead_window else amplitude / reference
+                if share < float(AXIS_SMOOTH_FLAT_FRACTION):
+                    since = state.get("flat_since") if state is not None else None
+                    if since is None:
+                        since = current_offset
+                    if state is not None:
+                        state["flat_since"] = since
+                    weak_but_alive = share >= float(AXIS_SMOOTH_DEAD_FRACTION)
+                    long_enough = (current_offset - since) >= float(AXIS_SMOOTH_FLAT_HOLD_SEC)
+                    hold = not (weak_but_alive and long_enough)
+                elif state is not None:
+                    state.pop("flat_since", None)
+
+        if state is None:
+            if hold:
+                # No axis yet (first fit / seek into a flat stretch): use the typical
+                # scale of the recording, centred on the level the signal sits at.
+                series = np.asarray(y_values, dtype=float).reshape(-1)
+                series = series[np.isfinite(series)]
+                if series.size:
+                    centre = float(np.median(series))
+                    half = self._axis_half_for_amplitude(reference)
+                    if target is not None and target[1] > half:
+                        # Larger breaths in the window must remain visible.
+                        centre, half = target[0], target[1]
+                    target = (centre, half, None)
+            if target is None:
+                return False
+            state = {
+                "kind": "smooth", "c": target[0], "h": target[1], "t": now,
+                "offset": current_offset, "h_moving": False, "c_moving": False,
+                "step": None, "applied": None,
+                "amp_ref": reference if hold else amplitude,
+            }
+            if hold:
+                state["flat_since"] = current_offset
+        else:
+            if target is not None and hold and target[1] > float(state["h"]):
+                pass        # larger breathing than the held scale: zoom out to it (never in)
+            elif target is None or hold:
+                target = (state["c"], state["h"])       # keep the scale exactly as it is
+            elif amplitude is not None:
+                # Follow real changes of the breathing amplitude, slowly.
+                old_reference = float(state.get("amp_ref") or amplitude)
+                elapsed = min(abs(current_offset - float(state["offset"])), 600.0)
+                follow = 1.0 - math.exp(-elapsed / max(float(AXIS_SMOOTH_REFERENCE_SEC), 1e-3))
+                state["amp_ref"] = old_reference + follow * (amplitude - old_reference)
+            self._axis_smooth_step(state, target[0], target[1], now)
+            state["offset"] = current_offset
+        hold_map[chart_name] = state
+
+        y_min = float(state["c"]) - float(state["h"])
+        y_max = float(state["c"]) + float(state["h"])
+        span = y_max - y_min
+        applied = state.get("applied")
+        needs_apply = applied is None
+        if not needs_apply:
+            tolerance = span * 0.002  # ~0.2% of the height is well under a pixel
+            needs_apply = (
+                abs(y_min - applied[0]) > tolerance or abs(y_max - applied[1]) > tolerance
+            )
+            if not needs_apply:
+                try:
+                    view_low, view_high = plot_widget.getViewBox().viewRange()[1]
+                    needs_apply = (
+                        abs(float(view_low) - applied[0]) > span * 0.01
+                        or abs(float(view_high) - applied[1]) > span * 0.01
+                    )
+                except Exception:
+                    pass
+        overflow_mode = str(AXIS_SMOOTH_OVERFLOW)
+        band_fraction = float(AXIS_SMOOTH_BAND) if overflow_mode == "compress" else 0.0
+        core_low = y_min + band_fraction * span
+        core_high = y_max - band_fraction * span
+        if needs_apply:
+            self._lock_auto_axis(plot_widget, y_min, y_max)
+            # Gridline spacing only changes when the span moved well away from
+            # what the current spacing suits (no flipping between refreshes).
+            core_span = core_high - core_low
+            step_now = self._nice_axis_step(core_span)
+            previous = state.get("step")
+            step_changed = previous is None or (
+                step_now != previous and not (2.5 <= core_span / previous <= 9.0)
+            )
+            if step_changed:
+                state["step"] = step_now
+            if band_fraction > 0.0:
+                self._pin_core_ticks(plot_widget, core_low, core_high, state["step"])
+            elif step_changed:
+                self._pin_axis_tick_spacing(plot_widget, y_min, y_max)
+            state["applied"] = (y_min, y_max)
+        plot_widget.stable_y_range = (y_min, y_max)
+        plot_widget.stable_y_range_offset = current_offset
+        if overflow_mode in ("compress", "edge"):
+            self._apply_axis_overflow(
+                plot_widget, y_min, y_max, core_low, core_high, overflow_mode,
+            )
+        return True
+
     def _apply_windowed_auto_axis(self, plot_widget, chart_name, y_values):
-        """Data-driven Y-axis for one chart, held steady between refreshes."""
+        """Autoscale Airflow/Thorax to the visible data and preserve manual zoom."""
+        self._apply_windowed_auto_axis_core(plot_widget, chart_name, y_values)
+        if chart_name in AXIS_SMOOTH_CHARTS:
+            self._extend_zoom_out_to_window(plot_widget, y_values)
+
+    def _extend_zoom_out_to_window(self, plot_widget, y_values):
+        """Let the "-" button zoom out far enough to bring the WHOLE window into view.
+
+        _lock_auto_axis() caps zoom-out at AXIS_MAX_ZOOM_OUT (2.5) x the auto-fit
+        span so a chart cannot be blown up until it looks flat.  A body movement is
+        ~10x the breathing, so with that cap "-" could never bring it into the frame:
+        it stayed cut at the top however often "-" was pressed.  Fixed gain stays the
+        default (breathing big, movement cut); only the zoom-out LIMIT is raised to the
+        farthest sample of the visible window from the zoom centre (+15 % air).
+        "-" then shrinks everything proportionally until the movement fits, and "R"
+        returns to the fitted view.
+        """
+        try:
+            low = getattr(plot_widget, "original_y_min", None)
+            high = getattr(plot_widget, "original_y_max", None)
+            limit_low = getattr(plot_widget, "zoom_y_min_limit", None)
+            limit_high = getattr(plot_widget, "zoom_y_max_limit", None)
+            if None in (low, high, limit_low, limit_high):
+                return
+            values = np.asarray(y_values, dtype=float).reshape(-1)
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                return
+            default_cap = (float(high) - float(low)) * float(self.AXIS_MAX_ZOOM_OUT)
+            # zoom_vertical() zooms around the median of the drawn trace, so the view
+            # must reach the sample FARTHEST from that median on either side.
+            centre = float(np.median(values))
+            reach = max(float(values.max()) - centre, centre - float(values.min()))
+            needed = 2.0 * reach * 1.15
+            plot_widget.zoom_y_max_span = float(
+                min(max(default_cap, needed), float(limit_high) - float(limit_low))
+            )
+        except Exception:
+            pass
+
+    def _apply_windowed_auto_axis_core(self, plot_widget, chart_name, y_values):
+        """Original body of _apply_windowed_auto_axis (see the wrapper above)."""
         if hasattr(plot_widget, "axis_properties"):
             return
+        # Strip playback: one identical SpO2 / Pulse scale for every captured page.
+        y_values = self._strip_axis_reference_values(chart_name, y_values)
 
         zoom_y_range = getattr(plot_widget, "zoom_y_range", None)
         if zoom_y_range is not None:
+            self._release_core_ticks(plot_widget)
             return
 
-        raw_min, raw_max = self.get_signal_auto_axis_range(chart_name)
-        y_min, y_max = self._stable_axis_range(plot_widget, raw_min, raw_max)
+        if chart_name == "Snoring" and SNORING_FIXED_AXIS_FROM_RECORDING:
+            fixed = self._snoring_recording_axis()
+            if fixed is not None:
+                y_min, y_max = fixed
+                plot_widget.stable_y_range = (y_min, y_max)
+                plot_widget.stable_y_range_offset = float(
+                    getattr(self, "current_time_offset", 0.0) or 0.0
+                )
+                try:
+                    view_low, view_high = plot_widget.getViewBox().viewRange()[1]
+                    tolerance = max(y_max - y_min, 1e-9) * 1e-3
+                    if abs(float(view_low) - y_min) <= tolerance and abs(float(view_high) - y_max) <= tolerance:
+                        return
+                except Exception:
+                    pass
+                self._lock_auto_axis(plot_widget, y_min, y_max)
+                self._pin_axis_tick_spacing(plot_widget, y_min, y_max)
+                return
 
-        if getattr(plot_widget, "stable_y_range", None) == (y_min, y_max):
+        # Paused after a Play: keep the gain of the Play (see _remember_play_scale_for_pause).
+        if chart_name in AXIS_SMOOTH_CHARTS and not self.__dict__.get("_strip_force_axis_fit", False):
+            held_range = self._pause_hold_range(chart_name)
+            if held_range is not None:
+                y_min, y_max = (float(value) for value in held_range)
+                plot_widget.stable_y_range = (y_min, y_max)
+                plot_widget.stable_y_range_offset = float(
+                    getattr(self, "current_time_offset", 0.0) or 0.0
+                )
+                self._lock_auto_axis(plot_widget, y_min, y_max)
+                self._pin_axis_tick_spacing(plot_widget, y_min, y_max)
+                return
+
+        # A strip page is captured immediately after refresh_charts().  Changing
+        # the ViewBox to this page's auto-fit and restoring the shared range only
+        # after the refresh is too late: Qt can grab the already-scheduled scene
+        # transform, so adjacent tiles encode the same boundary sample several
+        # pixels apart. Apply the Play-start waveform range here, before the curve
+        # is rendered, so every captured page has one identical data-to-pixel map.
+        if (
+            chart_name in ("Airflow", "Thorax", "Snoring")
+            and self.__dict__.get("_strip_force_axis_fit", False)
+        ):
+            strip_range = self.__dict__.get("_strip_y_held", {}).get(chart_name)
+            if strip_range is not None:
+                y_min, y_max = (float(value) for value in strip_range)
+                if y_max > y_min:
+                    plot_widget.stable_y_range = (y_min, y_max)
+                    plot_widget.stable_y_range_offset = float(
+                        getattr(self, "current_time_offset", 0.0) or 0.0
+                    )
+                    self._lock_auto_axis(plot_widget, y_min, y_max)
+                    self._pin_axis_tick_spacing(plot_widget, y_min, y_max)
+                    return
+
+        if AXIS_SMOOTH_ENABLED and not CLASSIC_PLOT_LOGIC and chart_name in AXIS_SMOOTH_CHARTS:
+            if self._apply_smooth_auto_axis(plot_widget, chart_name, y_values):
+                return
+
+        if chart_name == "SpO2" and SPO2_FIXED_AXIS is not None:
+            fixed_low, fixed_high = float(SPO2_FIXED_AXIS[0]), float(SPO2_FIXED_AXIS[1])
+            drawn = np.asarray(y_values, dtype=float).reshape(-1)
+            drawn = drawn[np.isfinite(drawn)]
+            if drawn.size and float(drawn.min()) < fixed_low:
+                lowest = float(drawn.min())
+                # Step the floor down in 10s (68 -> 60, 21 -> 20); a recorded 0 goes to 0.
+                fixed_low = max(float(SPO2_ARTIFACT_FLOOR), np.floor(lowest / 10.0) * 10.0) if lowest > 0 else float(SPO2_ARTIFACT_FLOOR)
+                fixed_low = min(fixed_low, float(SPO2_FIXED_AXIS[0]))
+            room = float(SPO2_LABEL_ROOM_FRACTION)
+            if 0.0 < room < 0.6:
+                fixed_high = (fixed_high - room * fixed_low) / (1.0 - room)
+            plot_widget.stable_y_range = (fixed_low, fixed_high)
+            plot_widget.stable_y_range_offset = float(getattr(self, "current_time_offset", 0.0) or 0.0)
+            try:
+                view_low, view_high = plot_widget.getViewBox().viewRange()[1]
+                if abs(float(view_low) - fixed_low) < 1e-6 and abs(float(view_high) - fixed_high) < 1e-6:
+                    return
+            except Exception:
+                pass
+            self._lock_auto_axis(plot_widget, fixed_low, fixed_high)
+            self._pin_spo2_ticks(plot_widget, fixed_low, fixed_high)
             return
 
-        dbg(
-            f"AXIS {chart_name}: n={len(y_values)} "
-            f"data {float(np.nanmin(y_values)):.1f}..{float(np.nanmax(y_values)):.1f} | "
-            f"raw {raw_min:.1f}..{raw_max:.1f} | axis {y_min:g}..{y_max:g}"
+        if chart_name == "Pulse" and PULSE_FIXED_AXIS is not None:
+            fixed_low, fixed_high = float(PULSE_FIXED_AXIS[0]), float(PULSE_FIXED_AXIS[1])
+            drawn = np.asarray(y_values, dtype=float).reshape(-1)
+            drawn = drawn[np.isfinite(drawn)]
+            if drawn.size:
+                lowest, highest = float(drawn.min()), float(drawn.max())
+                if lowest < fixed_low:
+                    fixed_low = 0.0 if lowest <= 0 else min(fixed_low, np.floor(lowest / 10.0) * 10.0)
+                if highest > fixed_high:
+                    fixed_high = np.ceil(highest / 20.0) * 20.0
+                if PULSE_LABELS_ENABLED:
+                    # The numbers are drawn above the trace: keep the same free share
+                    # of the plot above the highest pulse as SpO2 does.
+                    room = float(SPO2_LABEL_ROOM_FRACTION)
+                    if 0.0 < room < 0.6 and highest > fixed_low:
+                        needed = fixed_low + (highest - fixed_low) / (1.0 - room)
+                        fixed_high = max(fixed_high, np.ceil(needed / 20.0) * 20.0)
+            plot_widget.stable_y_range = (fixed_low, fixed_high)
+            plot_widget.stable_y_range_offset = float(getattr(self, "current_time_offset", 0.0) or 0.0)
+            try:
+                view_low, view_high = plot_widget.getViewBox().viewRange()[1]
+                if abs(float(view_low) - fixed_low) < 1e-6 and abs(float(view_high) - fixed_high) < 1e-6:
+                    return
+            except Exception:
+                pass
+            self._lock_auto_axis(plot_widget, fixed_low, fixed_high)
+            self._pin_axis_tick_spacing(plot_widget, fixed_low, fixed_high)
+            return
+
+        hold_map = self._axis_hold_map()
+        hold = hold_map.get(chart_name)
+        try:
+            current_offset = float(getattr(self, "current_time_offset", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            current_offset = 0.0
+        try:
+            window_seconds = float(self.get_effective_time_window_seconds())
+        except Exception:
+            window_seconds = float(getattr(self, "current_time_window", 60.0) or 60.0)
+        jump_threshold = max(
+            self.AXIS_OFFSET_JUMP_MIN_SEC,
+            min(window_seconds * 0.5, self.AXIS_OFFSET_JUMP_MAX_SEC),
         )
+        if hold is not None and abs(current_offset - float(hold["offset"])) > jump_threshold:
+            hold = None
+        if chart_name in AXIS_ALWAYS_REFIT:
+            hold = None
+
+        fallback_min, fallback_max = SIGNAL_Y_RANGES.get(chart_name, (0.0, 100.0))
+        finite_values = np.asarray(y_values, dtype=float).reshape(-1)
+        finite_values = finite_values[np.isfinite(finite_values)]
+        min_span = AXIS_MIN_SPAN.get(chart_name)
+        if min_span and finite_values.size and float(finite_values.min()) == float(finite_values.max()):
+            raw_min = raw_max = float(finite_values[0])
+        else:
+            raw_min, raw_max = self._windowed_axis_range_from_values(
+                y_values, fallback_min, fallback_max,
+            )
+        if min_span:
+            span = float(raw_max) - float(raw_min)
+            if span < float(min_span):
+                centre = (float(raw_max) + float(raw_min)) / 2.0
+                raw_min = centre - float(min_span) / 2.0
+                raw_max = centre + float(min_span) / 2.0
+        if chart_name in BIPOLAR_SIGNAL_NAMES:
+            magnitude = max(abs(float(raw_min)), abs(float(raw_max)))
+            raw_min, raw_max = -magnitude, magnitude
+        top_headroom = AXIS_TOP_HEADROOM.get(chart_name)
+        if top_headroom:
+            raw_max = float(raw_max) + (float(raw_max) - float(raw_min)) * float(top_headroom)
+        pad = max((float(raw_max) - float(raw_min)) * self.AXIS_BREATHING_PAD, 1e-9)
+        target = self._quantize_axis_range(raw_min - pad, raw_max + pad)
+        ceiling = AXIS_TOP_CEILING.get(chart_name)
+        if ceiling is not None and target[1] > ceiling:
+            target = (target[0], float(ceiling))
+        hard = AXIS_HARD_LIMITS.get(chart_name)
+        if hard is not None:
+            low, high = float(target[0]), float(target[1])
+            if high > hard[1]:
+                low, high = low - (high - hard[1]), hard[1]
+            if low < hard[0]:
+                low, high = hard[0], min(hard[1], high + (hard[0] - low))
+            target = (round(low, 6), round(high, 6))
+        now = time.monotonic()
+        if hold is None:
+            new_range = target
+            shrink_since = None
+            decision = "fit"
+        else:
+            held = (float(hold["y_min"]), float(hold["y_max"]))
+            held_span = held[1] - held[0]
+            if target[0] < held[0] or target[1] > held[1]:
+                grow_low = min(target[0], held[0])
+                grow_high = max(target[1], held[1])
+                grow_pad = (grow_high - grow_low) * self.AXIS_FIT_PAD
+                if target[0] < held[0]:
+                    grow_low -= grow_pad
+                if target[1] > held[1]:
+                    grow_high += grow_pad
+                new_range = self._quantize_axis_range(grow_low, grow_high)
+                shrink_since = None
+                decision = "grow"
+            elif (target[1] - target[0]) < held_span * self.AXIS_SHRINK_THRESHOLD:
+                shrink_since = hold.get("shrink_since") or now
+                if now - shrink_since >= self.AXIS_SHRINK_HOLD_SEC:
+                    new_range = target
+                    shrink_since = None
+                    decision = "shrink"
+                else:
+                    new_range = held
+                    decision = "hold"
+            else:
+                new_range = held
+                shrink_since = None
+                decision = "hold"
+
+        hold_map[chart_name] = {
+            "y_min": float(new_range[0]),
+            "y_max": float(new_range[1]),
+            "offset": current_offset,
+            "shrink_since": shrink_since,
+        }
+        y_min, y_max = float(new_range[0]), float(new_range[1])
         plot_widget.stable_y_range = (y_min, y_max)
-        # Do not pass hard_min/hard_max here: a one-off artifact would turn
-        # them into the zoom floor and make zoom-in much less useful.
+        plot_widget.stable_y_range_offset = current_offset
+        try:
+            view_low, view_high = plot_widget.getViewBox().viewRange()[1]
+            tolerance = max(y_max - y_min, 1e-9) * 1e-3
+            if abs(float(view_low) - y_min) <= tolerance and abs(float(view_high) - y_max) <= tolerance:
+                return
+        except Exception:
+            pass
+        if chart_name in ("Thorax", "Airflow"):
+            pass
         self._lock_auto_axis(plot_widget, y_min, y_max)
         self._pin_axis_tick_spacing(plot_widget, y_min, y_max)
+
+    def _snoring_recording_axis(self):
+        """One Y range for the Snoring chart, from the WHOLE recording (cached).
+
+        Centred on the silent baseline, half-height = a high percentile of the
+        snore-packet amplitudes. Returns (y_min, y_max) or None.
+        """
+        full = self._get_full_signal_for_auto_range("Snoring")
+        key = (str(getattr(self, "loaded_recording_path", "") or ""), int(len(full)),
+               float(SNORING_AXIS_PERCENTILE), float(SNORING_AXIS_GAIN))
+        cache = self.__dict__.get("_snoring_axis_cache")
+        if cache is not None and cache[0] == key:
+            return cache[1]
+
+        result = None
+        values = np.asarray(full, dtype=float).reshape(-1)
+        values = values[np.isfinite(values)]
+        if values.size:
+            baseline = float(np.median(values))
+            deviation = np.abs(values - baseline)
+            peak = float(deviation.max())
+            if peak > 0.0:
+                # Only samples that belong to snore packets, not the silence.
+                active = deviation[deviation > 0.05 * peak]
+                if active.size >= 50:
+                    amplitude = float(np.percentile(active, float(SNORING_AXIS_PERCENTILE)))
+                else:
+                    amplitude = peak
+                gain = float(SNORING_AXIS_GAIN) if float(SNORING_AXIS_GAIN) > 0 else 1.0
+                half = max(amplitude * 1.10 / gain, 1e-6)
+                result = (baseline - half, baseline + half)
+        self._snoring_axis_cache = (key, result)
+        if result is not None:
+            pass
+        return result
+
+    def _axis_hold_map(self):
+        """Per-chart held auto-axis ranges (created lazily)."""
+        hold_map = getattr(self, "_axis_hold", None)
+        if hold_map is None:
+            hold_map = {}
+            self._axis_hold = hold_map
+        return hold_map
+
+    def _clear_axis_hold(self, chart_name=None):
+        """Forget held auto-axis ranges so the next redraw re-fits from scratch."""
+        hold_map = self._axis_hold_map()
+        if chart_name is None:
+            hold_map.clear()
+        else:
+            hold_map.pop(str(chart_name).strip(), None)
 
     def get_signal_auto_axis_range(self, chart_name):
         """Return the data-driven default Y-axis range for a chart."""
@@ -2484,6 +6598,9 @@ class SleepMonitorChart(QWidget):
             return SIGNAL_Y_RANGES.get(name, (0.0, 100.0))
 
         if name in AUTO_RANGE_SIGNAL_NAMES:
+            if self.psg_full_data is None or "signals" not in self.psg_full_data:
+                return SIGNAL_Y_RANGES.get(name, (0.0, 100.0))
+
             cached = self._auto_axis_range_cache.get(name)
             if cached is None:
                 fallback_min, fallback_max = SIGNAL_Y_RANGES.get(name, (0.0, 100.0))
@@ -2512,11 +6629,16 @@ class SleepMonitorChart(QWidget):
 
         y_min, y_max = self.get_signal_auto_axis_range(chart_name)
         self._lock_auto_axis(plot_widget, y_min, y_max)
-        dbg(f"Applied {chart_name} auto axis range: {y_min} - {y_max}")
+        pass
 
         
-    def load_psg_data(self, csv_path):
-        """Reload the chart from the provided PSG CSV file."""
+    def load_psg_data(self, recording_path, defer_extras=False):
+        """Reload the chart from the provided binary PSG recording.
+
+        defer_extras=True (used by load_psg_data_and_detect): sleep metrics are
+        computed in a background thread and the provisional threshold events
+        are skipped, because the detector result replaces them anyway.
+        """
         try:
             previous_time_window = getattr(self, "current_time_window", 60)
             if self.is_playing:
@@ -2529,8 +6651,11 @@ class SleepMonitorChart(QWidget):
             # leftover manual markers must not carry over onto the new
             # file's chart - the old file's data is gone, the old manual
             # events should go with it.
-            previous_csv_path = getattr(self, "loaded_csv_path", None)
-            is_different_file = previous_csv_path is not None and str(csv_path) != str(previous_csv_path)
+            previous_recording_path = getattr(self, "loaded_recording_path", None)
+            is_different_file = (
+                previous_recording_path is not None
+                and str(recording_path) != str(previous_recording_path)
+            )
             if is_different_file:
                 self.dynamic_selections = {}
                 self.selection_labels = {}
@@ -2539,19 +6664,29 @@ class SleepMonitorChart(QWidget):
             self.auto_focus_applied = False
             self._clear_auto_detected_selections()
 
-            time_data, signals = self._load_uploaded_psg_signals(csv_path)
+            time_data, signals, channel_times, channel_rates, source_format = (
+                self._load_uploaded_signals_with_spinner(recording_path)
+            )
             if len(time_data) == 0 or not signals:
-                raise ValueError("Uploaded PSG CSV data could not be loaded.")
+                raise ValueError("Uploaded PSG data could not be loaded.")
 
-            self.psg_full_data = {"time": time_data, "signals": signals}
+            self.psg_full_data = {
+                "time": time_data, "signals": signals, "times": channel_times,
+                "sample_rates": channel_rates,
+                "master_channel": "airflow" if "airflow" in channel_times else "timestamp",
+                "source_format": source_format,
+            }
             self.current_psg_data = self.psg_full_data
             self.spo2_full_data = (
-                np.asarray(time_data, dtype=float),
-                np.asarray(signals.get("spo2", []), dtype=float),
+                np.asarray(channel_times.get("spo2", time_data), dtype=float),
+                np.asarray(
+                    signals.get("spo2_display", signals.get("spo2", [])),
+                    dtype=float,
+                ),
             )
-            self.loaded_csv_path = str(csv_path)
-            self.current_csv_path = str(csv_path)
-            # A fresh load resets session tracking; if this CSV came from a
+            self.loaded_recording_path = str(recording_path)
+            self.current_recording_path = str(recording_path)
+            # A fresh load resets session tracking; if this recording came from a
             # Records row, database_window.py calls set_current_session()
             # right after this returns to re-link it.
             self.current_session_id = None
@@ -2566,8 +6701,11 @@ class SleepMonitorChart(QWidget):
             except (TypeError, ValueError):
                 self.current_time_window = 60.0
             self.auto_rule_ai_result = None
+            self.sensor_off_shade_segments = []
             self.last_detection_error = None
             self._invalidate_signal_caches()
+            # Different recording, different amplitude - start the axis fresh.
+            self._clear_axis_hold()
             for i in range(self.charts_layout.count()):
                 container = self.charts_layout.itemAt(i).widget()
                 if not container or not hasattr(container, "plot_widget"):
@@ -2579,54 +6717,46 @@ class SleepMonitorChart(QWidget):
                 # Different recording, different amplitude - do not hold the
                 # previous file's axis range.
                 plot_widget.stable_y_range = None
+                plot_widget.stable_y_range_offset = None
             enhanced_airflow = signals.get("airflow_enhanced", signals.get("airflow", []))
             sleep_mask = None
             for mask_key in ("sleep_mask", "sleep_staging", "staging_mask", "staging", "sleep_stage_mask"):
                 if mask_key in signals and signals[mask_key] is not None:
                     sleep_mask = signals[mask_key]
                     break
-            self.save_airflow_smoothing_debug_report(
-                csv_path=csv_path,
-                raw_airflow=signals.get("airflow_raw", signals.get("airflow", [])),
-                enhanced_airflow=enhanced_airflow,
-            )
-            try:
-                self.analysis_results = calculate_sleep_metrics(
-                    time_data,
-                    signals,
-                    sleep_mask=sleep_mask,
-                    sample_rate_hz=EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
+            if AIRFLOW_DEBUG_REPORT_ON_UPLOAD:
+                self.save_airflow_smoothing_debug_report(
+                    recording_path=recording_path,
+                    raw_airflow=signals.get("airflow_raw", signals.get("airflow", [])),
+                    enhanced_airflow=enhanced_airflow,
                 )
-                self.analysis_json_path = save_sleep_metrics_json(
-                    self.analysis_results,
-                    source_csv=csv_path,
+            self.analysis_results = None
+            self.analysis_json_path = None
+            if defer_extras:
+                self._start_metrics_worker(
+                    recording_path, time_data, signals, sleep_mask, channel_rates, channel_times,
                 )
-                dbg(f"📝 Analysis JSON saved: {self.analysis_json_path}")
-            except Exception as analysis_error:
-                self.analysis_results = None
-                self.analysis_json_path = None
-                dbg(f"⚠️ Could not calculate/save PSG metrics JSON: {analysis_error}")
+            else:
+                self._compute_metrics_now(
+                    recording_path, time_data, signals, sleep_mask, channel_rates, channel_times,
+                )
 
-            global_events = self._build_airflow_navigation_events(enhanced_airflow)
-            windowed_events = self._build_windowed_airflow_navigation_events(
-                enhanced_airflow,
-                window_seconds=max(1.0, float(self.current_time_window)),
-            )
-            self.airflow_detected_events = (
-                windowed_events if len(windowed_events) >= len(global_events) else global_events
-            )
+            if defer_extras and self._detection_running:
+                # Detector (already running in background) supplies the real
+                # events; these provisional lists were two full passes over
+                # the airflow signal on the GUI thread.
+                self.airflow_detected_events = []
+            else:
+                self.airflow_detected_events = self._compute_fallback_navigation_events()
             self.current_window_airflow_events = []
             self.emit_detected_events_panel()
             self.update_detection_summary_label()
-            dbg(
-                "✅ Loaded respiratory graph data from uploaded CSV "
-                f"{csv_path}"
-            )
-            dbg(f"   Duration: {time_data[-1]/60:.1f} minutes")
+            pass
+            pass
             return time_data, signals
             
         except Exception as e:
-            dbg(f"❌ Error loading PSG data: {e}")
+            pass
             import traceback
             traceback.print_exc()
             # Return empty data if loading fails
@@ -2634,7 +6764,7 @@ class SleepMonitorChart(QWidget):
             self.psg_full_data = None
             self.current_psg_data = None
             self.spo2_full_data = (np.array([]), np.array([]))
-            self.loaded_csv_path = None
+            self.loaded_recording_path = None
             self.current_session_id = None
             self.current_session_root_id = None
             self.auto_rule_ai_result = None
@@ -2646,27 +6776,250 @@ class SleepMonitorChart(QWidget):
             self.analysis_json_path = None
             return np.array([]), {}
 
+    def _compute_metrics_now(self, recording_path, time_data, signals, sleep_mask,
+                             channel_rates, channel_times):
+        """Original synchronous metrics path (kept for callers of load_psg_data)."""
+        try:
+            try:
+                self.analysis_results = calculate_sleep_metrics(
+                    time_data, signals, sleep_mask=sleep_mask,
+                    sample_rate_hz=self.master_rate(),
+                    sample_rates=channel_rates, channel_times=channel_times,
+                )
+            except TypeError:
+                self.analysis_results = calculate_sleep_metrics(
+                    time_data, signals, sleep_mask=sleep_mask,
+                    sample_rate_hz=self.master_rate(),
+                )
+            self.analysis_json_path = save_sleep_metrics_json(
+                self.analysis_results,
+                source_recording=recording_path,
+            )
+            pass
+        except Exception as analysis_error:
+            self.analysis_results = None
+            self.analysis_json_path = None
+            pass
+
+    def _start_metrics_worker(self, recording_path, time_data, signals, sleep_mask,
+                              channel_rates, channel_times):
+        worker = self._MetricsWorker(
+            recording_path, time_data, signals, sleep_mask, self.master_rate(),
+            channel_rates, channel_times, parent=self,
+        )
+        worker.done.connect(self._on_metrics_done)
+        worker.failed.connect(self._on_metrics_failed)
+        self._metrics_worker = worker
+        worker.start()
+
+    def _on_metrics_done(self, results, json_path, recording_path):
+        if self.sender() is not None and self.sender() is not self._metrics_worker:
+            return  # result of an older upload
+        self._metrics_worker = None
+        if str(recording_path) != str(self.loaded_recording_path or ""):
+            return
+        self.analysis_results = results
+        self.analysis_json_path = json_path
+        pass
+
+    def _on_metrics_failed(self, error_message, recording_path):
+        if self.sender() is not None and self.sender() is not self._metrics_worker:
+            return
+        self._metrics_worker = None
+        if str(recording_path) != str(self.loaded_recording_path or ""):
+            return
+        self.analysis_results = None
+        self.analysis_json_path = None
+        pass
+
+    def _compute_fallback_navigation_events(self):
+        """Provisional threshold events (used when the detector is unavailable)."""
+        signals = (self.psg_full_data or {}).get("signals", {})
+        enhanced_airflow = signals.get("airflow_enhanced", signals.get("airflow", []))
+        airflow_fs = self.channel_rate("airflow")
+        global_events = self._build_airflow_navigation_events(enhanced_airflow, fs=airflow_fs)
+        windowed_events = self._build_windowed_airflow_navigation_events(
+            enhanced_airflow,
+            fs=airflow_fs,
+            window_seconds=max(1.0, float(self.current_time_window)),
+        )
+        return windowed_events if len(windowed_events) >= len(global_events) else global_events
+
     def load_psg_data_and_detect(
         self,
-        csv_path,
+        recording_path,
         padding_seconds: float = 30.0,
         focus_first_event: bool = False,
     ):
-        """Load uploaded PSG data, run rule-based detection, and optionally jump to the first event."""
-        time_data, signals = self.load_psg_data(csv_path)
-        if len(time_data) == 0 or not signals:
-            return time_data, signals, False
+        """Load uploaded PSG data, run rule-based detection, and optionally jump to the first event.
 
-        self.run_rule_ai_apnea_detection()
-        jumped = False
-        if focus_first_event:
-            jumped = self.focus_on_first_detected_event(padding_seconds=padding_seconds)
+        PERF: detector reads the file from disk by itself, so it is started
+        FIRST and runs in parallel with the chart load (before: load time +
+        detection time). Its result is queued and applied after the load
+        returns, so loaded_recording_path is already set when it is checked.
+        """
+        self.last_load_rejected_for_short_duration = False
 
-        if not jumped:
-            self.current_time_offset = 0
-            self.refresh_charts()
-        self.time_position_updated.emit()
-        return time_data, signals, jumped
+        # Reject short recordings before detection and chart processing start.
+        # load_sleep_recording() is cached, so an accepted file is reused by
+        # the normal loader below instead of being parsed from disk twice.
+        raw_duration_sec = 0.0
+        try:
+            recording = load_sleep_recording(recording_path)
+            master_channel = recording.get("master_channel", "airflow")
+            time_values = np.asarray(recording.get("time", []), dtype=float)
+            master_rate = float(
+                (recording.get("sample_rates", {}) or {}).get(master_channel, 0.0)
+                or 0.0
+            )
+            finite_time = time_values[np.isfinite(time_values)]
+            if finite_time.size:
+                raw_duration_sec = float(finite_time[-1] - finite_time[0])
+                if master_rate > 0.0:
+                    raw_duration_sec += 1.0 / master_rate
+        except Exception:
+            # Let the existing loader report malformed/unreadable files.
+            raw_duration_sec = 0.0
+
+        # Temporarily disabled: allow recordings shorter than one hour to load
+        # and plot. Restore this guard if the one-hour minimum is needed again.
+        # if 0.0 < raw_duration_sec < MIN_UPLOAD_RECORDING_DURATION_SEC:
+        #     self.last_load_rejected_for_short_duration = True
+        #     show_styled_warning(
+        #         self,
+        #         "Insufficient Data",
+        #         "The data was not loaded because the recording is shorter than 1 hour.\n\n"
+        #         "Minimum required time: 1 hour\n\n"
+        #         "Please select a recording containing at least 1 hour of data.",
+        #         button_text="OK",
+        #     )
+        #     return np.array([]), {}, False
+
+        self._pending_focus_first_event = float(padding_seconds) if focus_first_event else None
+        self._pending_detection_result = None
+        self._upload_loading_path = str(recording_path)
+        self._upload_t0 = time.perf_counter()
+        self._show_upload_overlay("Loading data...")
+        loaded_ok = False
+        try:
+            self.run_rule_ai_apnea_detection(recording_path=recording_path)
+
+            time_data, signals = self.load_psg_data(recording_path, defer_extras=True)
+            _t_loaded = time.perf_counter()
+            loaded_ok = len(time_data) > 0 and bool(signals)
+            if loaded_ok:
+                self._set_upload_overlay_message("Drawing graphs...")
+                QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+                self.current_time_offset = 0
+                self._log_first_draw = True
+                self.refresh_charts()
+                self.time_position_updated.emit()
+                _psg_playback_log(
+                    "upload timeline: loading data %.0f ms, drawing graphs %.0f ms, graphs visible %.0f ms "
+                    "after the upload started"
+                    % ((_t_loaded - self._upload_t0) * 1000.0, (time.perf_counter() - _t_loaded) * 1000.0,
+                       (time.perf_counter() - self._upload_t0) * 1000.0)
+                )
+                if self._detection_running:
+                    # load_psg_data() reset the status text to "Events: --".
+                    if hasattr(self, "detection_summary_label"):
+                        self.detection_summary_label.setText("Detecting events in background...")
+                    if self.play_pause_btn:
+                        self.play_pause_btn.setEnabled(False)
+                        self.play_pause_btn.setText("Detecting...")
+        finally:
+            self._upload_loading_path = None
+            self._hide_upload_overlay()
+
+        # Detection may have finished while the file was still loading.
+        pending = self._pending_detection_result
+        self._pending_detection_result = None
+        if pending is not None:
+            kind, payload, pending_path = pending
+            if kind == "done":
+                self._on_detection_done(payload, pending_path, _from_pending=True)
+            else:
+                self._on_detection_failed(payload, pending_path, _from_pending=True)
+        return time_data, signals, False
+
+    # --- Loading spinners ---------------------------------------------------
+    def _load_uploaded_signals_with_spinner(self, recording_path):
+        """Parse the file in a worker thread while a local event loop keeps the
+        spinner turning. User input is excluded, so nothing can be clicked
+        twice. Same return value / exceptions as _load_uploaded_psg_signals."""
+        if self._upload_loading_path != str(recording_path):
+            return self._load_uploaded_psg_signals(recording_path)
+        worker = self._CallWorker(
+            self._load_uploaded_psg_signals, (recording_path,), parent=self,
+        )
+        loop = QEventLoop()
+        worker.finished.connect(loop.quit)  # queued -> no start/exec race
+        worker.start()
+        loop.exec_(QEventLoop.ExcludeUserInputEvents)
+        worker.wait()
+        if worker.error is not None:
+            raise worker.error
+        return worker.result
+
+    def _show_upload_overlay(self, message):
+        target = getattr(self, "scroll_area", None) or self
+        if self._upload_overlay is None or sip.isdeleted(self._upload_overlay):
+            self._upload_overlay = BusyOverlay(target, message)
+        self._upload_overlay.start(message)
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+
+    def _set_upload_overlay_message(self, message):
+        if self._upload_overlay is not None and not sip.isdeleted(self._upload_overlay):
+            self._upload_overlay.set_message(message)
+
+    def _hide_upload_overlay(self):
+        if self._upload_overlay is not None and not sip.isdeleted(self._upload_overlay):
+            self._upload_overlay.stop()
+
+    def set_events_panel_widget(self, widget):
+        """Optional: tell the chart which widget is the Detected Events panel
+        so the spinner covers exactly that card."""
+        self._events_panel_widget = widget
+        if self._events_panel_overlay is not None and not sip.isdeleted(self._events_panel_overlay):
+            self._events_panel_overlay.deleteLater()
+        self._events_panel_overlay = None
+        if self._detection_running:
+            self._set_detection_busy(True)
+
+    def _find_events_panel(self):
+        widget = self._events_panel_widget
+        if widget is not None and not sip.isdeleted(widget):
+            return widget
+        # Fallback: find the side card by its "Detected Events" title label.
+        try:
+            window = self.window()
+            for label in window.findChildren(QLabel):
+                if label.text().strip().lower() != "detected events":
+                    continue
+                panel = label.parentWidget()
+                for _ in range(4):
+                    if panel is None or panel is window or panel.height() >= 150:
+                        break
+                    panel = panel.parentWidget()
+                if panel is not None and panel is not window:
+                    self._events_panel_widget = panel
+                    return panel
+        except RuntimeError:
+            pass
+        return None
+
+    def _set_detection_busy(self, busy):
+        spinner = getattr(self, "detection_status_spinner", None)
+        if spinner is not None:
+            spinner.start() if busy else spinner.stop()
+        panel = self._find_events_panel()
+        if panel is not None:
+            overlay = self._events_panel_overlay
+            if overlay is None or sip.isdeleted(overlay):
+                overlay = BusyOverlay(panel, "Detecting events...", spinner_size=34)
+                self._events_panel_overlay = overlay
+            overlay.start("Detecting events...") if busy else overlay.stop()
+        self.detection_busy_changed.emit(bool(busy))
 
     def emit_current_navigation_events(self):
         """Emit whichever event source is currently available to the side panel."""
@@ -2703,6 +7056,8 @@ class SleepMonitorChart(QWidget):
         normalized["final_label"] = final_label
         normalized["rule_label"] = str(event.get("rule_label") or final_label)
         normalized["source"] = str(event.get("source") or source_hint or "")
+        if overlaps_exclusion(normalized, self.get_recording_exclusions()["excluded_segments"]):
+            return None
         return normalized
 
     def _get_panel_detected_events(self):
@@ -2773,13 +7128,13 @@ class SleepMonitorChart(QWidget):
         self.apnea_events_updated.emit(events)
 
     def _manual_label_overrides_path(self) -> Path | None:
-        if not getattr(self, "loaded_csv_path", None):
+        if not getattr(self, "loaded_recording_path", None):
             return None
-        csv_path = Path(self.loaded_csv_path)
-        return csv_path.with_name(f"{csv_path.stem}_manual_labels.json")
+        return _sidecar_path_for(self.loaded_recording_path)
 
     def _selection_time_key(self, start_sec: float, end_sec: float) -> str:
-        return f"{float(start_sec):.2f}_{float(end_sec):.2f}"
+        start_sec, end_sec = self._ordered_span(start_sec, end_sec)
+        return f"{start_sec:.2f}_{end_sec:.2f}"
 
     @staticmethod
     def _first_number(selection: dict, keys: tuple[str, ...]) -> float | None:
@@ -2805,14 +7160,10 @@ class SleepMonitorChart(QWidget):
         self.deleted_auto_event_keys = set()
         self._deleted_span_cache = None
         overrides_path = self._manual_label_overrides_path()
-        if overrides_path is None or not overrides_path.exists():
+        if overrides_path is None:
             return
 
-        try:
-            raw_data = json.loads(overrides_path.read_text(encoding="utf-8"))
-        except Exception as error:
-            print(f"⚠️ Could not load manual label overrides: {error}")
-            return
+        raw_data = _read_signed_json(overrides_path)
 
         if not isinstance(raw_data, dict):
             return
@@ -2960,13 +7311,12 @@ class SleepMonitorChart(QWidget):
             return
 
         try:
-            overrides_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "label_overrides": self.manual_label_overrides,
                 "manual_selections": self._collect_manual_selections_for_save(),
                 "deleted_auto_events": self._collect_deleted_auto_events_for_save(),
             }
-            overrides_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            _write_signed_json(overrides_path, payload)
         except Exception as error:
             print(f"⚠️ Could not save manual label overrides: {error}")
 
@@ -3308,16 +7658,144 @@ class SleepMonitorChart(QWidget):
         self.emit_detected_events_panel()
         self.update_detection_summary_label()
 
-    def run_rule_ai_apnea_detection(self):
-        """Run airflow baseline rule detection on the loaded CSV."""
-        if not self.loaded_csv_path:
-            self.last_detection_error = "CSV path missing for detection."
+    def _postprocess_desaturations(self):
+        """Merge detector splits and attach PSG-style desaturation quality flags."""
+        if not DESAT_POSTPROCESS_ENABLED or not self.auto_rule_ai_result:
+            return
+
+        desaturations = self.auto_rule_ai_result.get("desaturations") or []
+        if not desaturations:
+            return
+
+        times = None
+        spo2_values = None
+        psg_data = getattr(self, "psg_full_data", None) or {}
+        signals = psg_data.get("signals") or {}
+        channel_times = psg_data.get("times") or {}
+        if "spo2" in signals:
+            # Use raw SpO2, never the display-bridged copy.
+            spo2_values = np.asarray(signals["spo2"], dtype=float)
+            times = np.asarray(
+                channel_times.get("spo2", psg_data.get("time", [])),
+                dtype=float,
+            )
+        else:
+            spo2_full_data = getattr(self, "spo2_full_data", None)
+            if spo2_full_data is not None:
+                times, spo2_values = spo2_full_data
+
+        if times is None or spo2_values is None or len(times) == 0:
+            return
+
+        count = min(len(times), len(spo2_values))
+        times = np.asarray(times, dtype=float)[:count]
+        spo2_values = np.asarray(spo2_values, dtype=float)[:count]
+        try:
+            merged = merge_split_desaturations(
+                desaturations,
+                times,
+                spo2_values,
+            )
+            merged = flag_desat_quality(merged, times, spo2_values)
+        except Exception as error:
+            pass
+            return
+
+        pass
+        self.auto_rule_ai_result["desaturations"] = merged
+
+    def _finish_detection_result(self):
+        self._postprocess_desaturations()
+        self._apply_deleted_auto_event_filters_to_auto_result()
+        self._apply_manual_label_overrides_to_auto_result()
+        self.auto_focus_applied = False
+        self.last_detection_error = None
+        self._apply_sensor_off_masking_after_detection()
+        self.refresh_charts()
+        self._sync_auto_detected_selections_into_overlays()
+        self.render_dynamic_selections()
+        self._last_events_signature = None
+        self.emit_detected_events_panel()
+        self.update_detection_summary_label()
+
+    def _on_detection_done(self, result, recording_path, _from_pending=False):
+        if (not _from_pending and self.sender() is not None
+                and self.sender() is not self._detect_worker):
+            return  # an older upload's worker finished late; ignore it
+        if self._upload_loading_path == str(recording_path):
+            # Finished before the chart load did; applied right after it.
+            self._pending_detection_result = ("done", result, recording_path)
+            return
+        self._detection_running = False
+        self._set_detection_busy(False)
+        self._detect_worker = None
+        if self.play_pause_btn:
+            self.play_pause_btn.setEnabled(True)
+            self.play_pause_btn.setText("▶ Play")
+        if str(recording_path) != str(self.loaded_recording_path or ""):
+            return
+        self.auto_rule_ai_result = result
+        _t_apply = time.perf_counter()
+        self._finish_detection_result()
+        _upload_t0 = self.__dict__.get("_upload_t0")
+        if _upload_t0 is not None:
+            _psg_playback_log(
+                "events shown: %.0f ms after the upload started (showing them took %.0f ms)"
+                % ((time.perf_counter() - _upload_t0) * 1000.0, (time.perf_counter() - _t_apply) * 1000.0)
+            )
+        padding = self._pending_focus_first_event
+        self._pending_focus_first_event = None
+        if padding is not None:
+            self.focus_on_first_detected_event(padding_seconds=padding)
+            self.time_position_updated.emit()
+
+    def _on_detection_failed(self, error_message, recording_path, _from_pending=False):
+        if (not _from_pending and self.sender() is not None
+                and self.sender() is not self._detect_worker):
+            return
+        if self._upload_loading_path == str(recording_path):
+            self._pending_detection_result = ("failed", error_message, recording_path)
+            return
+        self._detection_running = False
+        self._set_detection_busy(False)
+        self._detect_worker = None
+        if self.play_pause_btn:
+            self.play_pause_btn.setEnabled(True)
+            self.play_pause_btn.setText("▶ Play")
+        if str(recording_path) != str(self.loaded_recording_path or ""):
+            return
+        self.auto_rule_ai_result = None
+        self.last_detection_error = f"Detection failed: {error_message}"
+        if not getattr(self, "airflow_detected_events", None):
+            # Upload path skipped these; build them now as the fallback list.
+            try:
+                self.airflow_detected_events = self._compute_fallback_navigation_events()
+            except Exception as fallback_error:
+                pass
+        self._last_events_signature = None
+        self.emit_detected_events_panel()
+        self.update_detection_summary_label()
+
+    def is_detection_running(self):
+        return bool(self._detection_running)
+
+    def run_rule_ai_apnea_detection(self, background=True, recording_path=None):
+        """Run apnea detection in a worker by default.
+
+        recording_path: detect on this file instead of loaded_recording_path (used to start
+        detection before the chart load has finished).
+        """
+        target_recording_path = (
+            str(recording_path) if recording_path else self.loaded_recording_path
+        )
+        if not target_recording_path:
+            self.last_detection_error = "Recording path missing for detection."
             self.auto_rule_ai_result = None
             self.emit_detected_events_panel()
             self.update_detection_summary_label()
             return
 
-        if detect_apnea_events_from_csv is None:
+        if detect_apnea_events_from_recording is None:
             self.last_detection_error = (
                 "Detector import failed."
                 + (f" {DETECTION_IMPORT_ERROR}" if DETECTION_IMPORT_ERROR else "")
@@ -3327,57 +7805,47 @@ class SleepMonitorChart(QWidget):
             self.update_detection_summary_label()
             return
 
+        # Generated detector artifacts must be written outside the PyInstaller
+        # bundle.  _MEIPASS is temporary/read-only in installed builds.
+        output_dir = get_configured_path("detector_output_dir") / "chart_auto_events"
+        if background:
+            self._detection_running = True
+            self.last_detection_error = None
+            if self.is_playing:
+                self.pause_playback()
+            if self.play_pause_btn:
+                self.play_pause_btn.setEnabled(False)
+                self.play_pause_btn.setText("Detecting...")
+            if hasattr(self, "detection_summary_label"):
+                self.detection_summary_label.setText("Detecting events in background...")
+            worker = self._DetectWorker(
+                target_recording_path,
+                output_dir,
+                trim_seconds=RECORDING_EDGE_TRIM_SECONDS,
+                parent=self,
+            )
+            worker.done.connect(self._on_detection_done)
+            worker.failed.connect(self._on_detection_failed)
+            self._detect_worker = worker
+            worker.start()
+            self._set_detection_busy(True)
+            return
+
         try:
-            output_dir = APP_ROOT / "ai_models" / "sleep_apnea" / "hybrid_pipeline_output" / "chart_auto_events"
-            self.auto_rule_ai_result = detect_apnea_events_from_csv(
-                csv_path=self.loaded_csv_path,
+            self.auto_rule_ai_result = detect_apnea_events_from_recording(
+                recording_path=target_recording_path,
                 output_dir=output_dir,
                 enable_ai=False,
+                trim_start_seconds=RECORDING_EDGE_TRIM_SECONDS,
+                trim_end_seconds=RECORDING_EDGE_TRIM_SECONDS,
             )
-            self._apply_deleted_auto_event_filters_to_auto_result()
-            self._apply_manual_label_overrides_to_auto_result()
-            self.auto_focus_applied = False
-            self.last_detection_error = None
-            print(
-                f"✅ Auto rule-only apnea detection complete: "
-                f"{len(self.auto_rule_ai_result.get('events', []))} events"
-            )
-            self._apply_sensor_off_masking_after_detection()
-            self.refresh_charts()
-            self._sync_auto_detected_selections_into_overlays()
-            self.render_dynamic_selections()
-            self.emit_detected_events_panel()
-            self.update_detection_summary_label()
+            self._finish_detection_result()
         except Exception as error:
-            print(f"⚠️ Auto rule-only apnea detection failed: {error}")
-            try:
-                output_dir = APP_ROOT / "ai_models" / "sleep_apnea" / "hybrid_pipeline_output" / "chart_auto_events"
-                self.auto_rule_ai_result = detect_apnea_events_from_csv(
-                    csv_path=self.loaded_csv_path,
-                    output_dir=output_dir,
-                    enable_ai=False,
-                )
-                self._apply_deleted_auto_event_filters_to_auto_result()
-                self._apply_manual_label_overrides_to_auto_result()
-                self.auto_focus_applied = False
-                self.last_detection_error = None
-                print(
-                    f"✅ Fallback rule-only apnea detection complete: "
-                    f"{len(self.auto_rule_ai_result.get('events', []))} events"
-                )
-                self._apply_sensor_off_masking_after_detection()
-                self.refresh_charts()
-                self._sync_auto_detected_selections_into_overlays()
-                self.render_dynamic_selections()
-                self.emit_detected_events_panel()
-                self.update_detection_summary_label()
-            except Exception as fallback_error:
-                self.auto_rule_ai_result = None
-                self.auto_focus_applied = False
-                self.last_detection_error = f"Rule-only failed: {error} | Fallback failed: {fallback_error}"
-                self.emit_detected_events_panel()
-                self.update_detection_summary_label()
-                print(f"❌ Rule-only fallback detection also failed: {fallback_error}")
+            import traceback
+            traceback.print_exc()
+            self.auto_rule_ai_result = None
+            self.auto_focus_applied = False
+            self.last_detection_error = f"Detection failed: {error}"
 
     def _clear_auto_detected_selections(self):
         """Remove previously inserted automatic overlays while preserving manual labels."""
@@ -3411,10 +7879,29 @@ class SleepMonitorChart(QWidget):
         # recording with SpO2 dips but no airflow event must still reach the
         # loop below instead of returning early.
         desaturations = self.auto_rule_ai_result.get("desaturations", []) or []
-        if not events and not desaturations:
+        sensor_off_segments = []
+        if SENSOR_OFF_SEGMENTS_AS_EVENTS:
+            for segment in self.auto_rule_ai_result.get("sensor_off_segments", []) or []:
+                try:
+                    seg_start = float(segment.get("start_sec"))
+                    seg_end = float(segment.get("end_sec"))
+                except (TypeError, ValueError):
+                    continue
+                if seg_end - seg_start >= float(SENSOR_OFF_EVENT_MIN_SEC):
+                    sensor_off_segments.append((seg_start, seg_end, str(segment.get("reason", ""))))
+
+        if not events and not desaturations and not sensor_off_segments:
             return
 
-        target_charts = ["Airflow"] if events else []
+        def _inside_sensor_off(start_time, end_time):
+            duration = max(end_time - start_time, 1e-9)
+            for seg_start, seg_end, _reason in sensor_off_segments:
+                overlap = min(end_time, seg_end) - max(start_time, seg_start)
+                if overlap / duration >= 0.5:
+                    return True
+            return False
+
+        target_charts = ["Airflow"] if (events or sensor_off_segments) else []
 
         for chart_name in target_charts:
             self.selection_labels.setdefault(chart_name, [])
@@ -3426,6 +7913,9 @@ class SleepMonitorChart(QWidget):
                     continue
                 start_time = float(event["start_sec"])
                 end_time = float(event["end_sec"])
+                if final_label == "SENSOR_OFF" and _inside_sensor_off(start_time, end_time):
+                    # Covered by the full-length sensor-off entry added below.
+                    continue
                 selection_data = {
                     "label": final_label,
                     "start": start_time,
@@ -3451,6 +7941,24 @@ class SleepMonitorChart(QWidget):
                 self.selection_labels[chart_name].append(selection_data)
                 self.dynamic_selections[chart_name].append(dynamic_data)
 
+            for seg_start, seg_end, reason in sensor_off_segments:
+                entry = {
+                    "label": "SENSOR_OFF",
+                    "start": seg_start,
+                    "end": seg_end,
+                    "start_time": seg_start,
+                    "end_time": seg_end,
+                    "color": self.get_label_color("SENSOR_OFF"),
+                    "source": "auto_rule_ai",
+                    "is_manually_edited": False,
+                    "original_label": None,
+                    "evidence": [reason] if reason else [],
+                }
+                self.selection_labels[chart_name].append(dict(entry))
+                self.dynamic_selections[chart_name].append({
+                    k: v for k, v in entry.items() if k not in ("start", "end")
+                })
+
         # Desaturations go on the SpO2 chart, through the SAME overlay
         # structure the manual "Desaturation" right-click menu writes to, so
         # they render with the identical teal shading and are cleared by
@@ -3474,6 +7982,10 @@ class SleepMonitorChart(QWidget):
                 desat_color = self.get_label_color("DE-SATURATION")
                 baseline_spo2 = desat.get("baseline_spo2")
                 nadir_spo2 = desat.get("nadir_spo2")
+                display_start_time = self._desaturation_display_start(
+                    desat,
+                    start_time,
+                )
                 spo2_info = ""
                 if baseline_spo2 is not None and nadir_spo2 is not None:
                     try:
@@ -3496,15 +8008,83 @@ class SleepMonitorChart(QWidget):
                 self.dynamic_selections["SpO2"].append({
                     "label": "DE-SATURATION",
                     "start_time": start_time,
+                    "display_start_time": display_start_time,
                     "end_time": end_time,
                     "color": desat_color,
                     "source": "auto_rule_ai",
                     "spo2_info": spo2_info,
                 })
 
+    def _desaturation_display_start(self, desaturation, detected_start):
+        """Return the visible fall onset without changing the scored event.
+
+        The detector starts an event when the full threshold is reached.  For
+        drawing only, walk backwards over the same continuous below-baseline
+        run so the box also contains the beginning of the visible SpO2 fall.
+        If no preceding baseline sample is found, keep the detector start.
+        """
+        try:
+            detected_start = float(detected_start)
+            baseline = float(desaturation.get("baseline_spo2"))
+        except (AttributeError, TypeError, ValueError):
+            return detected_start
+        if not np.isfinite(baseline):
+            return detected_start
+
+        full_data = getattr(self, "spo2_full_data", None)
+        if full_data is None or len(full_data) < 2:
+            return detected_start
+        times = np.asarray(full_data[0], dtype=float).reshape(-1)
+        values = np.asarray(full_data[1], dtype=float).reshape(-1)
+        count = min(times.size, values.size)
+        if count < 2:
+            return detected_start
+        times = times[:count]
+        values = values[:count]
+
+        event_index = int(np.searchsorted(times, detected_start, side="left"))
+        if event_index >= count:
+            event_index = count - 1
+        threshold = baseline - float(DESAT_DISPLAY_BASELINE_TOLERANCE)
+        event_value = values[event_index]
+        if (
+            not np.isfinite(event_value)
+            or event_value < float(DESAT_SPO2_VALID_RANGE[0])
+            or event_value > float(DESAT_SPO2_VALID_RANGE[1])
+            or event_value >= threshold
+        ):
+            return detected_start
+
+        earliest = int(np.searchsorted(
+            times,
+            detected_start - float(DESAT_DISPLAY_ONSET_LOOKBACK_SEC),
+            side="left",
+        ))
+        onset = event_index
+        while onset > earliest:
+            previous = onset - 1
+            previous_value = values[previous]
+            if (
+                not np.isfinite(previous_value)
+                or previous_value < float(DESAT_SPO2_VALID_RANGE[0])
+                or previous_value > float(DESAT_SPO2_VALID_RANGE[1])
+            ):
+                return detected_start
+            if previous_value >= threshold:
+                candidate = float(times[onset])
+                return candidate if candidate < detected_start else detected_start
+            onset = previous
+
+        # Do not extend to an arbitrary lookback boundary when the actual
+        # baseline-to-fall transition is not present in the available data.
+        return detected_start
+
     def get_first_detected_event(self):
         """Return the earliest automatically detected event."""
         events = self.get_available_navigation_events()
+        if not events and self.is_detection_running():
+            self.detection_summary_label.setText("Detecting events in background...")
+            return
         if not events:
             return None
         return min(events, key=lambda event: float(event.get("start_sec", 0.0)))
@@ -3571,6 +8151,10 @@ class SleepMonitorChart(QWidget):
                 if len(error_text) > 120:
                     error_text = error_text[:117] + "..."
                 self.detection_summary_label.setText(f"Detection failed | {error_text}")
+            elif (self.auto_rule_ai_result or {}).get("airflow_not_connected"):
+                self.detection_summary_label.setText(
+                    "Airflow sensor not connected - airflow events not scored"
+                )
             else:
                 self.detection_summary_label.setText("Events: --")
             if hasattr(self, "jump_to_event_btn"):
@@ -3605,13 +8189,13 @@ class SleepMonitorChart(QWidget):
         """Generate realistic snoring vibration waveforms from single-point values
         
         Parameters:
-        - raw_snoring: Single-point snoring intensity values from CSV
+        - raw_snoring: Single-point snoring intensity values from the recording
         - airflow: Airflow signal for synchronization
         
         Returns:
         - Realistic snoring waveform with vibration packets
         """
-        sampling_rate = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
+        sampling_rate = self.channel_rate("snoring")
         snoring_waveform = np.zeros_like(raw_snoring, dtype=np.float64)
         
         # Find snoring events (values above threshold)
@@ -3735,7 +8319,7 @@ class SleepMonitorChart(QWidget):
             signal_col = signal_key_for_chart(clean_name)
         
         if signal_col not in signals:
-            dbg(f"Warning: Signal {signal_name} (mapped to {signal_col}) not found in loaded data")
+            pass
             return np.array([]), np.array([])
         
         if signal_col == "airflow":
@@ -3744,11 +8328,18 @@ class SleepMonitorChart(QWidget):
             full_signal = self._get_thorax_signal_variant("display")
         elif signal_col == "body_position":
             full_signal = self._get_body_position_signal()
+        elif signal_col == "pulse":
+            full_signal = self._bridge_slow_channel_dropouts(
+                signals[signal_col],
+                self.channel_rate(signal_col),
+                SPO2_DISPLAY_BRIDGE_MAX_SECONDS,
+            )
         else:
             full_signal = signals[signal_col]
 
+        channel_rate = self.channel_rate(signal_col)
         if self.is_all_psg_mode():
-            full_time = np.asarray(self.psg_full_data.get("time", []), dtype=float)
+            full_time = self.channel_time(signal_col)
             sample_count = min(len(full_time), len(full_signal))
             if sample_count == 0:
                 return np.array([]), np.array([])
@@ -3758,39 +8349,82 @@ class SleepMonitorChart(QWidget):
                 max_points=2500,
             )
         else:
-            window_time, window_signal = self._slice_signal_for_window(
-                full_signal,
-                time_window_seconds,
-                time_offset,
-            )
+            if signal_col == "pulse" and channel_rate < self.DISPLAY_HOLD_BELOW_HZ:
+                # 1 Hz SD pulse: exact flat steps. The start-of-recording warm-up
+                # is filled once for the whole file, not per visible window.
+                step_source = self._cached_slow_display(
+                    "pulse",
+                    full_signal,
+                    lambda arr: self._smooth_slow_channel_for_display(
+                        self._fill_leading_slow_channel_start(arr)),
+                )
+                window_time, window_signal = self._step_display_window(
+                    step_source, channel_rate, time_window_seconds, time_offset)
+                window_time, window_signal = self._prepare_plot_data_for_window(
+                    window_time, window_signal, time_window_seconds)
+            else:
+                window_time, window_signal = self._slice_signal_for_window(
+                    full_signal,
+                    time_window_seconds,
+                    time_offset,
+                    sample_rate_hz=channel_rate,
+                )
 
-            window_time, window_signal = self._prepare_plot_data_for_window(
-                window_time,
-                window_signal,
-                time_window_seconds,
-            )
+                if signal_col == "pulse":
+                    window_signal = self._fill_leading_slow_channel_start(window_signal)
+                    window_signal = self._smooth_slow_channel_for_display(window_signal)
 
-        if signal_col in SIGNAL_NO_GAP_FILL:
-            # Sensor dropout: show the raw zero reading. Do not edge-fill;
-            # edge filling would paint the dropout with the last real value.
+                window_time, window_signal = self._prepare_plot_data_for_window(
+                    window_time,
+                    window_signal,
+                    time_window_seconds,
+                )
+
+                # Other slow channels: interpolate on the display grid.
+                window_time, window_signal = self._hold_for_display(
+                    window_time, window_signal, channel_rate
+                )
+
+        if signal_col == "pulse":
+            # SpO2 and BPM arrive as separate fields from the same oximeter.
+            # Per the display rule, missing/zero SpO2 is authoritative: both
+            # charts show zero even if BPM still contains a stale non-zero value.
+            if self.spo2_full_data is not None:
+                spo2_time, raw_spo2 = self.spo2_full_data
+                if np.asarray(raw_spo2).size == 0:
+                    window_signal = np.zeros_like(window_signal, dtype=float)
+                else:
+                    absolute_window_time = (
+                        np.asarray(window_time, dtype=float)
+                        if self.is_all_psg_mode()
+                        else np.asarray(window_time, dtype=float) + float(time_offset)
+                    )
+                    window_signal = self._zero_where_reference_has_no_signal(
+                        window_signal,
+                        absolute_window_time,
+                        self._bridge_slow_channel_dropouts(
+                            raw_spo2,
+                            self.channel_rate("spo2"),
+                            SPO2_DISPLAY_BRIDGE_MAX_SECONDS,
+                        ),
+                        spo2_time,
+                        self.channel_rate("spo2"),
+                    )
+            # Any remaining invalid Pulse sample is also displayed as zero.
             window_signal = np.where(np.isfinite(window_signal), window_signal, 0.0)
 
         if len(window_signal) == 0:
             return np.array([]), np.array([])
 
         num_samples = len(window_signal)
-        expected_samples = int(round(time_window_seconds * EXTERNAL_ARRAY_SAMPLE_RATE_HZ))
+        expected_samples = int(round(time_window_seconds * channel_rate))
 
         if signal_col == "airflow":
             nan_count = int(np.count_nonzero(~np.isfinite(window_signal)))
             zero_count = int(np.count_nonzero(window_signal == 0.0))
-            dbg(
-                f"DEBUG Airflow window offset={time_offset}s samples={num_samples}/{expected_samples} "
-                f"nan={nan_count} zero={zero_count} "
-                f"start={window_signal[:5]!r} end={window_signal[-5:]!r}"
-            )
+            pass
         
-        dbg(f"{signal_name} window: {time_window_seconds}s, Samples: {num_samples}, Expected: {expected_samples}")
+        pass
         
         return window_time, window_signal
     
@@ -3802,59 +8436,64 @@ class SleepMonitorChart(QWidget):
         if self.spo2_full_data is None or len(self.spo2_full_data[0]) == 0:
             return np.array([]), np.array([])
         
-        full_time, full_spo2 = self.spo2_full_data
+        full_time, _full_spo2 = self.spo2_full_data
+        display_spo2 = self._spo2_display_full()
 
         if self.is_all_psg_mode():
-            sample_count = min(len(full_time), len(full_spo2))
+            sample_count = min(len(full_time), len(display_spo2))
             if sample_count == 0:
                 return np.array([]), np.array([])
             expected_samples = sample_count
             window_time, window_spo2 = self._smart_downsample(
                 np.asarray(full_time[:sample_count], dtype=float),
-                np.asarray(full_spo2[:sample_count], dtype=float),
+                np.asarray(display_spo2[:sample_count], dtype=float),
                 max_points=2500,
             )
         else:
             # Keep every window endpoint-exclusive: 60s at 10Hz must be exactly 600 samples.
-            samples_per_second = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
+            samples_per_second = self.channel_rate("spo2")
             expected_samples = int(round(time_window_seconds * samples_per_second))
-            start_sample = int(round(time_offset * samples_per_second))
-            end_sample = start_sample + expected_samples
-
-            # Ensure we don't exceed data bounds
-            start_sample = max(0, start_sample)
-            end_sample = min(len(full_spo2), end_sample)
-
-            # Extract the data for this window
-            window_spo2 = full_spo2[start_sample:end_sample]
+            if samples_per_second < self.DISPLAY_HOLD_BELOW_HZ:
+                # 1 Hz SD readings: exact flat steps (see _step_display_window).
+                step_source = self._cached_slow_display(
+                    "spo2", display_spo2, self._smooth_slow_channel_for_display)
+                window_time, window_spo2 = self._step_display_window(
+                    step_source, samples_per_second, time_window_seconds, time_offset)
+                window_time, window_spo2 = self._prepare_plot_data_for_window(
+                    window_time, window_spo2, time_window_seconds)
+            else:
+                start_sample = max(0, int(np.floor(float(time_offset) * samples_per_second)))
+                end_sample = min(len(display_spo2), start_sample + expected_samples + 2)
+                window_spo2 = display_spo2[start_sample:end_sample]
+                num_samples = len(window_spo2)
+                window_spo2 = self._smooth_slow_channel_for_display(window_spo2)
+                window_time = (
+                    (start_sample + np.arange(num_samples, dtype=float)) / samples_per_second
+                    - float(time_offset)
+                )
+                window_time, window_spo2 = self._prepare_plot_data_for_window(
+                    window_time,
+                    window_spo2,
+                    time_window_seconds,
+                )
 
             num_samples = len(window_spo2)
             if num_samples == 0:
                 return np.array([]), np.array([])
 
-            # Calculate SpO2 statistics for this window
-            self.calculate_spo2_statistics(window_spo2)
-
-            # Generate time points: 0, 0.1, 0.2, ... up to time_window_seconds
-            samples_per_second = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
-            expected_samples = int(round(time_window_seconds * samples_per_second))
-            window_time = np.arange(num_samples) / samples_per_second
-
-            window_time, window_spo2 = self._prepare_plot_data_for_window(
-                window_time,
-                window_spo2,
-                time_window_seconds,
-            )
-
-            # Sensor dropout: show the raw zero reading. Do not edge-fill;
-            # edge filling would paint the dropout with the last real value.
-            window_spo2 = np.where(np.isfinite(window_spo2), window_spo2, 0.0)
+            # The raw no-signal mask is restored below after every display-only
+            # smoothing/bridging operation has finished.
 
         num_samples = len(window_spo2)
         if num_samples == 0:
             return np.array([]), np.array([])
 
-        dbg(f"SpO2 window: {time_window_seconds}s, Samples: {num_samples}, Expected: {expected_samples}")
+        # Do not restore raw zero samples here: zero is a no-signal sentinel.
+        # ``_spo2_display_full`` has already converted it to the preceding
+        # valid reading, so graph values and report calculations agree.
+        self.calculate_spo2_statistics(window_spo2)
+
+        pass
         
         return window_time, window_spo2
 
@@ -3914,11 +8553,31 @@ class SleepMonitorChart(QWidget):
                 duration_sec=float(duration_sec) if duration_sec is not None else None,
             )
         except Exception as classify_error:
-            dbg(f"classify_airflow_event failed, defaulting to NO_EVENT: {classify_error}")
+            pass
             return "NO_EVENT"
 
-    def _build_airflow_navigation_events(self, airflow, fs=EXTERNAL_ARRAY_SAMPLE_RATE_HZ):
+    @staticmethod
+    def _below_threshold_runs(values, threshold):
+        """Return below-threshold runs while preserving recovery endpoints."""
+        values = np.asarray(values, dtype=float).reshape(-1)
+        if values.size == 0:
+            return []
+        finite_index = np.flatnonzero(np.isfinite(values))
+        if finite_index.size == 0:
+            return []
+        below = values[finite_index] < float(threshold)
+        edges = np.diff(np.r_[False, below, False].astype(np.int8))
+        starts = np.flatnonzero(edges == 1)
+        ends = np.flatnonzero(edges == -1)
+        last = values.size - 1
+        return [
+            (int(finite_index[a]), int(finite_index[b]) if b < finite_index.size else last)
+            for a, b in zip(starts, ends)
+        ]
+
+    def _build_airflow_navigation_events(self, airflow, fs=None):
         """Build a reusable event list from the full airflow signal for navigation."""
+        fs = float(fs) if fs else self.channel_rate("airflow")
         airflow = np.asarray(airflow, dtype=float)
         if len(airflow) == 0:
             return []
@@ -3926,25 +8585,7 @@ class SleepMonitorChart(QWidget):
         baseline_airflow, baseline_occurrence = self.get_airflow_event_baseline(airflow)
         threshold = baseline_airflow
         min_samples = max(1, int(round(AIRFLOW_DROP_MIN_DURATION_SEC * fs)))
-        events = []
-        in_event = False
-        start_index = None
-
-        for index, value in enumerate(airflow):
-            if not np.isfinite(value):
-                continue
-
-            if value < threshold:
-                if not in_event:
-                    in_event = True
-                    start_index = index
-            elif in_event:
-                events.append((start_index, index))
-                in_event = False
-                start_index = None
-
-        if in_event and start_index is not None:
-            events.append((start_index, len(airflow) - 1))
+        events = self._below_threshold_runs(airflow, threshold)
 
         navigation_events = []
         for event_start, event_end in events:
@@ -3982,10 +8623,11 @@ class SleepMonitorChart(QWidget):
     def _build_windowed_airflow_navigation_events(
         self,
         airflow,
-        fs=EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
+        fs=None,
         window_seconds=60.0,
     ):
         """Build full-data events using the same local-window baseline style as visible markers."""
+        fs = float(fs) if fs else self.channel_rate("airflow")
         airflow = np.asarray(airflow, dtype=float)
         if len(airflow) == 0:
             return []
@@ -4002,25 +8644,7 @@ class SleepMonitorChart(QWidget):
             baseline_airflow, baseline_occurrence = self.get_airflow_event_baseline(window_signal)
             threshold = baseline_airflow
             min_samples = max(1, int(round(AIRFLOW_DROP_MIN_DURATION_SEC * fs)))
-            events = []
-            in_event = False
-            start_index = None
-
-            for index, value in enumerate(window_signal):
-                if not np.isfinite(value):
-                    continue
-
-                if value < threshold:
-                    if not in_event:
-                        in_event = True
-                        start_index = index
-                elif in_event:
-                    events.append((start_index, index))
-                    in_event = False
-                    start_index = None
-
-            if in_event and start_index is not None:
-                events.append((start_index, len(window_signal) - 1))
+            events = self._below_threshold_runs(window_signal, threshold)
 
             for event_start, event_end in events:
                 if event_end - event_start + 1 < min_samples:
@@ -4065,9 +8689,10 @@ class SleepMonitorChart(QWidget):
         y_data,
         detection_y_data=None,
         min_duration_sec=AIRFLOW_DROP_MIN_DURATION_SEC,
-        fs=EXTERNAL_ARRAY_SAMPLE_RATE_HZ,
+        fs=None,
     ):
         """Mark Airflow events from below threshold until the next recovery threshold."""
+        fs = float(fs) if fs else self.channel_rate("airflow")
         self.clear_airflow_event_items(plot_widget)
         if self.auto_rule_ai_result is not None:
             self.current_window_airflow_events = []
@@ -4179,8 +8804,11 @@ class SleepMonitorChart(QWidget):
                 orientation="vertical",
                 movable=False,
                 brush=pg.mkBrush(red, green, blue, alpha),
+                pen=pg.mkPen(None),
+                hoverPen=pg.mkPen(None),
             )
             region.setZValue(-10)
+            region._playback_span = (start_time_abs, end_time_abs)
             plot_widget.addItem(region)
 
             self.airflow_event_items.append((region, plot_widget))
@@ -4220,6 +8848,7 @@ class SleepMonitorChart(QWidget):
                 block._applied_style = block_style
                 block.setStyleSheet(block_style)
             block.selection_id = self._get_selection_id(selection_data)
+            block._playback_span = (start_time_abs, end_time_abs)
             block.mousePressEvent = lambda event, ov=block, cn=getattr(plot_widget, "chart_name", "Airflow"): self.handle_overlay_click(event, ov, cn)
             block.mouseDoubleClickEvent = lambda event, ov=block, cn=getattr(plot_widget, "chart_name", "Airflow"): self.handle_overlay_double_click(event, ov, cn)
             placed = self._place_overlay_in_plot_area(
@@ -4246,6 +8875,7 @@ class SleepMonitorChart(QWidget):
             return
 
         spo2_array = np.asarray(spo2_data, dtype=float).reshape(-1)
+        spo2_array = np.where(spo2_array == 0.0, np.nan, spo2_array)
         finite_mask = np.isfinite(spo2_array)
         if not np.any(finite_mask):
             self.spo2_statistics = {
@@ -4333,7 +8963,9 @@ class SleepMonitorChart(QWidget):
                     stop: 0.55 #e0f2fe,
                     stop: 1 #bae6fd
                 );
-                border: 2px solid #3b82f6;
+                /* Keep the outline neutral: child widgets cover most of this
+                   border, otherwise only blue top/bottom caps remain visible. */
+                border: 2px solid #cbd5e1;
             }
         """)
         container_layout = QHBoxLayout(container)
@@ -4363,7 +8995,7 @@ class SleepMonitorChart(QWidget):
         label_h_layout.setContentsMargins(0, 2, 0, 2)
         label_h_layout.setSpacing(0)
         
-        label = QLabel(name)
+        label = QLabel("Effort" if name == "Thorax" else name)
         label.setObjectName("chartSideLabel")
         label.setWordWrap(True)
         label.setAlignment(Qt.AlignCenter)
@@ -4388,8 +9020,31 @@ class SleepMonitorChart(QWidget):
         zoom_col_layout.setSpacing(2)
         zoom_col_layout.setAlignment(Qt.AlignVCenter | Qt.AlignHCenter)
 
-        zoom_in_btn = QPushButton("+")
-        zoom_out_btn = QPushButton("-")
+        def centered_zoom_icon(draw_plus):
+            """Draw +/− geometrically so font baselines cannot shift them."""
+            pixmap = QPixmap(12, 12)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            pen = QPen(QColor("#475569"), 1.6)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(2.5, 6.0), QPointF(9.5, 6.0))
+            if draw_plus:
+                painter.drawLine(QPointF(6.0, 2.5), QPointF(6.0, 9.5))
+            painter.end()
+            return QIcon(pixmap)
+
+        zoom_in_btn = QPushButton()
+        zoom_in_btn.setIcon(centered_zoom_icon(True))
+        zoom_in_btn.setIconSize(QSize(12, 12))
+        zoom_in_btn.setAccessibleName("Zoom in")
+
+        zoom_out_btn = QPushButton()
+        zoom_out_btn.setIcon(centered_zoom_icon(False))
+        zoom_out_btn.setIconSize(QSize(12, 12))
+        zoom_out_btn.setAccessibleName("Zoom out")
+
         reset_btn = QPushButton("R")
 
         for btn in (zoom_in_btn, zoom_out_btn, reset_btn):
@@ -4562,6 +9217,9 @@ class SleepMonitorChart(QWidget):
         
         # Plot Widget with custom ViewBox
         plot_widget = pg.PlotWidget(viewBox=CustomViewBox())
+        # Axis helpers run before the curve is created, so expose the owner
+        # channel immediately (it used to be assigned only at the end).
+        plot_widget.chart_name = name
         plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         plot_widget.setAlignment(Qt.AlignCenter)
         # Grid: identical across all charts - only vertical time lines.
@@ -4587,8 +9245,8 @@ class SleepMonitorChart(QWidget):
                     stop: 0.95 #ffffff,
                     stop: 1 #f8fafc
                 );
-                border: 1px solid #e2e8f0;
-                border-radius: 4px;
+                border: none;
+                border-radius: 0px;
                 margin: 2px;
             }
         """)
@@ -4649,7 +9307,13 @@ class SleepMonitorChart(QWidget):
         bottom_axis.setHeight(20)  # Keep the axis compact so it hugs the bottom edge
         
         left_axis = plot_widget.getAxis('left')
-        left_axis.setStyle(showValues=True)   # Show Y-axis values
+        # left_axis.setStyle(showValues=True)   # Show Y-axis values
+        if signal_name in HIDDEN_Y_AXIS_VALUE_CHARTS:
+            left_axis.setStyle(showValues=False, tickLength=0)
+            # An explicit empty tick list removes the tiny dot-like tick marks too.
+            left_axis.setTicks([[]])
+        else:
+            left_axis.setStyle(showValues=True)
         
         # Reduce font size of axis tick labels
         from PyQt5.QtGui import QFont
@@ -4671,7 +9335,7 @@ class SleepMonitorChart(QWidget):
         try:
             plot_item = plot_widget.getPlotItem()
             if hasattr(plot_item, 'layout') and plot_item.layout is not None:
-                plot_item.layout.setContentsMargins(0, 0, 0, 0)
+                plot_item.layout.setContentsMargins(0, PLOT_TOP_MARGIN_PX, 0, 0)
                 if hasattr(plot_item.layout, 'setHorizontalSpacing'):
                     plot_item.layout.setHorizontalSpacing(0)
                 if hasattr(plot_item.layout, 'setVerticalSpacing'):
@@ -4701,6 +9365,7 @@ class SleepMonitorChart(QWidget):
         label.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
         zoom_col.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
         plot_container.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
+        plot_widget.wheelEvent = lambda event, pw=plot_widget: self.handle_container_wheel_zoom(event, pw)
         
         # Keep the plot anchored to the top so the signal begins immediately under the card
         plot_container_layout.setAlignment(plot_widget, Qt.AlignTop)
@@ -4713,11 +9378,11 @@ class SleepMonitorChart(QWidget):
 
             if len(x) > 0 and len(y) > 0:
                 # Use real SpO2 data as-is (no artificial baseline correction)
-                print(f"Using real SpO2 data: {len(y)} points, range: {np.min(y):.1f}-{np.max(y):.1f}")
+                pass
         else:
             x, y = self.get_signal_data_for_window(name, visible_window, self.current_time_offset)
             if len(x) > 0 and len(y) > 0:
-                print(f"Using real {name} data: {len(y)} points, range: {np.min(y):.1f}-{np.max(y):.1f}")
+                pass
         
         # Plot the signal and store reference for line visibility control
         pen = pg.mkPen(color=color, width=1.5)
@@ -4731,10 +9396,34 @@ class SleepMonitorChart(QWidget):
         else:
             plot_curve = plot_widget.plot(x, y, pen=pen, fill=None, connect='finite')
 
+        if name.strip() in HIGH_RATE_CHART_NAMES and HIGH_RATE_PEAK_DOWNSAMPLING:
+            try:
+                plot_widget.setDownsampling(mode="peak", auto=True)
+                plot_widget.setClipToView(True)
+            except Exception:
+                pass
+
+        if name.strip() == "Snoring":
+            # Red (main trace) = inhale. Exhale packets are redrawn on top in
+            # orange when continuous, grey when isolated (review).
+            plot_widget.snore_phase_curves = {
+                "exhale": plot_widget.plot(
+                    [], [], pen=pg.mkPen(color=SNORE_EXHALE_COLOR, width=1.5), connect="finite"),
+                "review": plot_widget.plot(
+                    [], [], pen=pg.mkPen(color=SNORE_REVIEW_COLOR, width=1.5), connect="finite"),
+            }
+            label.setToolTip(
+                "Snoring: red = inhale, orange = exhale (continuous), "
+                "grey = exhale (isolated - review)"
+            )
+
         if name.strip() in AUTO_RANGE_SIGNAL_NAMES:
-            fallback_min, fallback_max = SIGNAL_Y_RANGES.get(name.strip(), (0.0, 100.0))
-            auto_y_min, auto_y_max = self._auto_axis_range_from_values(y, fallback_min, fallback_max)
-            self._lock_auto_axis(plot_widget, auto_y_min, auto_y_max)
+            if name.strip() == "SpO2" and self._apply_spo2_zero_axis_if_needed(plot_widget, y):
+                pass
+            else:
+                fallback_min, fallback_max = SIGNAL_Y_RANGES.get(name.strip(), (0.0, 100.0))
+                auto_y_min, auto_y_max = self._auto_axis_range_from_values(y, fallback_min, fallback_max)
+                self._lock_auto_axis(plot_widget, auto_y_min, auto_y_max)
         if name.strip() == "Airflow":
             _event_x, detection_y = self.get_airflow_detection_data_for_window(
                 visible_window,
@@ -4754,7 +9443,7 @@ class SleepMonitorChart(QWidget):
         if name.strip() == "SpO2":
             self.add_spo2_value_labels(plot_widget, x, y, visible_window)
             if len(x) > 0 and len(y) > 0:
-                print(f"SpO2 value labels drawn for {visible_window}s time window")
+                pass
 
         plot_widget.graph_name = name
         plot_widget.graph_color = color
@@ -4792,7 +9481,7 @@ class SleepMonitorChart(QWidget):
             if hasattr(container, 'plot_widget'):
                 chart_name = container.plot_widget.chart_name
                 new_height = event.size().height()
-                print(f"Debug: Container resize event for {chart_name} - New size: {new_height}px")
+                pass
 
             if original_resize:
                 original_resize(event)
@@ -4884,7 +9573,7 @@ class SleepMonitorChart(QWidget):
         # Update hidden graphs dropdown
         self.update_hidden_graphs_dropdown()
         
-        print(f"Graph '{graph_name}' hidden and added to hidden graphs")
+        pass
     
     def restore_hidden_graph(self, graph_name):
         """Restore a hidden graph"""
@@ -4909,7 +9598,7 @@ class SleepMonitorChart(QWidget):
         # Update hidden graphs dropdown
         self.update_hidden_graphs_dropdown()
         
-        print(f"Graph '{graph_name}' restored")
+        pass
     
     def update_hidden_graphs_dropdown(self):
         """Update the hidden graphs dropdown with current hidden graphs"""
@@ -4969,7 +9658,7 @@ class SleepMonitorChart(QWidget):
                 self.dragged_graph.setParent(self.charts_widget)
                 self.charts_layout.insertWidget(insert_index, self.dragged_graph)
                 
-                print(f"Graph '{graph_name}' moved to position {insert_index}")
+                pass
             
             self.dragged_graph = None
     
@@ -5022,7 +9711,7 @@ class SleepMonitorChart(QWidget):
                     padding: 2px;
                 }
             """)
-            print(f"Graph line '{chart_name}' shown")
+            pass
         else:
             # Hide the line
             plot_curve.setVisible(False)
@@ -5038,7 +9727,7 @@ class SleepMonitorChart(QWidget):
                     padding: 2px;
                 }
             """)
-            print(f"Graph line '{chart_name}' hidden")
+            pass
     
     def zoom_vertical(self, plot_widget, zoom_factor):
         """Zoom in/out vertically on the plot"""
@@ -5091,13 +9780,13 @@ class SleepMonitorChart(QWidget):
             plot_widget.setYRange(new_y_min, new_y_max)
             # Store zoom range to persist during playback
             plot_widget.zoom_y_range = (new_y_min, new_y_max)
-            print(f"Stored zoom range for {chart_name}: {new_y_min} - {new_y_max}")
+            pass
         except TypeError:
             # Try alternative method for older pyqtgraph versions
             plot_widget.setRange(yRange=[new_y_min, new_y_max])
             # Store zoom range to persist during playback
             plot_widget.zoom_y_range = (new_y_min, new_y_max)
-            print(f"Stored zoom range for {chart_name}: {new_y_min} - {new_y_max}")
+            pass
 
         self._pin_axis_tick_spacing(plot_widget, new_y_min, new_y_max)
 
@@ -5132,10 +9821,14 @@ class SleepMonitorChart(QWidget):
 
         plot_widget.zoom_y_range = (new_y_min, new_y_max)
         self._pin_axis_tick_spacing(plot_widget, new_y_min, new_y_max)
-        print(f"Stored anchored zoom range for {chart_name}: {new_y_min} - {new_y_max}")
+        pass
 
     def handle_container_wheel_zoom(self, event, plot_widget):
-        """Route wheel zoom from non-plot container areas into centered graph zoom."""
+        """Route wheel zoom from anywhere on the chart into centered graph zoom."""
+        modifiers = event.modifiers() if hasattr(event, "modifiers") else Qt.NoModifier
+        if not (modifiers & (Qt.ControlModifier | Qt.MetaModifier)):
+            event.ignore()
+            return
         delta = event.angleDelta().y() if hasattr(event, "angleDelta") else event.delta()
         zoom_factor = 0.96 if delta > 0 else 1.04
         self.zoom_vertical_at_ratio(plot_widget, zoom_factor, 0.5)
@@ -5185,7 +9878,19 @@ class SleepMonitorChart(QWidget):
         # Get the chart name from the plot widget
         chart_name = getattr(plot_widget, 'chart_name', '')
         clean_name = chart_name.strip()
-        if clean_name in AUTO_RANGE_SIGNAL_NAMES:
+        if clean_name == "SpO2":
+            # SpO2 has its own loader/display path. Routing Reset through the
+            # generic signal lookup returns an empty array when the source
+            # channel is absent and restores the old 60-100 range, hiding zero.
+            _reset_x, reset_y = self.get_spo2_data_for_window(
+                self.get_effective_time_window_seconds(), self.current_time_offset
+            )
+            self._clear_axis_hold(clean_name)
+            plot_widget.stable_y_range = None
+            plot_widget.zoom_y_range = None
+            if not self._apply_spo2_zero_axis_if_needed(plot_widget, reset_y):
+                self._apply_windowed_auto_axis(plot_widget, clean_name, reset_y)
+        elif clean_name in AUTO_RANGE_SIGNAL_NAMES:
             # FIX: this used to call get_signal_auto_axis_range(), which
             # returns the WHOLE-RECORDING cached range - not the tight
             # per-window range the redraw loop now uses. Pressing Reset would
@@ -5196,34 +9901,41 @@ class SleepMonitorChart(QWidget):
             _reset_x, reset_y = self.get_signal_data_for_window(
                 clean_name, self.get_effective_time_window_seconds(), self.current_time_offset
             )
-            fallback_min, fallback_max = SIGNAL_Y_RANGES.get(clean_name, (0.0, 100.0))
-            raw_min, raw_max = self._windowed_axis_range_from_values(
-                reset_y, fallback_min, fallback_max
-            )
-            # Reset means "forget the held range and re-fit from scratch".
+            # Reset means "forget the held range and re-fit from scratch":
+            # drop the hold for this chart, then run the same fit the redraw
+            # loop uses so Reset always matches what a fresh window shows.
+            self._clear_axis_hold(clean_name)
             plot_widget.stable_y_range = None
-            y_min, y_max = self._stable_axis_range(plot_widget, raw_min, raw_max)
-            plot_widget.stable_y_range = (y_min, y_max)
-            self._lock_auto_axis(plot_widget, y_min, y_max)
-            self._pin_axis_tick_spacing(plot_widget, y_min, y_max)
+            plot_widget.zoom_y_range = None
+            self._apply_windowed_auto_axis(plot_widget, clean_name, reset_y)
         else:
-            y_min, y_max = SIGNAL_Y_RANGES.get(clean_name, (0, 100))
+            plot_widget.zoom_y_range = None
+            _reset_x, reset_y = self.get_signal_data_for_window(
+                clean_name, self.get_effective_time_window_seconds(), self.current_time_offset
+            )
+            if clean_name == "Body Position":
+                self._configure_body_position_axis(plot_widget)
+            elif hasattr(plot_widget, "axis_properties"):
+                properties = plot_widget.axis_properties
+                default_min, default_max = SIGNAL_Y_RANGES.get(clean_name, (0, 100))
+                self._set_y_view(
+                    plot_widget,
+                    properties.get("low_value", default_min),
+                    properties.get("high_value", default_max),
+                )
+            elif clean_name == "Pulse":
+                self._apply_dropout_axis(plot_widget, clean_name, reset_y)
+            else:
+                y_min, y_max = SIGNAL_Y_RANGES.get(clean_name, (0, 100))
+                self._set_y_view(plot_widget, y_min, y_max)
 
-        try:
-            plot_widget.setYRange(y_min, y_max)
-       
-            plot_widget.zoom_y_range = None
-            print(f"Reset zoom range for {chart_name}")
-        except TypeError:
-          
-            plot_widget.setRange(yRange=[y_min, y_max])
-           
-            plot_widget.zoom_y_range = None
-            print(f"Reset zoom range for {chart_name}")
+        # Auto-range and fixed-range branches above set the view through the
+        # same helpers used by startup, scrolling, and playback.
+        pass
     
     def forward_playback(self):
         """Fast forward playback"""
-        print(f"Forward button clicked - Playing: {self.is_playing}")
+        pass
         if self.is_playing:
             # Jump forward by current time window
             self.current_time = self.current_time.addSecs(self.current_time_window)
@@ -5248,22 +9960,22 @@ class SleepMonitorChart(QWidget):
                     # Force redraw
                     pw.getViewBox().update()
                     pw.repaint()
-                    print(f"Updated ViewBox range to {start} → {end} for {pw.chart_name}")
+                    pass
             
             # DELAYED OVERLAY RENDER (IMPORTANT)
             QTimer.singleShot(0, self.render_dynamic_selections)
             
             self.update_time_display()
-            print(f"Jumped forward to: {self.current_time.toString('HH:mm:ss')}")
+            pass
     
     def backward_playback(self):
         """Rewind playback"""
-        print(f"Backward button clicked - Playing: {self.is_playing}")
+        pass
         if self.is_playing:
             # Jump backward by current time window
             self.current_time = self.current_time.addSecs(-self.current_time_window)
             self.update_time_display()
-            print(f"Jumped backward to: {self.current_time.toString('HH:mm:ss')}")
+            pass
     
     def update_time_display(self):
         """Update time display without adding seconds"""
@@ -5345,14 +10057,27 @@ class SleepMonitorChart(QWidget):
             if hasattr(plot_widget, 'scatter_item'):
                 plot_widget.scatter_item.setSize([8] * len(x_data))
     
+    def create_pulse_markers_and_labels(self, plot_widget, x_data, y_data):
+        """Pulse value labels: same windows, buckets and placement as SpO2."""
+        if not PULSE_LABELS_ENABLED:
+            return
+        self.add_spo2_value_labels(
+            plot_widget, x_data, y_data, self.get_effective_time_window_seconds(),
+            labels_attr="pulse_value_labels", color=PULSE_LABEL_COLOR, stat=PULSE_LABEL_STAT,
+            step_tolerance=PULSE_LABEL_STEP_TOLERANCE, position=PULSE_LABEL_POSITION,
+        )
+
     def create_spo2_markers_and_labels(self, plot_widget, x_data, y_data):
         """Create value labels for SpO2 when they don't exist (no scatter plot dots)"""
-        dbg(f"DEBUG: create_spo2_markers_and_labels called with {len(x_data)} points")
+        pass
         
         # Add value labels on the graph (positioned exactly on data points)
-        self.add_spo2_value_labels(plot_widget, x_data, y_data, self.get_effective_time_window_seconds())
+        self.add_spo2_value_labels(
+            plot_widget, x_data, y_data, self.get_effective_time_window_seconds(),
+            position=SPO2_LABEL_POSITION,
+        )
         
-        dbg(f"Created SpO2 value labels for {self.current_time_window}s time window")
+        pass
     
     def _spo2_label_mode(self):
         """Return "raw", "avg" or "none" for the CURRENTLY SELECTED window.
@@ -5395,7 +10120,112 @@ class SleepMonitorChart(QWidget):
         except Exception:
             return 0.0
 
-    def _spo2_label_points(self, x_displayed, y_displayed, y_values, time_window):
+    @staticmethod
+    def _bucket_label_value(values, stat, step_tolerance):
+        """Number for one averaged label.
+
+        Uniform bucket: the mean (or median). Bucket that straddles a step: a value
+        that was really recorded, never the mix of the two levels.
+        """
+        values = np.asarray(values, dtype=float)
+        if (
+            LABEL_STEP_SHOWS_REAL_VALUE
+            and step_tolerance
+            and values.size > 1
+            and float(np.ptp(values)) > float(step_tolerance)
+        ):
+            rounded = np.round(values, 1)
+            levels, counts = np.unique(rounded, return_counts=True)
+            tied = levels[counts == counts.max()]
+            if tied.size == 1:
+                return float(tied[0])
+            return float(max(tied, key=lambda level: int(np.flatnonzero(rounded == level).max())))
+        if str(stat or SPO2_LABEL_STAT).strip().lower() == "median":
+            return float(np.median(values))
+        return float(np.mean(values))
+
+    def _drop_labels_near_steps(self, label_points, x_displayed, y_displayed, keep_nadir_in_boxes):
+        """Remove numbers close to a level change, restoring a box nadir if needed."""
+        x = np.asarray(x_displayed, dtype=float).reshape(-1)
+        y = np.asarray(y_displayed, dtype=float).reshape(-1)
+        m = min(x.size, y.size)
+        x, y = x[:m], y[:m]
+        ok = np.isfinite(y)
+        if m < 2 or not ok.any():
+            return label_points
+        level = np.round(y)
+        change_mask = (
+            ok[1:]
+            & ok[:-1]
+            & (np.abs(level[1:] - level[:-1]) > LABEL_STEP_MIN_CHANGE)
+        )
+        change = np.flatnonzero(change_mask) + 1
+        if change.size == 0:
+            return label_points
+        step_x = x[change]
+        clearance = float(LABEL_STEP_CLEARANCE_SEC)
+        kept = [pt for pt in label_points if np.min(np.abs(step_x - pt[0])) >= clearance]
+        if not keep_nadir_in_boxes:
+            return kept
+        try:
+            offset = 0.0 if self.is_all_psg_mode() else float(self.current_time_offset)
+        except Exception:
+            offset = 0.0
+        for sel in (self.dynamic_selections or {}).get("SpO2", []):
+            if "SATURATION" not in str(sel.get("label", "")).upper():
+                continue
+            try:
+                a, b = self._ordered_span(sel["start_time"], sel["end_time"])
+            except Exception:
+                continue
+            a, b = float(a) - offset, float(b) - offset
+            if any(a <= pt[0] <= b for pt in kept):
+                continue
+            inside = np.flatnonzero((x >= a) & (x <= b) & ok)
+            if inside.size == 0:
+                continue
+            lowest = float(np.min(y[inside]))
+            centre = (max(a, float(x[0])) + min(b, float(x[-1]))) / 2.0
+            kept.append((centre, lowest, f"{int(round(lowest))}"))
+        kept.sort(key=lambda pt: pt[0])
+        return kept
+
+    def _desat_box_label_points(self, label_points, x_displayed, y_displayed):
+        """Replace labels inside each visible DE-SATURATION box by start and nadir."""
+        spans = []
+        try:
+            offset = 0.0 if self.is_all_psg_mode() else float(self.current_time_offset)
+        except Exception:
+            offset = 0.0
+        for sel in (self.dynamic_selections or {}).get("SpO2", []):
+            if "SATURATION" not in str(sel.get("label", "")).upper():
+                continue
+            try:
+                a, b = self._ordered_span(sel["start_time"], sel["end_time"])
+            except Exception:
+                continue
+            spans.append((float(a) - offset, float(b) - offset))
+        if not spans:
+            return label_points
+        x = np.asarray(x_displayed, dtype=float).reshape(-1)
+        y = np.asarray(y_displayed, dtype=float).reshape(-1)
+        m = min(x.size, y.size)
+        x, y = x[:m], y[:m]
+        kept = [pt for pt in label_points if not any(a - 1.0 <= pt[0] <= b + 1.0 for a, b in spans)]
+        for a, b in spans:
+            inside = np.flatnonzero((x >= a) & (x <= b) & np.isfinite(y))
+            if inside.size == 0:
+                continue
+            first = int(inside[0])
+            lowest = int(inside[int(np.argmin(y[inside]))])
+            kept.append((float(x[first]), float(y[first]), f"{int(round(float(y[first])))}"))
+            if lowest != first:
+                kept.append((float(x[lowest]), float(y[lowest]), f"{int(round(float(y[lowest])))}"))
+        kept.sort(key=lambda pt: pt[0])
+        return kept
+
+    def _spo2_label_points(self, x_displayed, y_displayed, y_values, time_window, stat=None,
+                           step_tolerance=None):
         """Return [(x_pos, y_pos, text), ...] for the SpO2 value labels.
 
         Every label sits ON the trace and moves with it - nothing is ever drawn
@@ -5416,8 +10246,8 @@ class SleepMonitorChart(QWidget):
         x_displayed = np.asarray(x_displayed, dtype=float)[:n]
         y_displayed = np.asarray(y_displayed, dtype=float)[:n]
         y_values = np.asarray(y_values, dtype=float)[:n]
-        # Zero is the oximeter's no-signal value, not a measured SpO2 reading.
-        spo2_floor = float(SIGNAL_VALID_RANGES.get("spo2", (50.0, 100.0))[0])
+        # Only a recorded 0 is no signal; every other displayed reading gets a label.
+        spo2_floor = 1.0
 
         # --- raw per-sample labels ------------------------------------------
         if mode == "raw":
@@ -5447,8 +10277,21 @@ class SleepMonitorChart(QWidget):
         offset = self._spo2_label_time_offset()
         absolute_times = x_displayed + offset
 
-        first_bucket = int(np.floor(absolute_times[0] / bucket_seconds))
-        last_bucket = int(np.floor(absolute_times[-1] / bucket_seconds))
+        # Playback preloads a short data tail beyond the right edge so the
+        # scrolling curve never exposes a blank strip. That tail is not on
+        # screen, and using absolute_times[-1] as the visible edge made its next
+        # SpO2/Pulse label appear during Play and disappear again on Pause.
+        # Clamp label eligibility to the real ViewBox window instead.
+        visible_low = max(float(absolute_times[0]), float(offset))
+        visible_high = min(
+            float(absolute_times[-1]),
+            float(offset) + max(0.0, float(time_window)),
+        )
+        if visible_high <= visible_low:
+            return []
+
+        first_bucket = int(np.floor(visible_low / bucket_seconds))
+        last_bucket = int(np.floor((visible_high - 1e-9) / bucket_seconds))
 
         points = []
         for bucket in range(first_bucket, last_bucket + 1):
@@ -5458,7 +10301,7 @@ class SleepMonitorChart(QWidget):
             # Only label buckets that are fully on screen. A half-visible bucket
             # would average a shrinking slice and its number would drift as it
             # scrolled in - the very flicker we are removing.
-            if low < absolute_times[0] - 1e-9 or high > absolute_times[-1] + 1e-9:
+            if low < visible_low - 1e-9 or high > visible_high + 1e-9:
                 continue
 
             start = int(np.searchsorted(absolute_times, low, side="left"))
@@ -5489,24 +10332,22 @@ class SleepMonitorChart(QWidget):
             drawn = drawn[real]
             times = times[real]
 
-            mean_value = float(np.median(values))
+            # A bucket that contains a real level change (the edge of a dip or of
+            # the recovery) is NOT labelled. Its number would flip between the
+            # upper and lower level as the step scrolls through the bucket,
+            # creating the visible up/down "blip". Only buckets that sit fully on
+            # one flat level get a number.
+            if values.size > 1 and float(np.ptp(values)) > float(LABEL_STEP_MIN_CHANGE):
+                continue
 
-            # Anchor the number to a REAL point on the trace instead of to the
-            # bucket's mean position. When a bucket straddles a step (SpO2 is a
-            # staircase, not a smooth curve) the mean level sits in the gap
-            # between two plateaus and the label looks like it has dropped off
-            # the line. Pick the sample whose level is closest to the mean, and
-            # among equally close ones the one nearest the middle of the bucket,
-            # so the label always rides the curve.
-            distance = np.abs(values - mean_value)
-            closest = float(np.min(distance))
-            candidates = np.flatnonzero(distance <= closest + 1e-9)
-            middle = (values.size - 1) / 2.0
-            anchor = int(candidates[int(np.argmin(np.abs(candidates - middle)))])
+            mean_value = self._bucket_label_value(
+                values, stat,
+                SPO2_LABEL_STEP_TOLERANCE if step_tolerance is None else step_tolerance,
+            )
 
             points.append((
-                float(times[anchor]),
-                float(drawn[anchor]),
+                float(np.mean(times)),
+                float(np.mean(drawn)),
                 f"{int(round(mean_value))}",
             ))
 
@@ -5522,7 +10363,9 @@ class SleepMonitorChart(QWidget):
 
         return points
 
-    def add_spo2_value_labels(self, plot_widget, x_data, y_data, time_window):
+    def add_spo2_value_labels(self, plot_widget, x_data, y_data, time_window,
+                              labels_attr="value_labels", color=(122, 29, 29), stat=None,
+                              step_tolerance=None, position="trace"):
         """Draw the SpO2 value labels for the current window.
 
         Playback re-draws this ~20 times a second, so the TextItems are reused
@@ -5530,8 +10373,14 @@ class SleepMonitorChart(QWidget):
         frame. That is what lets the numbers glide with the trace rather than
         blink in place.
         """
-        if not hasattr(plot_widget, 'value_labels'):
-            plot_widget.value_labels = []
+        if not hasattr(plot_widget, labels_attr):
+            setattr(plot_widget, labels_attr, [])
+        labels = getattr(plot_widget, labels_attr)
+        label_map_attr = f"_{labels_attr}_by_time"
+        label_map = getattr(plot_widget, label_map_attr, None)
+        if not isinstance(label_map, dict):
+            label_map = {}
+            setattr(plot_widget, label_map_attr, label_map)
 
         # If this window has no usable SpO2 samples, clear any old labels and
         # stop. The previous recording's curve object can still exist briefly,
@@ -5540,12 +10389,13 @@ class SleepMonitorChart(QWidget):
         x_displayed = np.asarray(x_data, dtype=float).reshape(-1)
         y_displayed = np.asarray(y_data, dtype=float).reshape(-1)
         if x_displayed.size == 0 or y_displayed.size == 0 or not np.isfinite(y_displayed).any():
-            while plot_widget.value_labels:
-                stale = plot_widget.value_labels.pop()
+            while labels:
+                stale = labels.pop()
                 try:
                     plot_widget.removeItem(stale)
                 except Exception:
                     pass
+            label_map.clear()
             return
 
         # Get the actual displayed data (scaled if axis properties are applied).
@@ -5563,17 +10413,19 @@ class SleepMonitorChart(QWidget):
                     y_displayed = np.asarray(current_data[1], dtype=float).reshape(-1)
             except Exception:
                 pass
-        label_points = self._spo2_label_points(x_displayed, y_displayed, y_data, time_window)
-
-        # Drop any surplus items from the previous frame.
-        while len(plot_widget.value_labels) > len(label_points):
-            stale = plot_widget.value_labels.pop()
-            try:
-                plot_widget.removeItem(stale)
-            except Exception:
-                pass
+        label_points = self._spo2_label_points(
+            x_displayed, y_displayed, y_data, time_window, stat=stat,
+            step_tolerance=step_tolerance,
+        )
 
         if not label_points:
+            while labels:
+                stale = labels.pop()
+                try:
+                    plot_widget.removeItem(stale)
+                except Exception:
+                    pass
+            label_map.clear()
             return
 
         from PyQt5.QtGui import QFont
@@ -5581,17 +10433,72 @@ class SleepMonitorChart(QWidget):
         font.setPointSize(12)
         font.setBold(True)
 
-        # Every number sits just above the trace and moves with it.
+        # Every number sits just above the trace and moves with it ("trace"), or all of
+        # them share one constant-height row near the top of the plot ("row").
         offset_above = 0.35
+        row_y = None
+        if str(position).strip().lower() == "row":
+            try:
+                view_low, view_high = plot_widget.getViewBox().viewRange()[1]
+                row_y = float(view_high) - float(SPO2_LABEL_ROOM_FRACTION) * (float(view_high) - float(view_low))
+            except Exception:
+                row_y = None
 
-        for index, (x_pos, y_pos, label_text) in enumerate(label_points):
-            if index < len(plot_widget.value_labels):
-                text_item = plot_widget.value_labels[index]
-                text_item.setText(label_text)
-            else:
+        if labels_attr == "value_labels" and DESAT_BOX_TWO_LABELS:
+            label_points = self._desat_box_label_points(label_points, x_displayed, y_displayed)
+        if LABEL_STEP_CLEARANCE_SEC > 0:
+            label_points = self._drop_labels_near_steps(
+                label_points, x_displayed, y_displayed,
+                keep_nadir_in_boxes=(labels_attr == "value_labels"),
+            )
+
+        # Bind each TextItem to absolute recording time, not to its index in
+        # the visible list. During playback the first bucket eventually leaves
+        # the left edge. Index-based reuse then reassigned every existing item
+        # to its neighbour, invalidating the entire text row in one paint and
+        # producing the conspicuous digit flicker. With stable keys, overlapping
+        # buckets keep the exact same item; only one item enters/leaves an edge.
+        time_offset = self._spo2_label_time_offset()
+        keyed_points = []
+        duplicate_counts = {}
+        for x_pos, y_pos, label_text in label_points:
+            absolute_ms = int(round((float(x_pos) + time_offset) * 1000.0))
+            occurrence = duplicate_counts.get(absolute_ms, 0)
+            duplicate_counts[absolute_ms] = occurrence + 1
+            keyed_points.append(((absolute_ms, occurrence), x_pos, y_pos, label_text))
+
+        desired_keys = {point[0] for point in keyed_points}
+        for key, stale in list(label_map.items()):
+            if key in desired_keys:
+                continue
+            label_map.pop(key, None)
+            try:
+                labels.remove(stale)
+            except ValueError:
+                pass
+            try:
+                plot_widget.removeItem(stale)
+            except Exception:
+                pass
+
+        # Labels created before time-keyed reuse was introduced have no entry
+        # in label_map. Remove them once so they cannot remain as ghost digits.
+        mapped_ids = {id(item) for item in label_map.values()}
+        for stale in list(labels):
+            if id(stale) in mapped_ids:
+                continue
+            labels.remove(stale)
+            try:
+                plot_widget.removeItem(stale)
+            except Exception:
+                pass
+
+        for key, x_pos, y_pos, label_text in keyed_points:
+            text_item = label_map.get(key)
+            if text_item is None:
                 text_item = pg.TextItem(
                     text=label_text,
-                    color=(122, 29, 29),
+                    color=color,
                     anchor=(0.5, 1.0),
                     border=pg.mkPen((255, 255, 255, 0)),
                     # Keep the trace visible underneath the label.
@@ -5607,8 +10514,22 @@ class SleepMonitorChart(QWidget):
                 text_item.setAnchor((0.5, 1.0))
                 text_item.setZValue(1000)
                 plot_widget.addItem(text_item)
-                plot_widget.value_labels.append(text_item)
-            text_item.setPos(x_pos, y_pos + offset_above)
+                labels.append(text_item)
+                label_map[key] = text_item
+                text_item._value_label_text = str(label_text)
+            elif getattr(text_item, "_value_label_text", None) != str(label_text):
+                # Avoid setText() for unchanged readings: it invalidates the
+                # glyph layout and briefly clears/repaints the digit.
+                text_item.setText(label_text)
+                text_item._value_label_text = str(label_text)
+            target_x = float(x_pos)
+            target_y = float(row_y if row_y is not None else y_pos + offset_above)
+            current_pos = text_item.pos()
+            if (
+                abs(float(current_pos.x()) - target_x) > 1e-6
+                or abs(float(current_pos.y()) - target_y) > 1e-6
+            ):
+                text_item.setPos(target_x, target_y)
     
     
     def on_mouse_clicked(self, event, plot_widget):
@@ -5644,11 +10565,11 @@ class SleepMonitorChart(QWidget):
             self.selection_end = None
             self.selection_end_scene = None
             # Keep preview overlay hidden, don't touch persistent overlays
-            print(f"Started selection on {plot_widget.chart_name}")
+            pass
         elif event.button() == Qt.RightButton:
             # RIGHT CLICK logic
             if self.selection_start and self.selection_end:
-                print("Right click detected -> opening menu")
+                pass
                 self.show_selection_menu()
         if hasattr(event, "accept"):
             event.accept()
@@ -5721,7 +10642,7 @@ class SleepMonitorChart(QWidget):
         self.selection_end = None
         self.selection_end_scene = None
         # Keep preview overlay hidden, don't touch persistent overlays
-        print(f"Started selection on {plot_widget.chart_name}")
+        pass
         if hasattr(event, "accept"):
             event.accept()
 
@@ -5743,7 +10664,7 @@ class SleepMonitorChart(QWidget):
         y_axis_width = 60  
         if widget_pos.x() <= y_axis_width:
             self.show_graph_image_menu(event.globalPos(), plot_widget)
-            print(f"Right-click on y-axis detected for {plot_widget.chart_name}")
+            pass
     
     def show_graph_image_menu(self, global_pos, plot_widget):
         """Show context menu with image options for the specific graph"""
@@ -5772,7 +10693,6 @@ class SleepMonitorChart(QWidget):
     #
     #         result = dialog.exec_()
     #         if result == QDialog.Accepted:
-    #             print(f"Amplitude axis properties applied for {plot_widget.chart_name}")
     #
     #     except Exception as e:
     #         QMessageBox.critical(self, "Properties Error",
@@ -5801,7 +10721,6 @@ class SleepMonitorChart(QWidget):
     #         return properties
     #
     #     except Exception as e:
-    #         print(f"Error getting current axis properties: {e}")
     #         # Return default properties
     #         return {
     #             'low_value': 35.0,
@@ -5871,10 +10790,6 @@ class SleepMonitorChart(QWidget):
     #         vb.updateAutoRange()
     #         vb.updateViewRange()
     #
-    #         print(f"Applied axis properties to {plot_widget.chart_name}:")
-    #         print(f"  Range: {low_value} - {high_value}")
-    #         print(f"  Limit: {properties.get('limit_axis_range', False)}")
-    #         print(f"  Auto-adjust: {auto_adjust}")
     #
     #         # Update SpO2 value labels to match the new scaled data
     #         if plot_widget.chart_name.strip() == "SpO2" and hasattr(plot_widget, 'plot_curve'):
@@ -5883,13 +10798,11 @@ class SleepMonitorChart(QWidget):
     #                 x_data, y_data = current_data
     #                 # Recreate value labels with the scaled data positions
     #                 self.create_spo2_markers_and_labels(plot_widget, x_data, y_data)
-    #                 print(f"Updated SpO2 value labels for new axis range: {low_value} - {high_value}")
     #
     #         from PyQt5.QtCore import QTimer
     #         QTimer.singleShot(100, lambda: self.force_range_update(plot_widget, low_value, high_value))
     #
     #     except Exception as e:
-    #         print(f"Error applying axis properties: {e}")
     #         QMessageBox.critical(self, "Apply Error",
     #                            f"Failed to apply axis properties:\n{str(e)}")
     #
@@ -5906,11 +10819,8 @@ class SleepMonitorChart(QWidget):
     #             if current_data[0] is not None and len(current_data[0]) > 0:
     #                 x_data, y_data = current_data
     #                 self.create_spo2_markers_and_labels(plot_widget, x_data, y_data)
-    #                 print(f"Force updated SpO2 value labels for range: {low_value} - {high_value}")
     #
-    #         print(f"Force updated range for {plot_widget.chart_name}: {low_value} - {high_value}")
     #     except Exception as e:
-    #         print(f"Error in force range update: {e}")
     
     def custom_mouse_release(self, event, plot_widget):
         """Custom mouse release handler for reliable selection completion"""
@@ -5944,7 +10854,7 @@ class SleepMonitorChart(QWidget):
             distance = abs(self.selection_end_scene.x() - self.selection_start_scene.x())
 
             if distance > 10:
-                print("Selection finished properly")
+                pass
 
                 #  IMPORTANT: ensure end point set
                 vb = plot_widget.getViewBox()
@@ -5991,11 +10901,11 @@ class SleepMonitorChart(QWidget):
                 distance = abs(self.selection_end_scene.x() - self.selection_start_scene.x())
                 
                 if distance > 10:  # Minimum 10 pixels for valid selection
-                    print(f"Selection finished: {distance} pixels")
+                    pass
                     self.show_selection_menu()
                 else:
                 
-                    print("Selection too small, clearing")
+                    pass
                     self.clear_selection()
             else:
                 # No proper selection made
@@ -6034,13 +10944,10 @@ class SleepMonitorChart(QWidget):
         start_widget = self.current_selection_chart.mapFromScene(start_scene)
         end_widget = self.current_selection_chart.mapFromScene(end_scene)
         
-        print(f"View range: {vb.viewRange()}")
-        print(f"update_selection_overlay - Chart: {self.current_selection_chart.chart_name}")
-        print(f"update_selection_overlay - Data coords: start={start_x}, end={end_x}")
-        print(
-            f"update_selection_overlay - Widget coords: x_min={min(start_widget.x(), end_widget.x()):.1f}, "
-            f"x_max={max(start_widget.x(), end_widget.x()):.1f}"
-        )
+        pass
+        pass
+        pass
+        pass
 
         if not self._place_overlay_in_plot_area(
             self.current_selection_chart,
@@ -6121,7 +11028,9 @@ class SleepMonitorChart(QWidget):
 
     def _selection_allowed_for_chart(self, chart_name):
         """Allow manual selection only on supported charts after data upload."""
-        return chart_name in {"Airflow", "SpO2"} and bool(getattr(self, "loaded_csv_path", None))
+        return chart_name in {"Airflow", "SpO2"} and bool(
+            getattr(self, "loaded_recording_path", None)
+        )
 
     def clear_viewbox_rubber_band(self, plot_widget):
         """Hide any stuck pyqtgraph rubber-band zoom box and reset drag state."""
@@ -6156,16 +11065,16 @@ class SleepMonitorChart(QWidget):
 
     def show_selection_menu(self):
         """Show dropdown menu with different options based on chart type"""
-        print("show_selection_menu called!")
+        pass
         if not self.current_selection_chart:
-            print("No current_selection_chart, returning")
+            pass
             return
         chart_name = self.current_selection_chart.chart_name.strip()
         if not self._selection_allowed_for_chart(chart_name):
-            print(f"Selection menu blocked for chart: {chart_name}")
+            pass
             self.clear_selection()
             return
-        print(f"Current selection chart: {self.current_selection_chart.chart_name}")
+        pass
             
         # Update overlay to show waiting state
         overlay = self.current_selection_chart.selection_overlay
@@ -6186,7 +11095,7 @@ class SleepMonitorChart(QWidget):
             """)
             
         # Create context menu
-        print("Creating context menu...")
+        pass
         menu = QMenu(self)
         menu.setTitle("Select Sleep Event Type")
         
@@ -6243,11 +11152,11 @@ class SleepMonitorChart(QWidget):
         menu.addAction(clear_action)
         
         # Show menu at cursor position
-        print("Getting cursor position...")
+        pass
         from PyQt5.QtGui import QCursor
         global_cursor_pos = QCursor.pos()
-        print(f"Cursor position: {global_cursor_pos}")
-        print("Showing menu...")
+        pass
+        pass
         
       
         menu.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint | Qt.WindowStaysOnTopHint)
@@ -6258,7 +11167,7 @@ class SleepMonitorChart(QWidget):
         self.active_context_menu = menu
         
         menu.exec_(global_cursor_pos)
-        print("Menu exec called!")
+        pass
         
         # Clear menu reference after it's closed
         self.active_context_menu = None
@@ -6266,7 +11175,7 @@ class SleepMonitorChart(QWidget):
         # Menu closed without choosing a label (X / Esc / outside click) ->
         # clear the dragged area instead of preserving a stale preview overlay.
         if self.selection_active:
-            print("Menu dismissed - clearing pending selection")
+            pass
             self.clear_selection()
     
     def apply_selection_label(self, label_type):
@@ -6299,8 +11208,13 @@ class SleepMonitorChart(QWidget):
             self.dynamic_selections[chart_name] = []
 
         # Convert pixel coordinates to absolute time coordinates
-        start_time_abs = self.selection_start.x() + self.current_time_offset
-        end_time_abs = self.selection_end.x() + self.current_time_offset
+        # A user may drag in either direction. Store every selection in
+        # chronological order so its duration, saved data and hit-testing are
+        # never negative for a right-to-left drag.
+        start_time_abs, end_time_abs = self._ordered_span(
+            self.selection_start.x() + self.current_time_offset,
+            self.selection_end.x() + self.current_time_offset,
+        )
 
         selection_data = {
             'label': label_type,
@@ -6337,7 +11251,7 @@ class SleepMonitorChart(QWidget):
             self._set_manual_label_override_for_selection(pending_selection, label_type)
             self.clear_selection()
             self._refresh_auto_rule_ai_views()
-            print(f"Label '{label_type}' applied to auto-detected event (manual override saved)")
+            pass
             return
 
         if pending_selection and pending_source != "auto_rule_ai":
@@ -6351,7 +11265,7 @@ class SleepMonitorChart(QWidget):
                 time_data, spo2_data = self.spo2_full_data
                 
                 # Calculate indices
-                sampling_rate = EXTERNAL_ARRAY_SAMPLE_RATE_HZ
+                sampling_rate = self.channel_rate("spo2")
                 start_index = int(start_time_abs * sampling_rate)
                 end_index = int(end_time_abs * sampling_rate)
                 
@@ -6410,7 +11324,7 @@ class SleepMonitorChart(QWidget):
             self.emit_detected_events_panel()
             self.update_detection_summary_label()
 
-        print(f"Label '{label_type}' added (persistent)")
+        pass
 
         # clear temp selection
         self.selection_start = None
@@ -6421,12 +11335,12 @@ class SleepMonitorChart(QWidget):
     
     def handle_overlay_click(self, event, overlay, chart_name):
         """Handle right click on overlay"""
-        print(f"handle_overlay_click called - button: {event.button()}, chart: {chart_name}")
+        pass
         if event.button() == Qt.RightButton:
-            print("Right button detected, showing overlay menu")
+            pass
             self.show_overlay_menu(event.globalPos(), overlay, chart_name)
         else:
-            print(f"Left button clicked on overlay for {chart_name}")
+            pass
     
     def handle_overlay_double_click(self, event, overlay, chart_name):
         """Double click = quick remove option"""
@@ -6434,7 +11348,7 @@ class SleepMonitorChart(QWidget):
     
     def show_overlay_menu(self, global_pos, overlay, chart_name):
         """Show remove menu for overlay"""
-        print(f"show_overlay_menu called for chart: {chart_name}")
+        pass
         menu = QMenu(self)
 
         remove_action = QAction("Remove Selection", self)
@@ -6443,7 +11357,7 @@ class SleepMonitorChart(QWidget):
         
         # Find the label index for this overlay
         label_index = self._find_label_index_for_overlay(overlay, chart_name)
-        print(f"Found label_index: {label_index} for overlay")
+        pass
         if label_index is not None:
             selection_data = self.selection_labels[chart_name][label_index]
             if selection_data.get("is_manually_edited"):
@@ -6453,15 +11367,15 @@ class SleepMonitorChart(QWidget):
                 menu.addAction(reset_action)
 
             # Add Change Label option
-            print("Adding Change Label option to menu")
+            pass
             menu.addSeparator()
             change_action = QAction("Change Label...", self)
             change_action.triggered.connect(lambda: self.change_label(chart_name, label_index))
             menu.addAction(change_action)
         else:
-            print("No label_index found, not adding Change Label option")
+            pass
 
-        print(f"Showing menu with {len(menu.actions())} actions")
+        pass
         menu.exec_(global_pos)
 
     def reset_overlay_label_to_auto(self, chart_name, label_index):
@@ -6474,28 +11388,28 @@ class SleepMonitorChart(QWidget):
             return
 
         self._refresh_auto_rule_ai_views()
-        print(f"Reset auto label for {chart_name} selection at index {label_index}")
+        pass
     
     def _find_label_index_for_overlay(self, overlay, chart_name):
         """Find the label index for a given overlay"""
         overlay_id = getattr(overlay, 'selection_id', None)
-        print(f"Overlay selection_id: {overlay_id}")
+        pass
         if overlay_id is None:
-            print("Overlay has no selection_id")
+            pass
             return None
             
         if chart_name not in self.selection_labels:
-            print(f"No selections found for chart: {chart_name}")
+            pass
             return None
             
-        print(f"Checking {len(self.selection_labels[chart_name])} selections for {chart_name}")
+        pass
         for i, selection_data in enumerate(self.selection_labels[chart_name]):
             selection_id = self._get_selection_id(selection_data)
-            print(f"  Selection {i}: {selection_id}")
+            pass
             if selection_id == overlay_id:
-                print(f"  MATCH found at index {i}")
+                pass
                 return i
-        print("No matching selection found")
+        pass
         return None
     
     def delete_overlay(self, overlay, chart_name):
@@ -6556,7 +11470,7 @@ class SleepMonitorChart(QWidget):
         self.render_dynamic_selections()
         self.emit_detected_events_panel()
         self.update_detection_summary_label()
-        print(f"Overlay + data deleted (ID: {overlay_id})")
+        pass
     
     def _find_overlay_id_by_position(self, overlay, chart_name):
         """Find selection ID by matching overlay position with stored selection data"""
@@ -6586,7 +11500,7 @@ class SleepMonitorChart(QWidget):
     
     def enforce_fixed_ranges(self):
         """Continuously enforce fixed X-axis ranges on all charts."""
-        if self.is_playing:
+        if self.is_playing or getattr(self, "_slider_scrubbing", False):
             return
         if self.is_all_psg_mode():
             fixed_end = self._get_playback_max_duration()
@@ -6607,7 +11521,7 @@ class SleepMonitorChart(QWidget):
                             abs(current_range[0][0] - plot_widget.fixed_range[0]) > 1e-3
                             or abs(current_range[0][1] - plot_widget.fixed_range[1]) > 1e-3
                         ):
-                            dbg(f"🔧 FIXING ViewBox {plot_widget.chart_name}: {current_range[0]} → {plot_widget.fixed_range}")
+                            pass
                         plot_widget.setXRange(plot_widget.fixed_range[0], plot_widget.fixed_range[1], padding=0)
                     except:
                         pass  
@@ -6629,6 +11543,7 @@ class SleepMonitorChart(QWidget):
             'OSA': (190, 52, 68),
             'CSA': (30, 110, 140),
             'MSA': (92, 78, 158),
+            'APNEA': (176, 60, 90),
             'HSA': (176, 124, 42),
             'POSSIBLE_OSA': (190, 52, 68),
             'POSSIBLE_CSA': (30, 110, 140),
@@ -6690,7 +11605,7 @@ class SleepMonitorChart(QWidget):
         try:
             if chart_name in self.selection_labels and 0 <= label_index < len(self.selection_labels[chart_name]):
                 removed_label = self.selection_labels[chart_name].pop(label_index)
-                print(f"Removed label '{removed_label['label']}' from {chart_name}")
+                pass
                 self._mark_deleted_auto_event(removed_label)
                 
                 # Also remove from dynamic_selections to prevent overlay issues
@@ -6822,7 +11737,7 @@ class SleepMonitorChart(QWidget):
         self.current_selection_chart = None
         self._pending_label_change = None
         self.is_selecting = False
-        print("Selection cleared")
+        pass
     
 
     def restore_all_selections(self):
@@ -6882,8 +11797,26 @@ class SleepMonitorChart(QWidget):
             if right > left and bottom > top:
                 return left, top, right, bottom
         except Exception as error:
-            dbg(f"Could not resolve plot area rect: {error}")
+            pass
         return 0.0, 0.0, float(plot_widget.width()), float(plot_widget.height())
+
+    def _overlay_left_limit(self, plot_widget, plot_left):
+        try:
+            axis = plot_widget.getAxis('left')
+            if axis is None or not axis.isVisible():
+                return plot_left
+            line_local = axis.mapRectFromParent(axis.geometry()).topRight()
+            line_scene = axis.mapToScene(line_local)
+            axis_x = float(plot_widget.mapFromScene(line_scene).x())
+            axis_x += float(plot_widget.viewport().x())
+            try:
+                half_pen = max(1.0, float(axis.pen().widthF())) / 2.0
+            except Exception:
+                half_pen = 0.5
+            limit = axis_x + half_pen + float(OVERLAY_AXIS_INSET_PX)
+            return max(float(plot_left), float(np.ceil(limit - 1e-6)))
+        except Exception:
+            return plot_left
 
     def _place_overlay_in_plot_area(
         self,
@@ -6901,6 +11834,7 @@ class SleepMonitorChart(QWidget):
         changes. Only the visible part inside the plotting area is shown.
         """
         left, top, right, bottom = self._plot_area_rect(plot_widget)
+        left = self._overlay_left_limit(plot_widget, left)
 
         low = float(min(x_min, x_max))
         high = float(max(x_min, x_max))
@@ -6953,6 +11887,11 @@ class SleepMonitorChart(QWidget):
             return
         self._rendering_selections = True
         try:
+            # Compute pass-wide values once; every chart shares this window.
+            _visible_window = self.get_effective_time_window_seconds()
+            _all_psg = self.is_all_psg_mode()
+            _max_duration = self._get_playback_max_duration() if _all_psg else 0.0
+            _charts_to_repaint = []
             for i in range(self.charts_layout.count()):
                 container = self.charts_layout.itemAt(i).widget()
                 if not (container and hasattr(container, 'findChildren')):
@@ -6973,10 +11912,12 @@ class SleepMonitorChart(QWidget):
                     for overlay in plot_widget.selection_overlays:
                         try:
                             if overlay and hasattr(overlay, 'hide') and not sip.isdeleted(overlay):
+                                if overlay.isVisible() and plot_widget not in _charts_to_repaint:
+                                    _charts_to_repaint.append(plot_widget)   # a box was here: repaint its area
                                 overlay.hide()
                                 overlay.setGeometry(-1000, -1000, 1, 1)
                         except Exception as e:
-                            dbg(f"Warning: Could not hide overlay: {e}")
+                            pass
                             continue
 
                 if chart_name not in self.dynamic_selections:
@@ -6984,18 +11925,33 @@ class SleepMonitorChart(QWidget):
 
                 for selection_data in self.dynamic_selections[chart_name]:
                     try:
-                        start_time_abs = selection_data['start_time']
-                        end_time_abs = selection_data['end_time']
-                        if self.is_all_psg_mode():
-                            start_time_rel = start_time_abs
+                        start_time_abs, end_time_abs = self._ordered_span(
+                            selection_data['start_time'],
+                            selection_data['end_time'],
+                        )
+                        # Geometry may begin at the visible SpO2 fall onset,
+                        # while start_time_abs remains the scored detector time
+                        # used by duration, navigation, deletion and reports.
+                        box_start_time_abs = start_time_abs
+                        try:
+                            display_start = float(selection_data.get(
+                                "display_start_time",
+                                start_time_abs,
+                            ))
+                            if np.isfinite(display_start):
+                                box_start_time_abs = min(start_time_abs, display_start)
+                        except (TypeError, ValueError):
+                            pass
+                        if _all_psg:
+                            start_time_rel = box_start_time_abs
                             end_time_rel = end_time_abs
                             visible_start = 0.0
-                            visible_end = self._get_playback_max_duration()
+                            visible_end = _max_duration
                         else:
-                            start_time_rel = start_time_abs - self.current_time_offset
+                            start_time_rel = box_start_time_abs - self.current_time_offset
                             end_time_rel = end_time_abs - self.current_time_offset
                             visible_start = 0.0
-                            visible_end = self.get_effective_time_window_seconds()
+                            visible_end = _visible_window
 
                         if not (end_time_rel >= visible_start and start_time_rel <= visible_end):
                             continue
@@ -7017,12 +11973,14 @@ class SleepMonitorChart(QWidget):
 
                         if overlay is None:
                             overlay = QLabel(plot_widget)
-                            overlay.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+                            overlay.setAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+                            overlay.setWordWrap(False)
                             if not hasattr(plot_widget, 'selection_overlays'):
                                 plot_widget.selection_overlays = []
                             plot_widget.selection_overlays.append(overlay)
                         else:
-                            overlay.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+                            overlay.setAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+                            overlay.setWordWrap(False)
 
                         duration = end_time_abs - start_time_abs
                         start_str = self.format_timestamp(start_time_abs)
@@ -7038,25 +11996,50 @@ class SleepMonitorChart(QWidget):
                             overlay.setGeometry(-1000, -1000, 1, 1)
                             continue
                         elif 'spo2_info' in selection_data and selection_data['spo2_info']:
-                            full_text = f"""
-{display_label}
-
-{start_str}
-{duration_str}
-
-{selection_data['spo2_info']}
-"""
+                            full_text = (
+                                f"{display_label}  |  {start_str}  |  {duration_str}  |  "
+                                f"{selection_data['spo2_info']}"
+                            )
+                            spo2_change_html = html_escape(str(selection_data['spo2_info']))
+                            # The thin down-arrow disappeared visually inside the
+                            # small event caption.  A filled, high-contrast marker
+                            # makes the direction of the SpO2 drop unambiguous.
+                            spo2_change_html = spo2_change_html.replace(
+                                "↓",
+                                '<span style="color: #991b1b; font-size: 12px; '
+                                'font-weight: 900;">▼</span>',
+                            )
+                            rich_text = (
+                                '<span style="white-space: nowrap; font-weight: 600;">'
+                                f'{html_escape(display_label)}&nbsp;&nbsp;|&nbsp;&nbsp;'
+                                f'<span style="font-weight: 900;">{html_escape(start_str)}</span>'
+                                '&nbsp;&nbsp;|&nbsp;&nbsp;'
+                                f'<span style="font-weight: 900;">{html_escape(duration_str)}</span>'
+                                '&nbsp;&nbsp;|&nbsp;&nbsp;'
+                                f'<span style="font-weight: 900;">{spo2_change_html}</span>'
+                                '</span>'
+                            )
                         else:
-                            full_text = f"{display_label}\n{start_str}\n{duration_str}"
-                        overlay.setText(full_text)
+                            full_text = f"{display_label}  |  {start_str}  |  {duration_str}"
+                            rich_text = (
+                                '<span style="white-space: nowrap; font-weight: 600;">'
+                                f'{html_escape(display_label)}&nbsp;&nbsp;|&nbsp;&nbsp;'
+                                f'<span style="font-weight: 900;">{html_escape(start_str)}</span>'
+                                '&nbsp;&nbsp;|&nbsp;&nbsp;'
+                                f'<span style="font-weight: 900;">{html_escape(duration_str)}</span>'
+                                '</span>'
+                            )
+                        overlay.setTextFormat(Qt.RichText)
+                        overlay.setText(rich_text)
+                        overlay.setToolTip(full_text)
                         overlay_style = f"""
                             background-color: {selection_data['color']};
-                            border: 1px solid rgba(0, 0, 0, 0.25);
-                            border-radius: 6px;
+                            border: none;
+                            border-radius: 0px;
                             color: #1a1a1a;
-                            font-size: 10px;
-                            font-weight: bold;
-                            padding: 4px 2px 2px 2px;
+                            font-size: 9px;
+                            font-weight: 600;
+                            padding: 1px 3px;
                         """
                         if getattr(overlay, "_applied_style", None) != overlay_style:
                             overlay._applied_style = overlay_style
@@ -7074,6 +12057,10 @@ class SleepMonitorChart(QWidget):
                             end_widget = plot_widget.mapFromScene(end_scene)
 
                             overlay.selection_id = self._get_selection_id(selection_data)
+                            overlay._playback_span = (float(box_start_time_abs), float(end_time_abs))
+                            # Keep the original full-height event box.  Only the
+                            # text layout changes: one row at the bottom leaves
+                            # the SpO2 readings at the top unobstructed.
                             placed = self._place_overlay_in_plot_area(
                                 plot_widget,
                                 overlay,
@@ -7083,16 +12070,21 @@ class SleepMonitorChart(QWidget):
                             if not placed:
                                 continue
                             overlay.show()
+                            if plot_widget not in _charts_to_repaint:
+                                _charts_to_repaint.append(plot_widget)   # a box is here now
 
-                            dbg(
-                                f"Rendered selection '{selection_data['label']}' on {chart_name} "
-                                f"at {start_time_clamped:.1f}s-{end_time_clamped:.1f}s"
-                            )
+                            pass
                     except Exception as e:
-                        dbg(f"Error rendering selection overlay: {e}")
+                        pass
                         continue
+            if OVERLAY_FORCE_REPAINT:
+                for _chart in _charts_to_repaint:
+                    try:
+                        _chart.update()
+                    except Exception:
+                        pass
         except Exception as e:
-            dbg(f"Error in render_dynamic_selections: {e}")
+            pass
         finally:
             self._rendering_selections = False
 
@@ -7194,28 +12186,28 @@ Events <=92: {self.spo2_statistics['desaturation_events']}
     def _get_analysis_json_path(self):
         """Find the analysis JSON file for the current session."""
         try:
-            csv_path = getattr(self, "current_csv_path", None) or getattr(
-                self, "loaded_csv_path", None
+            recording_path = getattr(self, "current_recording_path", None) or getattr(
+                self, "loaded_recording_path", None
             )
-            if not csv_path:
+            if not recording_path:
                 return None
 
-            csv_filename = os.path.basename(csv_path)
-            csv_base = os.path.splitext(csv_filename)[0]
+            recording_filename = os.path.basename(recording_path)
+            recording_base = os.path.splitext(recording_filename)[0]
             import glob
             analysis_dirs = [
-                Path(csv_path).parent.parent / "analysis_json",
+                Path(recording_path).parent.parent / "analysis_json",
                 get_configured_path("analysis_json_dir"),
             ]
             files = []
             for analysis_dir in analysis_dirs:
                 if analysis_dir.exists():
-                    files.extend(glob.glob(str(analysis_dir / f"{csv_base}_analysis_*.json")))
+                    files.extend(glob.glob(str(analysis_dir / f"{recording_base}_analysis_*.json")))
             if files:
                 return max(set(files), key=os.path.getctime)
             return None
         except Exception as error:
-            dbg(f"Error finding analysis JSON: {error}")
+            pass
             return None
 
     def _load_sensor_off_segments(self, analysis_json_path):
@@ -7228,7 +12220,7 @@ Events <=92: {self.spo2_statistics['desaturation_events']}
                 analysis_data = json.load(file_handle)
             return analysis_data.get("sensor_off_segments", []) or []
         except Exception as error:
-            dbg(f"Error loading sensor_off_segments: {error}")
+            pass
             return []
 
     def _mask_airflow_during_sensor_off(self, airflow, time_array, sensor_off_segments):
@@ -7246,11 +12238,8 @@ Events <=92: {self.spo2_statistics['desaturation_events']}
 
         time_values = np.asarray(time_array, dtype=float)
         if time_values.size:
-            dbg(
-                f"Sensor-off masking time range: min={float(np.nanmin(time_values)):.1f}s, "
-                f"max={float(np.nanmax(time_values)):.1f}s, len={len(time_values)}"
-            )
-            dbg(f"Airflow samples available for masking: len={len(masked_airflow)}")
+            pass
+            pass
 
         for segment in sensor_off_segments:
             start_sec = float(segment.get("start_sec", 0.0))
@@ -7261,10 +12250,7 @@ Events <=92: {self.spo2_statistics['desaturation_events']}
             direct_mask = (time_values >= start_sec) & (time_values <= end_sec)
             if np.any(direct_mask):
                 masked_airflow[direct_mask] = baseline
-                dbg(
-                    f"Mask segment {start_sec:.1f}s-{end_sec:.1f}s -> "
-                    f"{int(np.count_nonzero(direct_mask))} samples (direct)"
-                )
+                pass
                 continue
 
             # If the supplied time array is offset from the segment clock,
@@ -7273,16 +12259,9 @@ Events <=92: {self.spo2_statistics['desaturation_events']}
             shifted_mask = (shifted_time_values >= start_sec) & (shifted_time_values <= end_sec)
             if np.any(shifted_mask):
                 masked_airflow[shifted_mask] = baseline
-                dbg(
-                    f"Mask segment {start_sec:.1f}s-{end_sec:.1f}s -> "
-                    f"{int(np.count_nonzero(shifted_mask))} samples (shifted by "
-                    f"{float(time_values[0]):.1f}s)"
-                )
+                pass
             else:
-                dbg(
-                    f"Mask segment {start_sec:.1f}s-{end_sec:.1f}s -> 0 samples "
-                    f"(direct and shifted)"
-                )
+                pass
         return masked_airflow
 
     def _detect_breathing_stopped_periods(self, min_duration_sec=60):
@@ -7316,61 +12295,125 @@ Events <=92: {self.spo2_statistics['desaturation_events']}
                     "duration_sec": duration,
                     "reason": f"breathing_stopped ({label})",
                 })
-                dbg(
-                    f"Breathing stopped [{label}]: {start_sec:.0f}s-{end_sec:.0f}s "
-                    f"({duration:.0f}s)"
-                )
-            dbg(f"TOTAL breathing-stopped periods found: {len(segments)}")
+                pass
+            pass
         except Exception as error:
-            dbg(f"Breathing-stopped detection error: {error}")
+            pass
+        return segments
+
+    # Airflow "dead sensor" flatness test (display units, after enhancement).
+    FLAT_AIRFLOW_P2P_MAX = 7.0
+    FLAT_AIRFLOW_WINDOW_SEC = 10.0
+    FLAT_AIRFLOW_MIN_SEC = 90.0
+
+    def _detect_flat_airflow_segments(self, display_airflow, time_data):
+        """Return stretches where airflow is nothing but sensor noise."""
+        values = np.asarray(display_airflow, dtype=float).reshape(-1)
+        times = np.asarray(time_data, dtype=float).reshape(-1)
+        count = min(values.size, times.size)
+        if count < 2:
+            return []
+        values = values[:count]
+        times = times[:count]
+        window = max(3, int(round(self.FLAT_AIRFLOW_WINDOW_SEC * self.channel_rate("airflow"))))
+        series = pd.Series(values)
+        rolling_max = series.rolling(window, center=True, min_periods=window // 2).max()
+        rolling_min = series.rolling(window, center=True, min_periods=window // 2).min()
+        p2p = (rolling_max - rolling_min).to_numpy(dtype=float)
+        flat = np.isfinite(p2p) & (p2p < self.FLAT_AIRFLOW_P2P_MAX)
+        edges = np.diff(np.r_[0, flat.astype(np.int8), 0])
+        starts = np.flatnonzero(edges == 1)
+        ends = np.flatnonzero(edges == -1)
+        segments = []
+        for start, end in zip(starts, ends):
+            last = min(end, count - 1)
+            duration = float(times[last] - times[start])
+            if duration < self.FLAT_AIRFLOW_MIN_SEC:
+                continue
+            segments.append({
+                "start_sec": float(times[start]),
+                "end_sec": float(times[last]),
+                "duration_sec": duration,
+                "reason": "airflow_flat_sensor_noise_only",
+            })
         return segments
 
     def _apply_sensor_off_masking_after_detection(self):
-        """Apply sensor-off and breathing-stopped ranges to the airflow display."""
+        """Flatten the airflow DISPLAY trace where the sensor delivered no signal."""
         try:
             result = getattr(self, "auto_rule_ai_result", None)
-            sensor_off_segments = result.get("sensor_off_segments", []) if result else []
-            breathing_stopped_segments = self._detect_breathing_stopped_periods(
-                min_duration_sec=60,
-            )
-            all_segments = sensor_off_segments + breathing_stopped_segments
-            self.sensor_off_shade_segments = list(sensor_off_segments)
+            sensor_off_segments = list(result.get("sensor_off_segments", []) if result else [])
 
-            dbg("\n" + "=" * 60)
-            dbg("AIRFLOW MASKING DEBUG:")
-            dbg(f"  Sensor-off segments: {len(sensor_off_segments)}")
-            dbg(f"  Breathing-stopped: {len(breathing_stopped_segments)}")
-            dbg(f"  TOTAL to mask: {len(all_segments)}")
-            for index, segment in enumerate(sensor_off_segments[:5]):
-                start_value = float(segment.get("start_sec", 0.0))
-                end_value = float(segment.get("end_sec", 0.0))
-                duration_value = float(
-                    segment.get("duration_sec", end_value - start_value)
-                )
-                start_min, start_rem = divmod(int(start_value), 60)
-                end_min, end_rem = divmod(int(end_value), 60)
-                dbg(
-                    f"  Sensor-off [{index}] {start_min}:{start_rem:02d} - "
-                    f"{end_min}:{end_rem:02d} "
-                    f"(Duration: {duration_value:.0f}s)"
-                )
-            dbg("=" * 60 + "\n")
-
-            if not all_segments:
-                return
-
-            current_psg_data = getattr(self, "current_psg_data", None)
+            current_psg_data = getattr(self, "current_psg_data", None) or getattr(self, "psg_full_data", None)
             if not isinstance(current_psg_data, dict):
+                self.sensor_off_shade_segments = sensor_off_segments
                 return
-
-            time_data = current_psg_data.get("time", [])
+            time_data = np.asarray(current_psg_data.get("time", []), dtype=float)
             signals = current_psg_data.get("signals", {})
             if "airflow_display" not in signals or len(signals["airflow_display"]) == 0:
+                self.sensor_off_shade_segments = sensor_off_segments
                 return
 
-            # Always start from the enhanced signal so repeated detection does
-            # not calculate a new baseline from an already masked trace.
-            display_source = signals.get("airflow_enhanced", signals["airflow_display"])
-            signals["airflow_display"] = np.array(display_source, dtype=float, copy=True)
+            display_source = signals.get(
+                "airflow_display_base",
+                signals.get("airflow_enhanced", signals["airflow_display"]),
+            )
+            display = np.array(display_source, dtype=float, copy=True)
+            count = min(len(display), len(time_data))
+            display = display[:count]
+            time_data = time_data[:count]
+
+            flat_segments = self._detect_flat_airflow_segments(display, time_data)
+            all_segments = sorted(
+                sensor_off_segments + flat_segments,
+                key=lambda item: float(item.get("start_sec", 0.0)),
+            )
+
+            merged = []
+            for segment in all_segments:
+                try:
+                    start_sec = float(segment.get("start_sec", 0.0))
+                    end_sec = float(segment.get("end_sec", start_sec))
+                except (TypeError, ValueError):
+                    continue
+                if end_sec <= start_sec:
+                    continue
+                reason = str(segment.get("reason", ""))
+                if merged and start_sec <= merged[-1]["end_sec"] + 1.0:
+                    merged[-1]["end_sec"] = max(merged[-1]["end_sec"], end_sec)
+                    merged[-1]["duration_sec"] = merged[-1]["end_sec"] - merged[-1]["start_sec"]
+                    reasons = set(merged[-1]["reason"].split("+")) | {reason}
+                    merged[-1]["reason"] = "+".join(sorted(r for r in reasons if r))
+                else:
+                    merged.append({
+                        "start_sec": start_sec,
+                        "end_sec": end_sec,
+                        "duration_sec": end_sec - start_sec,
+                        "reason": reason,
+                    })
+            self.sensor_off_shade_segments = merged
+
+            pass
+            pass
+            for segment in merged[:10]:
+                pass
+            pass
+
+            flattened = 0
+            for segment in merged:
+                start_idx = int(np.searchsorted(time_data, segment["start_sec"], side="left"))
+                end_idx = int(np.searchsorted(time_data, segment["end_sec"], side="right"))
+                if end_idx - start_idx < 2:
+                    continue
+                chunk = display[start_idx:end_idx]
+                finite = chunk[np.isfinite(chunk)]
+                if finite.size == 0:
+                    continue
+                display[start_idx:end_idx] = float(np.median(finite))
+                flattened += end_idx - start_idx
+            signals["airflow_display"] = display
+            pass
         except Exception as error:
-            dbg(f"Error applying sensor-off masking: {error}")
+            pass
+
+

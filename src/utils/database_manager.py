@@ -87,7 +87,7 @@ class DatabaseManager:
             )
         """)
         
-        # Create reports table for medical reports
+        # Create reports table for reports
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,9 +128,7 @@ class DatabaseManager:
             dob = str(patient_data.get('dob', '')).strip()
             existing_patient = self.get_patient_by_name_dob(last_name, first_name, dob)
             if existing_patient:
-                print(
-                    f"Duplicate patient not saved: {last_name} {first_name} ({dob}) already exists with ID {existing_patient['id']}"
-                )
+                pass
                 return None
 
             cursor.execute("""
@@ -174,7 +172,7 @@ class DatabaseManager:
             
             conn.commit()
             patient_id = cursor.lastrowid
-            print(f"Patient saved with ID: {patient_id}")
+            pass
             return patient_id
         except Exception as e:
             conn.rollback()
@@ -195,7 +193,7 @@ class DatabaseManager:
     def update_patient(self, patient_db_id, patient_data):
         """Update an existing patient row by its database ID."""
         if not patient_db_id:
-            print("update_patient called without a patient ID")
+            pass
             return False
 
         conn = self.get_connection()
@@ -207,9 +205,7 @@ class DatabaseManager:
             dob = str(patient_data.get('dob', '')).strip()
             existing_patient = self.get_patient_by_name_dob(last_name, first_name, dob)
             if existing_patient and existing_patient.get('id') != patient_db_id:
-                print(
-                    f"Duplicate patient update blocked: {last_name} {first_name} ({dob}) already exists with ID {existing_patient['id']}"
-                )
+                pass
                 return False
 
             assignments = ", ".join(f"{name} = ?" for name in self.PATIENT_FIELDS)
@@ -220,10 +216,10 @@ class DatabaseManager:
             conn.commit()
 
             if cursor.rowcount == 0:
-                print(f"No patient found with ID {patient_db_id}")
+                pass
                 return False
 
-            print(f"Patient {patient_db_id} updated successfully")
+            pass
             return True
         except Exception as e:
             conn.rollback()
@@ -326,7 +322,7 @@ class DatabaseManager:
             
             conn.commit()
             record_id = cursor.lastrowid
-            print(f"Record saved with ID: {record_id}")
+            pass
             return record_id
         except Exception as e:
             conn.rollback()
@@ -359,7 +355,7 @@ class DatabaseManager:
             conn.close()
     
     def save_report(self, report_data):
-        """Save medical report data to the database."""
+        """Save report data to the database."""
         conn = self.get_connection()
         cursor = conn.cursor()
         
@@ -384,17 +380,17 @@ class DatabaseManager:
             
             conn.commit()
             report_id = cursor.lastrowid
-            print(f"Medical report saved (id={report_id}) for patient: {report_data.get('patient_name')}")
+            pass
             return report_id
         except Exception as e:
             conn.rollback()
-            print(f"Error saving medical report: {e}")
+            print(f"Error saving report: {e}")
             return None
         finally:
             conn.close()
     
     def get_all_reports(self):
-        """Get all medical reports from the database."""
+        """Get all reports from the database."""
         conn = self.get_connection()
         cursor = conn.cursor()
         
@@ -466,18 +462,108 @@ class DatabaseManager:
     
     def delete_patient(self, patient_id):
         """Delete a patient and their associated records"""
+        return self.delete_patients([patient_id])
+
+    def delete_sessions(self, session_ids):
+        """Delete selected saved recording sessions only."""
+        session_ids = [session_id for session_id in dict.fromkeys(session_ids) if session_id is not None]
+        if not session_ids:
+            return False
+
+        conn = self.get_connection()
+        try:
+            placeholders = ",".join("?" for _ in session_ids)
+            conn.execute(f"DELETE FROM sessions WHERE id IN ({placeholders})", session_ids)
+            conn.commit()
+            return True
+        except Exception as error:
+            conn.rollback()
+            print(f"Error deleting sessions: {error}")
+            return False
+        finally:
+            conn.close()
+
+    def delete_reports(self, report_ids):
+        """Delete selected reports only."""
+        report_ids = [report_id for report_id in dict.fromkeys(report_ids) if report_id is not None]
+        if not report_ids:
+            return False
+
+        conn = self.get_connection()
+        try:
+            placeholders = ",".join("?" for _ in report_ids)
+            conn.execute(f"DELETE FROM reports WHERE id IN ({placeholders})", report_ids)
+            conn.commit()
+            return True
+        except Exception as error:
+            conn.rollback()
+            print(f"Error deleting reports: {error}")
+            return False
+        finally:
+            conn.close()
+
+    def delete_patients(self, patient_ids):
+        """Delete patients and all linked records, sessions, and reports atomically."""
+        patient_ids = [patient_id for patient_id in dict.fromkeys(patient_ids) if patient_id is not None]
+        if not patient_ids:
+            return False
+
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
-            # First delete associated records
-            cursor.execute("DELETE FROM records WHERE patient_id = ?", (patient_id,))
-            
-            # Then delete the patient
-            cursor.execute("DELETE FROM patients WHERE id = ?", (patient_id,))
+            placeholders = ",".join("?" for _ in patient_ids)
+
+            # Capture the external Patient IDs before removing the patient
+            # rows. Older saved sessions may only have this value and no
+            # patient_db_id, so they must be removed by both identifiers.
+            cursor.execute(
+                f"SELECT id, patient_id FROM patients WHERE id IN ({placeholders})",
+                patient_ids,
+            )
+            patient_identifiers = [
+                row["patient_id"]
+                for row in cursor.fetchall()
+                if row["patient_id"] not in (None, "")
+            ]
+
+            cursor.execute(
+                f"DELETE FROM records WHERE patient_id IN ({placeholders})",
+                patient_ids,
+            )
+
+            # The current Records view reads from sessions, not records.
+            # Remove both current and legacy sessions for the selected
+            # database patients when that table exists.
+            cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"
+            )
+            if cursor.fetchone():
+                cursor.execute(
+                    f"DELETE FROM sessions WHERE patient_db_id IN ({placeholders})",
+                    patient_ids,
+                )
+                if patient_identifiers:
+                    identifier_placeholders = ",".join("?" for _ in patient_identifiers)
+                    cursor.execute(
+                        "DELETE FROM sessions "
+                        f"WHERE patient_db_id IS NULL AND patient_id IN ({identifier_placeholders})",
+                        patient_identifiers,
+                    )
+
+            # Reports are linked by the database patient's numeric ID.
+            cursor.execute(
+                f"DELETE FROM reports WHERE patient_id IN ({placeholders})",
+                patient_ids,
+            )
+
+            cursor.execute(
+                f"DELETE FROM patients WHERE id IN ({placeholders})",
+                patient_ids,
+            )
             
             conn.commit()
-            print(f"Patient {patient_id} and associated records deleted successfully")
+            pass
             return True
         except Exception as e:
             conn.rollback()

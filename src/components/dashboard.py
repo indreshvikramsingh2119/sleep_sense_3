@@ -9,16 +9,14 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSplitter, QSizePolicy, QScrollArea,
-    QSplitterHandle, QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox, QCheckBox, QStyle, QGraphicsOpacityEffect, QTextEdit
+    QSplitterHandle, QSlider, QPushButton, QMenuBar, QMenu, QAction, QComboBox, QToolBar, QFileDialog, QMessageBox, QCheckBox, QStyle, QStyleOptionSlider, QGraphicsOpacityEffect, QTextEdit
 )
-from PyQt5.QtCore import Qt, QSize, QPoint, QRect, pyqtSignal, QUrl, QEvent
-from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor, QPen, QDesktopServices
+from PyQt5.QtCore import Qt, QSize, QPoint, QRect, pyqtSignal, QUrl, QEvent, QTimer, QObject
+from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QPen, QDesktopServices
 
 from .patient_info_widget import PatientInfoWidget
 from .sleep_monitor_chart import SleepMonitorChart
 from .database_window import DatabaseWindow
-# from .archive_window import ArchiveWindow
-# from .event_window import EventWindow
 from ..utils.toolbar_utils import create_toolbar_button, get_icon_definitions, get_toolbar_qss_styles
 from ..utils.dialog_helpers import show_styled_warning
 from ..utils.database_manager import DatabaseManager
@@ -26,6 +24,39 @@ from ..utils.sample_rate import DEFAULT_SAMPLE_RATE_HZ
 from src.utils.button_functions import ButtonFunctions
 from ..utils.app_paths import get_resource_path as get_asset_path
 from ..utils.report_metrics_calculator import calculate_report_context
+
+
+class ClickSeekSlider(QSlider):
+    """Horizontal slider whose groove clicks seek to the clicked position."""
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.orientation() == Qt.Horizontal:
+            option = QStyleOptionSlider()
+            self.initStyleOption(option)
+            handle_rect = self.style().subControlRect(
+                QStyle.CC_Slider,
+                option,
+                QStyle.SC_SliderHandle,
+                self,
+            )
+            if not handle_rect.contains(event.pos()):
+                handle_width = max(1, int(handle_rect.width()))
+                available = max(1, int(self.width()) - handle_width)
+                position = max(
+                    0,
+                    min(available, int(event.pos().x()) - handle_width // 2),
+                )
+                value = QStyle.sliderValueFromPosition(
+                    self.minimum(),
+                    self.maximum(),
+                    position,
+                    available,
+                    option.upsideDown,
+                )
+                self.setValue(value)
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
 INTERPRETATION_DATA = {
     "General Findings": [
@@ -50,6 +81,37 @@ INTERPRETATION_DATA = {
 MILD_APNEA_TEXT = "Findings are consistent with MILD SLEEP APNEA (REI 5-14.9)"
 MILD_FOLLOWUP_TEXT = "Schedule an in-lab study or repeat the home sleep apnea test if clinically indicated."
 CHECKMARK_ICON_PATH = get_asset_path("icons/iconmonstr-check-mark-1.svg").replace("\\", "/")
+MIN_REPORT_ANALYSIS_DURATION_SEC = 60.0 * 60.0
+
+
+def _create_screenshot_camera_icon():
+    """Return a crisp camera icon sized for the compact screenshot button."""
+    # Draw at 2x and expose it as a high-DPI pixmap so the icon stays sharp.
+    pixmap = QPixmap(54, 34)
+    pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+
+    painter.setPen(QPen(QColor("#1e40af"), 2))
+    painter.setBrush(QColor("#3b82f6"))
+    painter.drawRoundedRect(QRect(3, 8, 48, 23), 5, 5)
+
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor("#2563eb"))
+    painter.drawRoundedRect(QRect(12, 3, 18, 8), 3, 3)
+
+    painter.setBrush(QColor("#eff6ff"))
+    painter.drawEllipse(QRect(20, 11, 16, 16))
+    painter.setBrush(QColor("#1e3a8a"))
+    painter.drawEllipse(QRect(24, 15, 8, 8))
+
+    painter.setBrush(QColor("#dbeafe"))
+    painter.drawEllipse(QRect(43, 11, 4, 4))
+    painter.end()
+
+    pixmap.setDevicePixelRatio(2.0)
+    return QIcon(pixmap)
 
 
 class InterpretationOptionRow(QWidget):
@@ -129,7 +191,7 @@ class InterpretationOptionRow(QWidget):
 
 
 class InterpretationDialog(QDialog):
-    """Selectable interpretation dialog that feeds manual notes into the report."""
+    """Selectable interpretation dialog that feeds manual notes into the report."""  
 
     CUSTOM_NOTE_LIMIT = 300
 
@@ -377,7 +439,7 @@ class ScreenshotSelectionLabel(QLabel):
 
 # Patient panel width settings
 PATIENT_PANEL_RAIL_WIDTH = 40
-PATIENT_PANEL_OPEN_WIDTH = 380
+PATIENT_PANEL_OPEN_WIDTH = 300
 PATIENT_PANEL_SNAP_WIDTH = 240
 
 # Database icons stay invisible until Database is active.
@@ -608,16 +670,16 @@ class ScreenshotOverlayWidget(QWidget):
         return QRect((self.width() - width) // 2, 16, width, 64)
 
     def _footer_rect(self):
-        width = min(390, max(340, self.width() - 48))
+        width = min(340, max(300, self.width() - 48))
         return QRect(self.width() - width - 18, self.height() - 100, width, 72)
 
     def _capture_button_rect(self):
         footer = self._footer_rect()
-        return QRect(footer.right() - 178, footer.y() + 28, 160, 34)
+        return QRect(footer.center().x() + 6, footer.y() + 34, 118, 30)
 
     def _cancel_button_rect(self):
         footer = self._footer_rect()
-        return QRect(footer.right() - 350, footer.y() + 28, 152, 34)
+        return QRect(footer.center().x() - 124, footer.y() + 34, 118, 30)
 
     def _drag_drop_icon_pixmap(self):
         """Create a small blue drag/drop-style icon for warning dialogs."""
@@ -671,6 +733,7 @@ class ScreenshotOverlayWidget(QWidget):
 
         hint_font = painter.font()
         hint_font.setBold(True)
+        hint_font.setPointSize(9)
 
         painter.setFont(title_font)
         painter.setPen(QColor("#0f172a"))
@@ -698,7 +761,7 @@ class ScreenshotOverlayWidget(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(footer, 12, 12)
 
-        hint_rect = QRect(footer.left() + 12, footer.top() + 8, footer.width() - 24, 16)
+        hint_rect = QRect(footer.left() + 12, footer.top() + 6, footer.width() - 24, 24)
         painter.setFont(hint_font)
         painter.setPen(QColor("#334155"))
         painter.drawText(hint_rect, Qt.AlignCenter | Qt.AlignVCenter,
@@ -1184,7 +1247,7 @@ class ReportRequirementsDialog(QDialog):
         text_column.addWidget(title)
 
         body = QLabel(
-            "Please select a patient ID and upload the data first before opening the medical report."
+            "Please select a patient ID and upload the data first before opening the report."
         )
         body.setObjectName("reportRequirementsBody")
         body.setWordWrap(True)
@@ -1210,6 +1273,24 @@ class ReportRequirementsDialog(QDialog):
         button_row.addWidget(confirm_button)
         layout.addLayout(button_row)
 
+class _ReportOverlayResizer(QObject):
+    """Keeps the in-window report viewer the same size as the main window."""
+
+    def __init__(self, host, overlay):
+        super().__init__(host)
+        self._host = host
+        self._overlay = overlay
+
+    def eventFilter(self, obj, event):
+        if obj is self._host and event.type() == QEvent.Resize:
+            try:
+                if self._overlay is not None and self._overlay.isVisible():
+                    self._overlay.setGeometry(self._host.rect())
+            except RuntimeError:  # the viewer was closed and deleted
+                self._overlay = None
+        return False
+
+
 class SleepSenseDashboard(QMainWindow):
     
     """Main Sleep Sense Dashboard Window"""
@@ -1223,8 +1304,6 @@ class SleepSenseDashboard(QMainWindow):
         self.current_patient_db_id = None
         self.report_interpretation_selected_items = []
         self.report_interpretation_custom_note = ""
-        self._patient_panel_open_width = None
-        
         # Global event navigation system
         self.current_event_index = -1  # Global pointer for event navigation
         self.all_events = []  # Master event array sorted chronologically
@@ -1270,15 +1349,11 @@ class SleepSenseDashboard(QMainWindow):
         
         # Professional Icon Toolbar
         self.toolbar = self.create_professional_toolbar()
-        self._set_database_icons_active(False)
         top_layout.addWidget(self.toolbar)
 
         # Quick graph toggle chips (center-top)
         self.graph_toggle_bar = self.create_graph_toggle_bar()
-        top_layout.addWidget(self.graph_toggle_bar)
-        
-        # Add spacer to push controls to the right
-        top_layout.addStretch()
+        top_layout.addWidget(self.graph_toggle_bar, 1)
         
         # Controls Container (Time Window, Hidden Graphs) - Right Side
         controls_container = self.create_controls_container()
@@ -1395,7 +1470,8 @@ class SleepSenseDashboard(QMainWindow):
         """Collapse the patient panel when it is dragged below the snap width."""
         if index != 1:
             return
-        if self.patient_panel.width() < PATIENT_PANEL_SNAP_WIDTH:
+        panel_width = self.patient_panel.width()
+        if panel_width < PATIENT_PANEL_SNAP_WIDTH:
             self.collapse_patient_panel()
         else:
             self._set_patient_panel_collapsed(False)
@@ -1412,13 +1488,10 @@ class SleepSenseDashboard(QMainWindow):
         """Collapse the patient panel into a narrow rail instead of hiding it."""
         if not hasattr(self, "main_splitter"):
             return
-        if self.patient_info.isVisible() and self.patient_panel.width() > PATIENT_PANEL_RAIL_WIDTH:
-            self._patient_panel_open_width = self.patient_panel.width()
         self._set_patient_panel_collapsed(True)
-        total_width = max(1, self.main_splitter.width() - self.main_splitter.handleWidth())
         self.main_splitter.setSizes([
             PATIENT_PANEL_RAIL_WIDTH,
-            max(1, total_width - PATIENT_PANEL_RAIL_WIDTH),
+            1000,
         ])
 
     def expand_patient_panel(self):
@@ -1426,11 +1499,9 @@ class SleepSenseDashboard(QMainWindow):
         if not hasattr(self, "main_splitter"):
             return
         self._set_patient_panel_collapsed(False)
-        total_width = max(1, self.main_splitter.width() - self.main_splitter.handleWidth())
-        open_width = self._patient_panel_open_width or PATIENT_PANEL_OPEN_WIDTH
         self.main_splitter.setSizes([
-            open_width,
-            max(1, total_width - open_width),
+            PATIENT_PANEL_OPEN_WIDTH,
+            1000,
         ])
 
     def toggle_patient_panel(self):
@@ -1502,7 +1573,12 @@ class SleepSenseDashboard(QMainWindow):
         }
 
     def create_graph_toggle_bar(self):
-        """Create the center-top quick graph toggle buttons."""
+        """Create responsive center-top quick graph toggle buttons.
+
+        The complete chip row is retained, but it lives inside a horizontal
+        scroll area so the time/event controls never get pushed outside a
+        1366-pixel-wide screen.
+        """
         container = QFrame()
         container.setObjectName("graphToggleBar")
         container.setStyleSheet("""         
@@ -1519,9 +1595,15 @@ class SleepSenseDashboard(QMainWindow):
 
         for graph_name in self.graph_visibility.keys():
             button = QPushButton()
+            # Set the final caption before the row is measured.  Measuring an
+            # empty button and filling its text later made captions clip on
+            # narrow / scaled displays (for example 1366x768 at 125% DPI).
+            button.setText(graph_name.strip())
+            button.setToolTip(graph_name.strip())
             button.setObjectName("graphToggleChip")
             button.setCheckable(True)
             button.setMinimumHeight(28)
+            button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(
                 lambda checked, name=graph_name: self.toggle_graph_visibility(name, checked)
@@ -1557,7 +1639,45 @@ class SleepSenseDashboard(QMainWindow):
             self.graph_toggle_buttons[graph_name] = button
             layout.addWidget(button)
 
-        return container
+        layout.activate()
+        container.adjustSize()
+
+        scroll = QScrollArea()
+        scroll.setObjectName("graphToggleScroll")
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidgetResizable(False)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFixedHeight(48)
+        scroll.setMinimumWidth(140)
+        # Ignore the 800+ px content size hint when the main window is narrow;
+        # the viewport shrinks and all chips remain reachable by scrolling.
+        scroll.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        scroll.setStyleSheet("""
+            QScrollArea#graphToggleScroll {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#graphToggleScroll > QWidget > QWidget {
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                height: 6px;
+                background: transparent;
+                margin: 0 2px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #94a3b8;
+                border-radius: 3px;
+                min-width: 28px;
+            }
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+        """)
+        scroll.setWidget(container)
+        return scroll
 
     def _refresh_graph_toggle_buttons(self):
         """Sync center graph toggle buttons with current visibility state."""
@@ -1565,8 +1685,10 @@ class SleepSenseDashboard(QMainWindow):
             is_visible = bool(self.graph_visibility.get(graph_name, False))
             button.blockSignals(True)
             button.setChecked(is_visible)
-            prefix = "✓ " if is_visible else ""
-            button.setText(f"{prefix}{graph_name.strip()}")
+            # The selected state is already communicated by the blue fill and
+            # border. Avoid a font-rendered tick glyph, which appears blurry
+            # on some Windows display scales.
+            button.setText(graph_name.strip())
             button.blockSignals(False)
 
     def _update_graph_controls_state(self):
@@ -1702,9 +1824,11 @@ class SleepSenseDashboard(QMainWindow):
         controls_layout.addWidget(divider4)
 
         # Screenshot Button
-        self.btn_screenshot = QPushButton("📷")
+        self.btn_screenshot = QPushButton()
         self.btn_screenshot.setObjectName("screenshotButton")
         self.btn_screenshot.setFixedSize(35, 22)
+        self.btn_screenshot.setIcon(_create_screenshot_camera_icon())
+        self.btn_screenshot.setIconSize(QSize(27, 17))
         self.btn_screenshot.setToolTip("Take Screenshot")
         self.btn_screenshot.setStatusTip("Capture entire application window")
         self.btn_screenshot.clicked.connect(self.take_screenshot)
@@ -1718,10 +1842,7 @@ class SleepSenseDashboard(QMainWindow):
                 );
                 border: 1px solid #d1d5db;
                 border-radius: 4px;
-                color: #374151;
-                font-size: 14px;
-                font-weight: bold;
-                text-align: center;
+                padding: 0px;
             }
             QPushButton#screenshotButton:hover {
                 background: qlineargradient(
@@ -1777,11 +1898,11 @@ class SleepSenseDashboard(QMainWindow):
         if hasattr(self, 'monitor_chart') and self.monitor_chart:
             # Get the value from dropdown item data
             seconds = self.time_window_dropdown.itemData(index)
-            print(f"Debug: Dashboard on_time_window_changed called with index {index}, seconds {seconds}")
+            pass
             
             # Update the chart's time window
             self.monitor_chart.set_time_window(seconds)
-            print(f"Debug: Dashboard called set_time_window({seconds})")
+            pass
     
     def toggle_graph_visibility(self, graph_name, checked):
         """Toggle graph visibility based on checkbox state"""
@@ -1804,10 +1925,10 @@ class SleepSenseDashboard(QMainWindow):
             if container:
                 if checked:
                     container.show()
-                    print(f"Graph '{graph_name}' shown")
+                    pass
                 else:
                     container.hide()
-                    print(f"Graph '{graph_name}' hidden")
+                    pass
             else:
                 print(f"Graph '{graph_name}' not found")
         self._update_graph_controls_state()
@@ -1904,10 +2025,12 @@ class SleepSenseDashboard(QMainWindow):
         container_layout.addWidget(self.slider_left_btn)
         
         # Time slider - make it expand to fill available space
-        self.time_slider = QSlider(Qt.Horizontal)
+        self.time_slider = ClickSeekSlider(Qt.Horizontal)
         self.time_slider.setObjectName("timeSlider")
         self.time_slider.setMinimum(0)
-        self.time_slider.setMaximum(100)
+        # A percent-only slider jumps several minutes per step on an overnight
+        # recording. A high-resolution integer range keeps scrubbing continuous.
+        self.time_slider.setMaximum(1_000_000)
         self.time_slider.setValue(0)
         self.time_slider.setFixedHeight(22)  
         self.time_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1961,6 +2084,24 @@ class SleepSenseDashboard(QMainWindow):
         self.time_slider.valueChanged.connect(self.on_slider_changed)
         self.time_slider.sliderPressed.connect(self.on_slider_pressed)
         self.time_slider.sliderReleased.connect(self.on_slider_released)
+        # sliderPressed is emitted only when Qt considers the handle itself
+        # pressed. Clicking the groove can change the value without that
+        # signal, which used to leave playback running while the seek rebuilt
+        # the charts. Observe the raw mouse press so every seek pauses first.
+        self.time_slider.installEventFilter(self)
+        self._slider_refresh_timer = QTimer(self)
+        self._slider_refresh_timer.setSingleShot(True)
+        self._slider_refresh_timer.setTimerType(Qt.PreciseTimer)
+        self._slider_refresh_timer.timeout.connect(self._apply_pending_slider_value)
+        self._slider_finish_timer = QTimer(self)
+        self._slider_finish_timer.setSingleShot(True)
+        self._slider_finish_timer.setTimerType(Qt.PreciseTimer)
+        self._slider_finish_timer.timeout.connect(self._finish_slider_scrub)
+        self._pending_slider_value = None
+        self._slider_first_frame_rendered = False
+        self._slider_resume_playback = False
+        self._slider_seek_active = False
+        self.slider_is_being_dragged = False
         container_layout.addWidget(self.time_slider, stretch=1)  # Add stretch factor
         
         # Right navigation button - with clear arrow
@@ -2051,7 +2192,7 @@ class SleepSenseDashboard(QMainWindow):
             self.monitor_chart.refresh_charts()
             self.update_slider_position()
             
-            print(f"Dashboard slider backward to: {self.monitor_chart.current_time_offset:.1f}s (step: {step_size:.1f}s)")
+            pass
     
     def slider_navigate_forward(self):
         """Navigate forward using slider buttons"""
@@ -2082,7 +2223,7 @@ class SleepSenseDashboard(QMainWindow):
                     start = 0
                     end = self._get_effective_window_seconds()
                     pw.setXRange(start, end, padding=0)
-                    print(f"Updated ViewBox range to {start} → {end} for {pw.chart_name}")
+                    pass
             
             #  DELAYED OVERLAY RENDER (IMPORTANT)
             if not self.monitor_chart.is_all_psg_mode():
@@ -2092,22 +2233,64 @@ class SleepSenseDashboard(QMainWindow):
             self.monitor_chart.refresh_charts()
             self.update_slider_position()
             
-            print(f"Dashboard slider forward to: {self.monitor_chart.current_time_offset:.1f}s (step: {step_size:.1f}s)")
+            pass
     
+    def eventFilter(self, watched, event):
+        """Bracket every mouse seek, including clicks on the slider groove."""
+        if watched is getattr(self, "time_slider", None):
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self.slider_is_being_dragged = True
+                self._begin_slider_scrub()
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                # Let QSlider commit its final value before the full redraw.
+                QTimer.singleShot(0, self._finish_slider_scrub)
+        return super().eventFilter(watched, event)
+
     def on_slider_changed(self, value):
-        """Handle slider value change"""
-        print(f"DEBUG: on_slider_changed called with value={value}, current_event_index={self.current_event_index}")
-        
+        """Queue the latest scrub position without building stale frames."""
+        if self.monitor_chart.is_all_psg_mode():
+            return
+
+        # update_slider_position blocks signals, so an unblocked valueChanged
+        # is a genuine user seek (mouse groove, wheel, or keyboard). Pause the
+        # playback clock before applying it; otherwise timer ticks fight the
+        # requested position and produce the large jumps seen in recordings.
+        self._begin_slider_scrub()
+        self._pending_slider_value = int(value)
+        timer = getattr(self, "_slider_refresh_timer", None)
+        if timer is None:
+            self._apply_pending_slider_value()
+        elif not self._slider_first_frame_rendered:
+            # Render the first requested position immediately (no one-frame
+            # lag), then coalesce faster mouse events to the newest position.
+            self._slider_first_frame_rendered = True
+            self._apply_pending_slider_value()
+        elif not timer.isActive():
+            timer.start(16)
+
+        # Wheel/keyboard/groove actions do not reliably emit sliderReleased.
+        # Finish them after input settles; a real handle drag is finalized by
+        # its mouse-release event instead.
+        if not self.slider_is_being_dragged:
+            finish_timer = getattr(self, "_slider_finish_timer", None)
+            if finish_timer is not None:
+                finish_timer.start(90)
+
+    def _apply_pending_slider_value(self):
+        """Render only the newest queued slider position."""
+        value = self._pending_slider_value
+        self._pending_slider_value = None
+        if value is None:
+            return
+
         max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
         if max_duration > 0:
             if self.monitor_chart.is_all_psg_mode():
-                self.update_slider_position()
-                if not self.all_events:
-                    self.all_events = self.get_all_events_sorted()
-                self.update_event_navigation_buttons()
                 return
 
-            slider_progress = value / 100.0
+            slider_min = self.time_slider.minimum()
+            slider_span = max(1, self.time_slider.maximum() - slider_min)
+            slider_progress = (int(value) - slider_min) / float(slider_span)
             # Normal case: there is room to slide full windows across the recording
             window_seconds = self._get_effective_window_seconds()
             if max_duration > window_seconds:
@@ -2123,60 +2306,83 @@ class SleepSenseDashboard(QMainWindow):
                 # Ensure offset does not exceed the logical maximum (may be 0)
                 self.monitor_chart.current_time_offset = min(max(0.0, desired_offset), max(0.0, max_duration - 0.0001))
 
-            # Remember whether playback was active before the manual release
-            was_playing = getattr(self.monitor_chart, 'is_playing', False)
-
-            # Refresh and update UI (apply the requested offset)
+            self.monitor_chart._reset_playback_pacing()
+            # setData keeps an existing GraphicsItem translation. Remove the
+            # playback transform before drawing the explicitly requested seek.
+            self.monitor_chart._reset_playback_transforms()
             self.monitor_chart.refresh_charts()
-            self.update_slider_position()
+            self.monitor_chart.update_time_position_label(throttle=True)
 
-            # If playback was running, keep it running from the new offset
-            if was_playing:
-                if hasattr(self.monitor_chart, 'start_playback'):
-                    try:
-                        if not getattr(self.monitor_chart, 'is_playing', False):
-                            self.monitor_chart.start_playback()
-                    except Exception:
-                        try:
-                            self.monitor_chart.is_playing = True
-                            self.monitor_chart.playback_timer.start(50)
-                        except Exception:
-                            pass
-            self.all_events = self.get_all_events_sorted()
-            self.update_event_navigation_buttons()
-            print(f"Dashboard slider released at: {value}% (time: {self.monitor_chart.current_time_offset:.1f}s)")
+    def _begin_slider_scrub(self):
+        """Pause once and enter lightweight chart scrubbing mode."""
+        if self._slider_seek_active:
+            return
+        self._slider_seek_active = True
+        self._slider_first_frame_rendered = False
+        self.monitor_chart._slider_scrubbing = True
+        self._slider_resume_playback = bool(getattr(self.monitor_chart, "is_playing", False))
+        if self._slider_resume_playback:
+            self.monitor_chart.pause_playback()
 
     def on_slider_pressed(self):
-        """Handle slider press event."""
+        """Pause playback and enter lightweight chart scrubbing mode."""
         self.slider_is_being_dragged = True
-        print("DEBUG: on_slider_pressed called")
+        self._begin_slider_scrub()
 
     def on_slider_released(self):
-        """Handle slider release event."""
+        """Render the final seek position fully, then resume if appropriate."""
+        self._finish_slider_scrub()
+
+    def _finish_slider_scrub(self):
+        """Commit the newest seek and leave playback in a coherent state."""
+        if not getattr(self, "_slider_seek_active", False):
+            return
+        finish_timer = getattr(self, "_slider_finish_timer", None)
+        if finish_timer is not None:
+            finish_timer.stop()
+        timer = getattr(self, "_slider_refresh_timer", None)
+        if timer is not None:
+            timer.stop()
         self.slider_is_being_dragged = False
-        print("DEBUG: on_slider_released called")
+        self._slider_seek_active = False
+        self.monitor_chart._slider_scrubbing = False
+
+        # With scrubbing mode cleared, this single final render also performs
+        # the full-quality decoration/axis pass. Do not rebuild it a second time.
+        self._pending_slider_value = int(self.time_slider.value())
+        self._apply_pending_slider_value()
+
+        self.monitor_chart.update_time_position_label()
         self.update_slider_position()
+        self.all_events = self.get_all_events_sorted()
+        self.update_event_navigation_buttons()
+
+        if self._slider_resume_playback:
+            self._slider_resume_playback = False
+            self.monitor_chart.start_playback()
 
     def update_slider_position(self):
         """Update slider position based on current time offset"""
         max_duration = self.monitor_chart._get_playback_max_duration() if hasattr(self.monitor_chart, '_get_playback_max_duration') else 0.0
         if self.time_slider and max_duration > 0:
             
-            # Calculate slider value (0-100) based on current position
+            # Calculate the high-resolution slider value from current position.
             window_seconds = self._get_effective_window_seconds()
             if max_duration > window_seconds:
                 max_offset = max_duration - window_seconds
                 slider_progress = self.monitor_chart.current_time_offset / max_offset
-                slider_value = int(slider_progress * 100)
-                slider_value = max(0, min(100, slider_value))  
-                print(f"Debug: time_offset={self.monitor_chart.current_time_offset:.1f}s, max_duration={max_duration:.1f}s, max_offset={max_offset:.1f}s, progress={slider_progress:.3f}, slider_value={slider_value}")
+                slider_min = self.time_slider.minimum()
+                slider_max = self.time_slider.maximum()
+                slider_value = int(round(slider_min + slider_progress * (slider_max - slider_min)))
+                slider_value = max(slider_min, min(slider_max, slider_value))
+                pass
                 
                 # Block signals to prevent recursive calls
                 self.time_slider.blockSignals(True)
                 self.time_slider.setValue(slider_value)
                 self.time_slider.blockSignals(False)
                 
-                print(f"Slider position updated: {slider_value}% (time: {self.monitor_chart.current_time_offset:.1f}s)")
+                pass
             
             def format_time(value):
                 hours = int(value // 3600)
@@ -2248,35 +2454,32 @@ class SleepSenseDashboard(QMainWindow):
         """Create professional icon toolbar with grouped buttons"""
         toolbar = QToolBar("MainToolbar")
         toolbar.setMovable(False)
-        toolbar.setIconSize(QSize(32, 32))
+        # Records/Report use complete 140x38 SVG button graphics. Give
+        # QAction-backed toolbuttons enough icon space to render their text.
+        toolbar.setIconSize(QSize(120, 30))
         toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         toolbar.setMinimumHeight(50)
+        # The Records and Report SVGs are complete button graphics; reserve
+        # their full button width instead of letting QToolBar collapse them
+        # to the default icon-only width.
+        toolbar.setStyleSheet("""
+            QToolButton {
+                min-width: 110px;
+                max-width: 110px;
+                min-height: 30px;
+                max-height: 30px;
+                padding: 0px;
+                margin: 0px;
+            }
+        """)
+        # Let the toolbar shrink to the width of its visible actions. Keeping
+        # the default expanding policy leaves an empty block when extras hide.
+        toolbar.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         
         # Get icon definitions
         icons = get_icon_definitions()
         script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         
-        # Navigation Group: Previous / Next
-        self.btn_previous = create_toolbar_button(
-            os.path.join(script_dir, icons[0]["icon"]),
-            "Hide database icons",
-            "Hide the database extra icons",
-            self.hide_database_menu_icons
-        )
-        toolbar.addWidget(self.btn_previous)
-        
-        self.btn_next = create_toolbar_button(
-            os.path.join(script_dir, icons[1]["icon"]),
-            "Show database icons",
-            "Show the database extra icons",
-            self.show_database_menu_icons
-        )
-        toolbar.addWidget(self.btn_next)
-
-        self.set_toolbar_navigation_enabled(False)
-        
-        toolbar.addSeparator()
-
         # Data Group: Database
         self.btn_database = create_toolbar_button(
             os.path.join(script_dir, icons[2]["icon"]),
@@ -2285,36 +2488,46 @@ class SleepSenseDashboard(QMainWindow):
             self.open_database
         )
         toolbar.addWidget(self.btn_database)
+        self.btn_database.setFixedSize(110, 30)
+        self.btn_database.setText("Database")
+        self.btn_database.setIcon(QIcon(get_asset_path("icons/database_glyph.svg")))
+        self.btn_database.setIconSize(QSize(20, 20))
+        self.btn_database.setStyleSheet(
+            "QPushButton { background-color: #1558A0; color: white; border: none; "
+            "border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 500; }"
+        )
         
-        # Archive button disabled by request.
-        # self.btn_archive = create_toolbar_button(
-        #     os.path.join(script_dir, icons[8]["icon"]),
-        #     icons[8]["tooltip"],
-        #     icons[8]["status_tip"],
-        #     self.open_archive
-        # )
-        # toolbar.addWidget(self.btn_archive)
+        self.database_extras_separator = toolbar.addSeparator()
         
-        toolbar.addSeparator()
-        
-        # Extended Database Options (initially hidden - using QAction)
-        from PyQt5.QtGui import QIcon
-        
-        self.action_patient_record = QAction(QIcon(os.path.join(script_dir, "icons/patient_report_card.svg")), "Patient Record Card", self)
-        self.action_patient_record.setToolTip("Patient Record Card")
-        self.action_patient_record.setStatusTip("Open Patient Record Card Form")
-        self.action_patient_record.triggered.connect(self.open_patient_report_card)
-        self.action_patient_record.setVisible(True)
-        self.action_patient_record.setEnabled(False)
-        toolbar.addAction(self.action_patient_record)
+        self.btn_patient_record = QPushButton("Records")
+        self.btn_patient_record.setIcon(QIcon(get_asset_path("icons/records_glyph.svg")))
+        self.btn_patient_record.setIconSize(QSize(20, 20))
+        self.btn_patient_record.setFixedSize(110, 30)
+        self.btn_patient_record.setToolTip("Records")
+        self.btn_patient_record.setStatusTip("Open Patient Record Card Form")
+        self.btn_patient_record.setCursor(Qt.PointingHandCursor)
+        self.btn_patient_record.setStyleSheet(
+            "QPushButton { background-color: #167548; color: white; border: none; "
+            "border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 500; }"
+        )
+        self.btn_patient_record.clicked.connect(self.open_patient_report_card)
+        toolbar.addWidget(self.btn_patient_record)
+        self.records_separator = toolbar.addSeparator()
                 
-        self.action_medical_report = QAction(QIcon(os.path.join(script_dir, "icons/medical_report.svg")), "Report", self)
-        self.action_medical_report.setToolTip("Report")
-        self.action_medical_report.setStatusTip("Open Report Form")
-        self.action_medical_report.triggered.connect(self.open_medical_report)
-        self.action_medical_report.setVisible(True)
-        self.action_medical_report.setEnabled(False)
-        toolbar.addAction(self.action_medical_report)
+        self.btn_medical_report = QPushButton("Report")
+        self.btn_medical_report.setIcon(QIcon(get_asset_path("icons/report_glyph.svg")))
+        self.btn_medical_report.setIconSize(QSize(20, 20))
+        self.btn_medical_report.setFixedSize(110, 30)
+        self.btn_medical_report.setToolTip("Report")
+        self.btn_medical_report.setStatusTip("Open Report Form")
+        self.btn_medical_report.setCursor(Qt.PointingHandCursor)
+        self.btn_medical_report.setStyleSheet(
+            "QPushButton { background-color: #5A3FA8; color: white; border: none; "
+            "border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 500; }"
+        )
+        self.btn_medical_report.clicked.connect(self.open_medical_report)
+        toolbar.addWidget(self.btn_medical_report)
+        self.report_separator = toolbar.addSeparator()
 
         self.interpretation_btn = QPushButton()
         brain_icon_path = get_asset_path("icons/brain.png")
@@ -2345,7 +2558,7 @@ class SleepSenseDashboard(QMainWindow):
             }
         """)
         self.interpretation_btn.clicked.connect(self.open_interpretation)
-        self.interpretation_btn.setEnabled(False)
+        self.interpretation_btn.setEnabled(True)
         self.interpretation_action = toolbar.addWidget(self.interpretation_btn)
         
         # self.action_event_list = QAction(QIcon(os.path.join(script_dir, icons[7]["icon"])), "Event List", self)
@@ -2358,32 +2571,18 @@ class SleepSenseDashboard(QMainWindow):
         
         return toolbar
     
-    # Toolbar Button Callback Methods
-    def set_toolbar_navigation_enabled(self, enabled):
-        """Enable or disable the database icon toggle buttons."""
-        labels = ("Hide database icons", "Show database icons")
-        buttons = (getattr(self, "btn_previous", None), getattr(self, "btn_next", None))
-
-        for button, label in zip(buttons, labels):
-            if button is None:
-                continue
-            button.setEnabled(bool(enabled))
-            button.setToolTip(label if enabled else "Pehle Database button dabaayein")
-    
     def open_database(self):
-        """Open patient database as modeless window and toggle extended buttons"""
+        """Open patient database as modeless window."""
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
         
-        print("Database button clicked")
+        pass
 
         existing_window = getattr(self, "database_window", None)
         if existing_window is not None:
             try:
                 if existing_window.isVisible():
-                    self.show_database_menu_icons()
-                    self.set_toolbar_navigation_enabled(True)
                     existing_window.raise_()
                     existing_window.activateWindow()
                     existing_window.show()
@@ -2391,74 +2590,9 @@ class SleepSenseDashboard(QMainWindow):
             except Exception:
                 pass
 
-        # Show extended buttons immediately
-        self.show_database_menu_icons()
-        self.set_toolbar_navigation_enabled(True)
         # Open database window as modeless (non-blocking)
         self.database_window = DatabaseWindow(self)
         self.database_window.show()
-    
-    def _set_database_icons_active(self, active):
-        """Keep database actions in the layout, but hide them until active."""
-        toolbar = getattr(self, "toolbar", None)
-        if toolbar is None:
-            return
-
-        for action in (
-            getattr(self, "action_patient_record", None),
-            getattr(self, "action_medical_report", None),
-        ):
-            if action is None:
-                continue
-
-            action.setVisible(True)
-            action.setEnabled(bool(active))
-
-            tool_button = toolbar.widgetForAction(action)
-            if tool_button is None:
-                continue
-
-            fade_effect = tool_button.graphicsEffect()
-            if not isinstance(fade_effect, QGraphicsOpacityEffect):
-                fade_effect = QGraphicsOpacityEffect(tool_button)
-                tool_button.setGraphicsEffect(fade_effect)
-            fade_effect.setOpacity(1.0 if active else DATABASE_ICON_INACTIVE_OPACITY)
-            tool_button.setCursor(Qt.PointingHandCursor if active else Qt.ArrowCursor)
-
-        interpretation_btn = getattr(self, "interpretation_btn", None)
-        interpretation_action = getattr(self, "interpretation_action", None)
-        if interpretation_action is not None:
-            interpretation_action.setVisible(bool(active))
-        if interpretation_btn is not None:
-            interpretation_btn.setVisible(bool(active))
-            interpretation_btn.setEnabled(bool(active))
-            interpretation_btn.setCursor(Qt.PointingHandCursor if active else Qt.ArrowCursor)
-
-    def show_database_menu_icons(self):
-        """Enable the database extra icons and show them at full strength."""
-        self._set_database_icons_active(True)
-        print("Database menu icons active")
-
-    def hide_database_menu_icons(self):
-        """Fade and disable the database extra icons while keeping their space."""
-        self._set_database_icons_active(False)
-        print("Database menu icons faded")
-
-    def hide_extended_buttons(self):
-        """Hide database mode extras and disable the database toggle buttons."""
-        self.hide_database_menu_icons()
-        self.set_toolbar_navigation_enabled(False)
-    
-    # def open_archive(self):
-    #     """Access archived records as modal dialog"""
-    #     # Check if monitor chart has selection active and block if needed
-    #     if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
-    #         return
-    #
-    #     print("Archive button clicked")
-    #     self.hide_extended_buttons()
-    #     self.archive_window = ArchiveWindow(self)
-    #     self.archive_window.exec_()  # Modal dialog
     
     def open_patient_report_card(self):
         """Open Patient Report Card Form as modal dialog"""
@@ -2466,7 +2600,7 @@ class SleepSenseDashboard(QMainWindow):
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
         
-        print("Patient Report Card button clicked")
+        pass
         # Import the patient record form
         from .patient_record_form import PatientRecordForm
         
@@ -2489,7 +2623,7 @@ class SleepSenseDashboard(QMainWindow):
 
         self.report_interpretation_selected_items = dialog.get_selected()
         self.report_interpretation_custom_note = dialog.get_custom_note()
-        print("Interpretation updated")
+        pass
 
     def _apply_manual_interpretation_to_report_context(self, report_context):
         """Attach interpretation selections to the report context."""
@@ -2518,20 +2652,111 @@ class SleepSenseDashboard(QMainWindow):
                     if signals:
                         return {"time": payload.get("time"), "signals": signals}
         return {}
-    
+
+    def _report_valid_analysis_duration_sec(self):
+        """Return the valid analysed duration used to decide report readiness."""
+        duration_sec = 0.0
+        analysis_results = getattr(self.monitor_chart, "analysis_results", None) or {}
+        metadata = analysis_results.get("metadata", {}) if isinstance(analysis_results, dict) else {}
+        try:
+            duration_sec = float(metadata.get("sleep_duration_sec") or 0.0)
+        except (TypeError, ValueError):
+            duration_sec = 0.0
+
+        # Metrics are calculated in a worker after upload. The chart timeline
+        # is already available, so use it while that worker is still running.
+        if duration_sec <= 0.0:
+            try:
+                duration_sec = float(self.monitor_chart._get_playback_max_duration())
+            except (AttributeError, TypeError, ValueError):
+                duration_sec = 0.0
+
+        detector_result = getattr(self.monitor_chart, "auto_rule_ai_result", None) or {}
+        try:
+            sensor_off_sec = float(detector_result.get("sensor_off_total_sec") or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            sensor_off_sec = 0.0
+        return max(0.0, duration_sec - sensor_off_sec)
+
     def open_medical_report(self):
+        """Report button: run ONE report flow at a time.
+
+        Generating the report is synchronous (the window is frozen for a few seconds), so every extra
+        click made meanwhile is queued by the OS and used to start another full generation + another
+        viewer window.  The button is disabled while the flow runs, a second call only brings the
+        existing viewer to the front, and stale queued clicks are ignored for a moment afterwards.
+        """
+        viewer = getattr(self, "pdf_viewer", None)
+        try:
+            if viewer is not None and viewer.isVisible():
+                viewer.raise_()   # report already open inside this window: just show it again
+                return
+        except RuntimeError:
+            self.pdf_viewer = None  # it was closed and deleted
+
+        if getattr(self, "_report_flow_active", False):
+            return
+
+        self._report_flow_active = True
+        button = getattr(self, "btn_medical_report", None)
+        if button is not None:
+            button.setEnabled(False)
+            from PyQt5.QtCore import QEventLoop
+            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)  # repaint the disabled button
+        try:
+            self._open_medical_report_impl()
+        finally:
+            # Clicks made while the UI was busy are delivered right after; keep ignoring them briefly.
+            QTimer.singleShot(600, self._release_report_flow)
+
+    def _release_report_flow(self):
+        self._report_flow_active = False
+        button = getattr(self, "btn_medical_report", None)
+        if button is not None:
+            button.setEnabled(True)
+
+    def _embed_report_viewer(self, viewer):
+        """Show the report INSIDE the main window (a full-size page over it), not as a separate OS window.
+
+        A separate window could be minimized, lost behind other applications and was blocked by the modal
+        loop, so clicking Report again did nothing.  Inside the window there is nothing to lose: Close
+        returns to the dashboard and Report opens it again.
+        """
+        viewer.setParent(self)
+        viewer.setGeometry(self.rect())
+        follower = _ReportOverlayResizer(self, viewer)
+        self._report_overlay_resizer = follower
+        self.installEventFilter(follower)
+        viewer.show()
+        viewer.raise_()
+
+    def _open_medical_report_impl(self):
         """Generate report and show in internal viewer"""
         # Check if monitor chart has selection active and block if needed
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
 
-        if not getattr(self.monitor_chart, "loaded_csv_path", None) or not getattr(self, "current_patient_db_id", None):
+        if not getattr(self.monitor_chart, "loaded_recording_path", None) or not getattr(self, "current_patient_db_id", None):
             dialog = ReportRequirementsDialog(self)
             dialog.exec_()
             return
+
+        valid_duration_sec = self._report_valid_analysis_duration_sec()
+        # Temporarily disabled: allow reports for recordings with less than
+        # one hour of valid analysed data. Restore this guard if needed again.
+        # if valid_duration_sec < MIN_REPORT_ANALYSIS_DURATION_SEC:
+        #     show_styled_warning(
+        #         self,
+        #         "Insufficient Data",
+        #         "The uploaded data is too short to open the report.\n\n"
+        #         "Minimum required time: 1 hour\n\n"
+        #         "Please upload a recording containing at least 1 hour of valid analysed data.",
+        #         button_text="OK",
+        #     )
+        #     return
         
-        print("Report button clicked")
-        # Import the medical report generation function and PDF viewer
+        pass
+        # Import the report generation function and PDF viewer
         from .medical_report_form import generate_sleep_report, PDFViewerWidget
         from .full_psg_hypnogram import generate_full_psg_hypnogram
 
@@ -2546,11 +2771,31 @@ class SleepSenseDashboard(QMainWindow):
                 except Exception as db_error:
                     print(f"⚠️ Could not fetch patient from DB for report: {db_error}")
             else:
-                print("⚠️ No current patient DB id available for report generation")
+                pass
 
             screenshot_paths = list(getattr(self, 'dashboard_screenshot_paths', []))
             report_psg_payload = self._get_report_psg_payload()
             report_signals = report_psg_payload.get("signals", {})
+            hypnogram_psg_payload = report_psg_payload
+            try:
+                display_spo2 = self.monitor_chart._spo2_display_full()
+                display_spo2 = self.monitor_chart._cached_slow_display(
+                    "spo2", display_spo2,
+                    self.monitor_chart._smooth_slow_channel_for_display,
+                )
+                if len(display_spo2):
+                    hypnogram_psg_payload = dict(report_psg_payload)
+                    hypnogram_signals = dict(report_signals)
+                    hypnogram_times = dict(report_psg_payload.get("times", {}))
+                    hypnogram_rates = dict(report_psg_payload.get("sample_rates", {}))
+                    hypnogram_signals["spo2_report_display"] = display_spo2
+                    hypnogram_times["spo2_report_display"] = self.monitor_chart.spo2_full_data[0]
+                    hypnogram_rates["spo2_report_display"] = self.monitor_chart.channel_rate("spo2")
+                    hypnogram_psg_payload["signals"] = hypnogram_signals
+                    hypnogram_psg_payload["times"] = hypnogram_times
+                    hypnogram_psg_payload["sample_rates"] = hypnogram_rates
+            except Exception:
+                hypnogram_psg_payload = report_psg_payload
             current_report_events = []
             if hasattr(self.monitor_chart, "get_available_navigation_events"):
                 current_report_events = list(self.monitor_chart.get_available_navigation_events())
@@ -2561,6 +2806,7 @@ class SleepSenseDashboard(QMainWindow):
                 getattr(self.monitor_chart, "analysis_results", None),
                 report_signals,
                 current_report_events,
+                sensor_off_segments=(getattr(self.monitor_chart, "auto_rule_ai_result", None) or {}).get("sensor_off_segments", []),
             )
             report_context = self._apply_manual_interpretation_to_report_context(report_context)
             analysis_results = getattr(self.monitor_chart, "analysis_results", None)
@@ -2570,14 +2816,14 @@ class SleepSenseDashboard(QMainWindow):
                 if report_signals:
                     output_folder = Path.home() / "SleepSenseReports" / "generated_assets"
                     hypnogram_path = generate_full_psg_hypnogram(
-                        psg_data=report_psg_payload,
+                        psg_data=hypnogram_psg_payload,
                         output_folder=str(output_folder),
                         sampling_rate=DEFAULT_SAMPLE_RATE_HZ,
                         patient_id=str(patient_data.get("patient_id") or patient_db_id or "patient") if patient_data else str(patient_db_id or "patient"),
-                        study_id=Path(getattr(self.monitor_chart, "loaded_csv_path", "study")).stem if getattr(self.monitor_chart, "loaded_csv_path", None) else "study",
+                        study_id=Path(getattr(self.monitor_chart, "loaded_recording_path", "study")).stem if getattr(self.monitor_chart, "loaded_recording_path", None) else "study",
                         detected_events=current_report_events,
                     )
-                    print(f"✅ Full PSG hypnogram generated: {hypnogram_path}")
+                    pass
             except Exception as hypnogram_error:
                 print(f"⚠️ Could not generate full PSG hypnogram: {hypnogram_error}")
 
@@ -2590,7 +2836,7 @@ class SleepSenseDashboard(QMainWindow):
                 dashboard_screenshot_path=screenshot_paths if screenshot_paths else None,
                 report_context=report_context,
             )
-            print("✅ Report generated successfully!")
+            pass
 
             # Also save the report to the DB, otherwise nothing ever appears in
             # the Database window's "3. Reports" section.
@@ -2604,11 +2850,21 @@ class SleepSenseDashboard(QMainWindow):
                 analysis_results=getattr(self.monitor_chart, "analysis_results", None),
                 dashboard_screenshot_path=screenshot_paths if screenshot_paths else None,
                 report_context=report_context,
+                embedded=True,
             )
-            self.pdf_viewer.exec_()
+            self._embed_report_viewer(self.pdf_viewer)
 
         except Exception as e:
+            # Never fail silently: before, the report just did not open and the reason only went to the console.
+            import traceback
+            traceback.print_exc()
             print(f"❌ Error generating report: {str(e)}")
+            show_styled_warning(
+                self,
+                "Report Error",
+                "The report could not be generated.\n\n"
+                f"{type(e).__name__}: {e}",
+            )
 
     def save_generated_report_to_db(self, patient_data, patient_db_id, pdf_path, report_context=None):
         """Insert the generated report into the reports table with its PDF path."""
@@ -2659,7 +2915,7 @@ class SleepSenseDashboard(QMainWindow):
         try:
             report_id = DatabaseManager().save_report(report_row)
             if report_id:
-                print(f"🗂️ Report saved to DB (id={report_id})")
+                pass
             return report_id
         except Exception as error:
             print(f"⚠️ Report could not be saved to DB: {error}")
@@ -2667,7 +2923,7 @@ class SleepSenseDashboard(QMainWindow):
     
     def load_patient_data(self, patient_data):
         """Load patient data from database and display in dashboard"""
-        print(f"Loading patient data: {patient_data['last_name']} {patient_data['first_name']}")
+        pass
 
         # Keep the database primary key so report generation can fetch a fresh row later.
         self.current_patient_db_id = patient_data.get('id')
@@ -2693,11 +2949,11 @@ class SleepSenseDashboard(QMainWindow):
                 'age': patient_data.get('age', ''),
             })
         
-        print(f"Patient data loaded successfully in dashboard")
+        pass
 
     def clear_current_patient(self):
         """Forget the currently selected patient, e.g. after deletion."""
-        print("Clearing current patient from dashboard")
+        pass
         self.current_patient_db_id = None
         self._last_selected_database_patient_id = None
 
@@ -2739,12 +2995,14 @@ class SleepSenseDashboard(QMainWindow):
             )
             return False
 
-        print(f"🎬 Loading PSG data from saved session: {file_path}")
+        pass
         if getattr(self.monitor_chart, "is_playing", False):
             self.monitor_chart.pause_playback()
         self.monitor_chart.skip_next_auto_playback = True
         time_data, signals, jumped = self.monitor_chart.load_psg_data_and_detect(file_path)
         if len(time_data) == 0 or not signals:
+            if getattr(self.monitor_chart, "last_load_rejected_for_short_duration", False):
+                return False
             QMessageBox.warning(
                 self,
                 "Load Failed",
@@ -2752,22 +3010,75 @@ class SleepSenseDashboard(QMainWindow):
             )
             return False
 
-        event_count = 0
-        auto_result = getattr(self.monitor_chart, "auto_rule_ai_result", None)
-        if isinstance(auto_result, dict):
-            event_count = len(auto_result.get("events", []))
-        detail = (
-            f"Auto-detection complete: {event_count} events found."
-            if event_count
-            else "No auto-detected events found."
-        )
-        if jumped:
-            detail += "\nJumped to the first detected event."
-        QMessageBox.information(
-            self,
-            "Saved Data Loaded",
-            f"Data loaded and graphs updated:\n{Path(file_path).name}\n{detail}",
-        )
+        def show_completed_message():
+            # Read the result only after the detector has finished.  Previously
+            # this was read immediately after starting its worker thread, so a
+            # valid recording incorrectly reported "No ... events found".
+            auto_result = getattr(self.monitor_chart, "auto_rule_ai_result", None)
+            detection_error = getattr(self.monitor_chart, "last_detection_error", None)
+            if detection_error:
+                detail = "Event detection could not be completed."
+            else:
+                event_count = len(auto_result.get("events", [])) if isinstance(auto_result, dict) else 0
+                noun = "event" if event_count == 1 else "events"
+                detail = f"Auto-detection complete: {event_count} {noun} found."
+            if jumped:
+                detail += "\nJumped to the first detected event."
+            message_box = QMessageBox(self)
+            message_box.setIcon(QMessageBox.Information)
+            message_box.setWindowTitle("Saved Data Loaded")
+            message_box.setText(
+                f"Data loaded and graphs updated:\n{Path(file_path).name}\n{detail}"
+            )
+            message_box.setStandardButtons(QMessageBox.Ok)
+            message_box.setDefaultButton(QMessageBox.Ok)
+
+            ok_button = message_box.button(QMessageBox.Ok)
+            if ok_button is not None:
+                # Apply this directly to the button so the dashboard's global
+                # QMessageBox theme cannot turn it back into bare text.
+                ok_button.setMinimumSize(78, 30)
+                ok_button.setFlat(False)
+                ok_button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2563eb;
+                        color: #ffffff;
+                        border: 1px solid #1d4ed8;
+                        border-radius: 5px;
+                        padding: 5px 16px;
+                        font-size: 12px;
+                        font-weight: 600;
+                    }
+                    QPushButton:hover {
+                        background-color: #3b82f6;
+                        border-color: #1e40af;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1e40af;
+                        border-color: #1e3a8a;
+                    }
+                """)
+            message_box.exec_()
+
+        if self.monitor_chart.is_detection_running():
+            expected_path = str(file_path)
+
+            def detection_finished(busy):
+                if busy:
+                    return
+                try:
+                    self.monitor_chart.detection_busy_changed.disconnect(detection_finished)
+                except (TypeError, RuntimeError):
+                    pass
+                # detection_busy_changed(False) is emitted just before the
+                # result is installed.  Queue the notice so that result and
+                # event panels have both been updated first.
+                if str(getattr(self.monitor_chart, "loaded_recording_path", "") or "") == expected_path:
+                    QTimer.singleShot(0, show_completed_message)
+
+            self.monitor_chart.detection_busy_changed.connect(detection_finished)
+        else:
+            show_completed_message()
         return True
     
     def open_signal_view(self):
@@ -2776,23 +3087,13 @@ class SleepSenseDashboard(QMainWindow):
         if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
             return
         
-        print("Signal View button clicked")
+        pass
         # TODO: Implement signal view logic
-    
-    # def open_event_list(self):
-    #     """View detected events"""
-    #     # Check if monitor chart has selection active and block if needed
-    #     if hasattr(self.monitor_chart, 'block_if_selection_active') and self.monitor_chart.block_if_selection_active():
-    #         return
-    #
-    #     print("Event List button clicked")
-    #     self.event_window = EventWindow(self)
-    #     self.event_window.exec_()  # Modal dialog
     
     def take_screenshot(self):
         """Take a drag-selected screenshot on top of the current dashboard."""
         try:
-            if not getattr(self.monitor_chart, "loaded_csv_path", None):
+            if not getattr(self.monitor_chart, "loaded_recording_path", None):
                 show_styled_warning(
                     self,
                     "No Data Uploaded",
@@ -2923,7 +3224,7 @@ class SleepSenseDashboard(QMainWindow):
         """Playback is intentionally manual only."""
         if hasattr(self, "monitor_chart"):
             self.monitor_chart.skip_next_auto_playback = False
-        print("Auto-playback disabled. Use Play/Pause manually.")
+        pass
 
     def get_all_events_sorted(self):
         """Gather all events from dynamic_selections and sort chronologically"""
@@ -2977,7 +3278,7 @@ class SleepSenseDashboard(QMainWindow):
         self.all_events = self.get_all_events_sorted()
         
         if not self.all_events:
-            print("No events found for navigation")
+            pass
             return
         
         # Get current viewport range
@@ -2995,9 +3296,9 @@ class SleepSenseDashboard(QMainWindow):
             # Found an event outside viewport, navigate to it
             self.current_event_index = next_event_index
             self.go_to_event(self.current_event_index)
-            print(f"Navigated to next visible event (index {self.current_event_index}) at {self.all_events[next_event_index]['start_time']:.1f}s")
+            pass
         else:
-            print("No more events ahead - all remaining events are visible")
+            pass
 
     def navigate_to_first_event(self):
         """Navigate to the first event in the data"""
@@ -3016,13 +3317,13 @@ class SleepSenseDashboard(QMainWindow):
         self.all_events = self.get_all_events_sorted()
         
         if not self.all_events:
-            print("No events found for navigation")
+            pass
             return
         
         # Navigate to first event (index 0)
         self.current_event_index = 0
         self.go_to_event(self.current_event_index)
-        print(f"Navigated to first event (index {self.current_event_index}) at {self.all_events[0]['start_time']:.1f}s")
+        pass
 
     def navigate_to_previous_event(self):
         """Navigate to the previous event that is NOT currently visible on screen"""
@@ -3040,7 +3341,7 @@ class SleepSenseDashboard(QMainWindow):
         self.all_events = self.get_all_events_sorted()
         
         if not self.all_events:
-            print("No events found for navigation")
+            pass
             return
         
         # Get current viewport range
@@ -3060,9 +3361,9 @@ class SleepSenseDashboard(QMainWindow):
             # Found an event outside viewport, navigate to it
             self.current_event_index = prev_event_index
             self.go_to_event(self.current_event_index)
-            print(f"Navigated to previous visible event (index {self.current_event_index}) at {self.all_events[prev_event_index]['start_time']:.1f}s")
+            pass
         else:
-            print("No more events behind - all previous events are visible")
+            pass
 
     def navigate_to_last_event(self):
         """Navigate to the last event in the data"""
@@ -3079,13 +3380,13 @@ class SleepSenseDashboard(QMainWindow):
 
         self.all_events = self.get_all_events_sorted()
         if not self.all_events:
-            print("No events found for navigation")
+            pass
             return
 
         # Navigate to last event (index len-1)
         self.current_event_index = len(self.all_events) - 1
         self.go_to_event(self.current_event_index)
-        print(f"Navigated to last event (index {self.current_event_index}) at {self.all_events[-1]['start_time']:.1f}s")
+        pass
 
     def go_to_event(self, event_index):
         """Navigate to a specific event by index - syncs all charts and time slider"""
@@ -3115,11 +3416,11 @@ class SleepSenseDashboard(QMainWindow):
         # Update button states (enable/disable based on position)
         self.update_event_navigation_buttons()
         
-        print(f"Jumped to event '{event['label']}' at {event_time:.1f}s (offset: {new_offset:.1f}s)")
+        pass
 
     def update_event_navigation_buttons(self):
         """Update event navigation button states based on current position"""
-        print(f"DEBUG update_event_navigation_buttons: all_events count={len(self.all_events)}, current_event_index={self.current_event_index}")
+        pass
         
         # Always enable buttons regardless of events
         # User wants buttons permanently enabled
@@ -3127,11 +3428,11 @@ class SleepSenseDashboard(QMainWindow):
         self.btn_prev_event.setEnabled(True)
         self.btn_next_event.setEnabled(True)
         self.btn_last_event.setEnabled(True)
-        print(f"DEBUG: All navigation buttons enabled (permanently)")
+        pass
 
     def auto_load_psg_data(self):
         """Keep startup neutral; graphs should come from the user-selected upload."""
-        print("ℹ️ Auto-load disabled. Upload/select a PSG CSV file to plot its data.")
+        pass
     
     def load_psg_data_from_file(self):
         """Open file dialog to select and load PSG data file"""
@@ -3149,11 +3450,11 @@ class SleepSenseDashboard(QMainWindow):
             self,
             "Select PSG Data File",
             "",
-            "Signal Files (*.csv *.txt);;CSV Files (*.csv);;Text Files (*.txt);;All Files (*)"
+            "SD PSG Files (*.smf *.bin *.dat *.sd *.raw *.psg);;All Files (*)"
         )
         
         if file_path:
-            print(f"🎬 Loading PSG data from: {file_path}")
+            pass
             self.monitor_chart.skip_next_auto_playback = True
             self.monitor_chart.load_psg_data(file_path)
-            print("✅ PSG data loaded successfully - Playback ready!")
+            pass

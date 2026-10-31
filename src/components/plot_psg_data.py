@@ -1,35 +1,7 @@
-"""Shared PSG signal mapping and a small inspection plot utility."""
+"""Shared signal-name mapping for binary SD recordings."""
 
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-
-from src.utils.sample_rate import DEFAULT_SAMPLE_RATE_HZ as SAMPLE_RATE_HZ
-TIMESTAMP_COLUMN = 0
-
-# Canonical signal key -> raw CSV column index.
-SIGNAL_COLUMNS = {
-    "timestamp": 0,
-    "body_position": 1,
-    "pulse": 2,
-    "spo2": 3,
-    "body_movement": 4,
-    "airflow": 5,
-    "thorax": 6,
-    "snoring": 7,
-}
-
-CSV_SIGNAL_NAMES = tuple(name for name in SIGNAL_COLUMNS if name != "timestamp")
-INTERPOLATED_SIGNAL_NAMES = CSV_SIGNAL_NAMES
 
 # Dashboard chart label -> canonical signal key.
 CHART_SIGNAL_MAPPING = {
@@ -44,26 +16,86 @@ CHART_SIGNAL_MAPPING = {
 }
 CHART_ORDER = tuple(CHART_SIGNAL_MAPPING)
 
-BODY_POSITION_TICKS = [
-    (0, "S"),
-    (1, "P"),
-    (2, "L"),
-    (3, "R"),
-    (4, "U"),
-]
+BODY_POSITION_CODES = {
+    "supine": 0, "left": 1, "right": 2, "prone": 3,
+    "upright": 4, "unknown": 5,
+}
+BODY_POSITION_UNKNOWN = 5
+BODY_POSITION_TICKS = [(0, "S"), (1, "L"), (2, "R"), (3, "P"), (4, "U")]
+BODY_POSITION_NAMES = ["Supine", "Left", "Right", "Prone", "Upright"]
 BODY_POSITION_LABEL_TO_CODE = {
     "s": 0,
     "supine": 0,
-    "p": 1,
-    "prone": 1,
-    "l": 2,
-    "left": 2,
-    "r": 3,
-    "right": 3,
+    "l": 1, "left": 1,
+    "r": 2, "right": 2,
+    "p": 3, "prone": 3,
     "u": 4,
-    "unknown": 4,
+    "unknown": 5,
     "upright": 4,
 }
+
+
+# Shared dashboard signal configuration and Y-axis settings.
+# Tuple format: (name, color, frequency, amplitude, offset, y_axis_min, y_axis_max)
+ACTIVE_SIGNAL_CONFIGS = [
+    ("Body Position", "#3b82f6", 0.5, 10, 50, 0, 5),  # Y-axis: 0-5
+    ("Airflow", "#8b5cf6", 0.3, 15, 50, 0, 4095),  # Y-axis: 0-4095
+    ("Snoring", "#ef4444", 1.0, 8, 50, -50, 50),  # Y-axis: -50-50
+    ("Thorax", "#f59e0b", 0.2, 5, 50, 0, 4095),  # Y-axis: 0-4095
+    # ("Abdomen", "#10b981", 0.1, 2, 90, 0, 80),  # Y-axis: 0-80
+    ("SpO2", "#06b6d4", 1.5, 12, 50, 60, 110),  # Y-axis: 60-110
+    ("Pulse", "#f97316", 0.0, 0, 30, 40, 140),  # Y-axis: 40-140
+    ("Body Movement", "#8b5cf6", 0.1, 5, 20, 0, 100),  # Y-axis: 0-100
+]
+ACTIVE_SIGNAL_NAMES = tuple(name for name, *_rest in ACTIVE_SIGNAL_CONFIGS)
+SIGNAL_Y_RANGES = {
+    name: (y_min, y_max)
+    for name, _color, _freq, _amp, _offset, y_min, y_max in ACTIVE_SIGNAL_CONFIGS
+}
+PLOTTED_SIGNAL_NAMES = set(ACTIVE_SIGNAL_NAMES)
+CHANNEL_COLORS = {name: color for name, color, *_rest in ACTIVE_SIGNAL_CONFIGS}
+AUTO_RANGE_SIGNAL_NAMES = {"Airflow", "Thorax", "Snoring", "SpO2", "Pulse"}
+# Remove a chart name from this set in the future to show its Y-axis values again.
+HIDDEN_Y_AXIS_VALUE_CHARTS = {"Airflow", "Snoring", "Thorax", "Body Movement"}
+AXIS_MIN_SPAN = {"SpO2": 10.0, "Pulse": 12.0, "Snoring": 20.0}
+BIPOLAR_SIGNAL_NAMES = {"Snoring"}
+AXIS_HARD_LIMITS = {}
+AXIS_ALWAYS_REFIT = set()
+AXIS_TOP_HEADROOM = {"SpO2": 0.15}
+AXIS_TOP_CEILING = {"SpO2": 100.0}
+AUTO_RANGE_OUTLIER_IQR_FACTOR = 3.0
+AUTO_RANGE_MIN_KEEP_FRACTION = 0.5
+
+# Smooth auto-scaling settings for Airflow and Thorax.
+AXIS_SMOOTH_ENABLED = True
+AXIS_SMOOTH_CHARTS = {"Airflow", "Thorax"}
+AXIS_SMOOTH_MARGIN = 0.08
+AXIS_SMOOTH_NORMAL_REACH = 1.5
+AXIS_SMOOTH_TYPICAL_PCT = 50.0
+AXIS_SMOOTH_ZOOM_OUT_SEC = 4.0
+AXIS_SMOOTH_ZOOM_IN_SEC = 12.0
+AXIS_SMOOTH_SHIFT_SEC = 3.0
+AXIS_SMOOTH_MIN_HALF = 1.0
+# "compress" = fold a big movement into the top/bottom band, "edge" = pin it to the chart
+# border, anything else (here "clip") = plain fixed-gain clipping: the trace runs off the
+# chart and comes back, which reads as "off scale, signal still alive" and never as a
+# flat / absent effort.  Same rule is used while playing and while paused.
+AXIS_SMOOTH_OVERFLOW = "clip"
+AXIS_SMOOTH_BAND = 0.10
+AXIS_SMOOTH_COMPRESS_RANGE = 40.0
+AXIS_SMOOTH_FLAT_FRACTION = 0.25
+AXIS_SMOOTH_DEAD_FRACTION = 0.10
+AXIS_SMOOTH_FLAT_HOLD_SEC = 180.0
+AXIS_SMOOTH_REFERENCE_SEC = 60.0
+THORAX_DISPLAY_LOWPASS_HZ = 1.0
+
+# Fixed/fallback Y-axis settings for the dashboard charts.
+BODY_POSITION_VIEW_MIN = -0.5
+BODY_POSITION_VIEW_MAX = 4.5
+SPO2_FIXED_AXIS = (60.0, 100.0)
+SPO2_ARTIFACT_FLOOR = 0.0
+SPO2_LABEL_ROOM_FRACTION = 0.18
+PULSE_FIXED_AXIS = (40.0, 140.0)
 
 
 def signal_key_for_chart(chart_name):
@@ -72,110 +104,3 @@ def signal_key_for_chart(chart_name):
     if cleaned in CHART_SIGNAL_MAPPING:
         return CHART_SIGNAL_MAPPING[cleaned]
     return cleaned.lower().replace(" ", "_")
-
-
-def csv_column_for(name):
-    """Return the raw CSV column index for a signal key or chart label."""
-    cleaned = str(name).strip()
-    if cleaned in SIGNAL_COLUMNS:
-        return SIGNAL_COLUMNS[cleaned]
-    return SIGNAL_COLUMNS.get(signal_key_for_chart(cleaned))
-
-
-def _auto_ylim(values, sample_rate_hz=SAMPLE_RATE_HZ):
-    """Return a padded data-driven Y range or None for a constant signal."""
-    series = np.asarray(values, dtype=float)
-    settle = int(30.0 * sample_rate_hz)
-    if len(series) > settle * 2:
-        series = series[settle:]
-    series = series[np.isfinite(series)]
-    if len(series) == 0 or series.min() == series.max():
-        return None
-    low, high = np.percentile(series, [0.5, 99.5])
-    if high <= low:
-        low, high = float(series.min()), float(series.max())
-    pad = max((high - low) * 0.15, 1.0)
-    return low - pad, high + pad
-
-
-def _load_csv(csv_path):
-    """Load a PSG export and keep only numeric columns."""
-    raw = pd.read_csv(csv_path, header=None)
-    numeric = raw.apply(pd.to_numeric, errors="coerce")
-    numeric = numeric.dropna(how="all").reset_index(drop=True)
-    return numeric
-
-
-def _plot_inspection_figure(df, out_path):
-    time_seconds = np.arange(len(df), dtype=float) / SAMPLE_RATE_HZ
-    chart_rows = [
-        ("Body Position", "body_position", "blue"),
-        ("Pulse", "pulse", "red"),
-        ("SpO2", "spo2", "green"),
-        ("Body Movement", "body_movement", "purple"),
-        ("Airflow", "airflow", "orange"),
-        ("Thorax", "thorax", "teal"),
-        ("Snoring", "snoring", "brown"),
-    ]
-
-    plottable = []
-    for chart_label, signal_key, color in chart_rows:
-        column_index = csv_column_for(signal_key)
-        if column_index is None or column_index >= df.shape[1]:
-            continue
-        plottable.append((chart_label, column_index, color))
-
-    if not plottable:
-        raise SystemExit("No mapped signal columns were found in this file.")
-
-    fig, axes = plt.subplots(len(plottable), 1, figsize=(15, 2.0 * len(plottable)), sharex=True)
-    axes = np.atleast_1d(axes)
-    fig.suptitle("PSG Signal Data - Column Position Verification", fontsize=16)
-
-    for axis, (chart_label, column_index, color) in zip(axes, plottable):
-        values = df[column_index].to_numpy(dtype=float)
-        axis.plot(time_seconds, values, color=color, linewidth=0.5)
-        axis.set_ylabel(chart_label, fontsize=10)
-        axis.grid(True, alpha=0.3)
-        axis.set_title(f"{chart_label} (Column {column_index})", fontsize=9)
-
-        limits = _auto_ylim(values)
-        if limits is not None:
-            axis.set_ylim(*limits)
-
-    axes[-1].set_xlabel("Time (seconds)", fontsize=12)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Plot PSG signals from an uploaded CSV/TXT file.")
-    parser.add_argument("csv_path", help="Path to the PSG CSV/TXT file to inspect")
-    parser.add_argument("--out", default="psg_signal_plot.png", help="Output PNG path")
-    args = parser.parse_args()
-
-    csv_path = Path(args.csv_path)
-    df = _load_csv(csv_path)
-
-    print(f"CSV shape: {df.shape}")
-    print(f"First few rows:\n{df.head(10)}")
-    print("\nColumn statistics:")
-    for i in range(df.shape[1]):
-        print(f"Column {i}: min={df[i].min()}, max={df[i].max()}, unique={df[i].nunique()}")
-
-    _plot_inspection_figure(df, args.out)
-    print(f"\nPlot saved to {args.out}")
-
-    print("\n=== Signal Statistics ===")
-    for chart_label, signal_key in CHART_SIGNAL_MAPPING.items():
-        column_index = csv_column_for(signal_key)
-        if column_index is None or column_index >= df.shape[1]:
-            continue
-        values = df[column_index].to_numpy(dtype=float)
-        print(
-            f"{chart_label}: min={values.min()}, max={values.max()}, unique={np.unique(values)}"
-        )
-
-
-if __name__ == "__main__":
-    main()

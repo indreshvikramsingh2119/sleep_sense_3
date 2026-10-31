@@ -2,6 +2,22 @@ import numpy as np
 import pandas as pd
 from scipy.signal import medfilt, savgol_filter
 
+# Raw hardware airflow goes DOWN during inspiration. Flip the display around
+# its baseline so inspiration is drawn upward, matching usual PSG polarity.
+AIRFLOW_DISPLAY_INHALE_UP = True
+
+
+def orient_airflow_for_display(signal):
+    """Orient airflow for display without changing the analysis signal."""
+    values = np.asarray(signal, dtype=float).reshape(-1)
+    finite = np.isfinite(values)
+    if not AIRFLOW_DISPLAY_INHALE_UP or values.size == 0 or not finite.any():
+        return values.copy()
+    baseline = float(np.nanmedian(values[finite]))
+    oriented = values.copy()
+    oriented[finite] = 2.0 * baseline - values[finite]
+    return oriented
+
 
 def enhance_airflow_for_graph_and_detection(
     signal,
@@ -56,3 +72,24 @@ def enhance_airflow_for_graph_and_detection(
 
     enhanced[~valid_mask] = np.nan
     return enhanced.astype(float)
+
+
+# 1.0 restores the vibration at its recorded amplitude.
+AIRFLOW_SNORE_TEXTURE_GAIN = 0.3
+
+
+def add_snore_texture_to_airflow_display(
+    airflow_display,
+    snoring,
+    gain=AIRFLOW_SNORE_TEXTURE_GAIN,
+):
+    """Mix a subtle, sample-aligned snore vibration into display airflow only."""
+    display = np.asarray(airflow_display, dtype=float).reshape(-1)
+    snore = np.asarray(snoring, dtype=float).reshape(-1)
+    if display.size == 0 or snore.size != display.size:
+        return display.copy()
+
+    textured = display.copy()
+    valid = np.isfinite(display) & np.isfinite(snore) & (snore != 0.0)
+    textured[valid] += float(gain) * snore[valid]
+    return textured
