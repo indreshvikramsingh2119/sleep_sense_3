@@ -94,7 +94,7 @@ def _pulse_looks_artifactual(
 AASM_HYPOPNEA_DROP_PERCENT = 30.0
 AASM_HYPOPNEA_SPO2_DESAT_MIN = 3.0
 # Apnea (Obstructive/Central/Mixed): airflow reduced >=75%.
-AASM_APNEA_DROP_PERCENT = 75.0
+AASM_APNEA_DROP_PERCENT = 90.0
 # Obstructive vs Central is decided by breathing effort (Thorax/Abdomen), not
 # by how deep the airflow drop is. ResMed-style two-threshold band: below
 # OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD, effort is "absent"; at/above
@@ -684,6 +684,8 @@ def _event_confidence(event):
         )
     elif dropout_sec >= SPO2_DROPOUT_MIN_SEC:
         flags.append(f"SpO2 sensor dropout {dropout_sec:.0f}s near event")
+    if event.get("apnea_type_assumed"):
+        flags.append("apnea type assumed (effort belt could not decide it)")
     if event.get("pulse_artifact"):
         flags.append("pulse trace artifactual")
     if event.get("movement", {}).get("flag"):
@@ -1330,17 +1332,38 @@ def _compute_effort_baseline(
 
 
 def _effort_belt_noise_floor(values, fs, mask=None):
-    """Noise floor of an effort belt in raw counts over 3 s ranges."""
+    """Noise of an effort belt in raw counts (typical peak-to-peak over 3 s).
+
+    The noise is measured on the part of the signal that is FASTER than breathing
+    (above ~1.5 Hz). The earlier version took the 10th percentile of the 3 s range of
+    the whole signal; on a belt that shows breathing all night that value is the
+    breathing itself, so even a perfect belt came out as "SNR ~1.5, too weak" and no
+    apnea could ever be typed.
+    """
     if values is None:
         return 0.0
     series = pd.to_numeric(pd.Series(np.asarray(values, dtype=float)), errors="coerce")
+    finite = series.notna().to_numpy()
+    if finite.sum() < 10 or fs <= 0:
+        return 0.0
+    filled = series.interpolate(limit_direction="both").to_numpy(dtype=float)
+    cutoff_hz = 1.5
+    nyquist = float(fs) / 2.0
+    if nyquist > cutoff_hz * 1.2 and filled.size > 30:
+        from scipy.signal import butter, sosfiltfilt
+        fast = sosfiltfilt(butter(4, cutoff_hz, btype="highpass", fs=float(fs), output="sos"), filled)
+        # Only the band above the cutoff was kept; scale back to full-band noise.
+        fast = fast * float(np.sqrt(nyquist / (nyquist - cutoff_hz)))
+    else:
+        fast = filled - pd.Series(filled).rolling(3, center=True, min_periods=1).mean().to_numpy()
+    fast_series = pd.Series(np.where(finite, fast, np.nan))
     w = max(3, int(round(fs * EFFORT_BREATH_WINDOW_SEC)))
-    spread = (series.rolling(w, center=True, min_periods=2).max()
-              - series.rolling(w, center=True, min_periods=2).min()).to_numpy()
+    spread = (fast_series.rolling(w, center=True, min_periods=2).max()
+              - fast_series.rolling(w, center=True, min_periods=2).min()).to_numpy()
     if mask is not None and len(mask) == len(spread):
         spread = spread[np.asarray(mask, dtype=bool)]
     spread = spread[np.isfinite(spread)]
-    return float(np.nanpercentile(spread, EFFORT_NOISE_FLOOR_PERCENTILE)) if spread.size else 0.0
+    return float(np.nanmedian(spread)) if spread.size else 0.0
 
 
 def _effort_state(
@@ -1447,7 +1470,9 @@ def classify_apnea_effort_type(
         ):
             return "CSA"
         return "UNDETERMINED"
-    if {first_half_state, second_half_state} == {"absent", "present"}:
+    # AASM mixed apnea: effort ABSENT in the first part, then effort RESUMES in the
+    # second part. The reverse order (effort first, then none) is not a mixed apnea.
+    if first_half_state == "absent" and second_half_state == "present":
         return "MSA"
     if first_half_state == "present" and second_half_state == "present":
         return "OSA"
@@ -1515,6 +1540,8 @@ def _build_event_evidence(event: dict[str, Any]) -> list[str]:
             else:
                 lines.append("SpO2      no desaturation linked   no")
 
+    if event.get("apnea_type_assumed"):
+        lines.append("Type      apnea type assumed (effort belt could not decide it)   review")
     if event.get("pulse_artifact"):
         lines.append("Pulse     trace looked artifactual during event (probe disturbed)   no")
 
@@ -2161,18 +2188,26 @@ def detect_apnea_events_from_dataframe(
     # ------------------------------------------------------------------
     amplitude_all = _continuous_breath_amplitude(airflow, estimated_fs)
     rolling_baseline_all = _rolling_aasm_baseline(amplitude_all, estimated_fs)
-    sensor_off_segments = detect_sensor_off_segments(
-        airflow=airflow,
-        thorax=thorax,
-        fs=estimated_fs,
-        time_sec=time_sec,
-    )
-    periodicity_loss_segments = detect_periodicity_loss_segments(
-        airflow=unenhanced_airflow if unenhanced_airflow is not None else airflow,
-        thorax=thorax,
-        fs=estimated_fs,
-        time_sec=time_sec,
-    )
+    # Do not infer cannula-off periods from floating thorax noise when the
+    # recording has no usable airflow channel overall. SpO2-only studies can
+    # contain movement in the unused effort channel, which otherwise looks
+    # like continued breathing effort beside a disconnected airflow sensor.
+    if airflow_not_connected:
+        sensor_off_segments = []
+        periodicity_loss_segments = []
+    else:
+        sensor_off_segments = detect_sensor_off_segments(
+            airflow=airflow,
+            thorax=thorax,
+            fs=estimated_fs,
+            time_sec=time_sec,
+        )
+        periodicity_loss_segments = detect_periodicity_loss_segments(
+            airflow=unenhanced_airflow if unenhanced_airflow is not None else airflow,
+            thorax=thorax,
+            fs=estimated_fs,
+            time_sec=time_sec,
+        )
     for segment in periodicity_loss_segments:
         print(
             f"Cannula-out suspected {segment['start_sec']:.0f}s-{segment['end_sec']:.0f}s "
@@ -2234,7 +2269,9 @@ def detect_apnea_events_from_dataframe(
 
     analysis_amplitude = amplitude_all[analysis_mask]
     analysis_window_baseline = rolling_baseline_all[analysis_mask]
-    if len(analysis_window_baseline) != len(analysis_time) or not np.any(analysis_window_baseline > 0):
+    if len(analysis_window_baseline) != len(analysis_time) or (
+        not airflow_not_connected and not np.any(analysis_window_baseline > 0)
+    ):
         raise ValueError("Rolling amplitude baseline failed for analysis window.")
 
     # Short-window twin of the same measurement, used ONLY to time how long a
@@ -2689,6 +2726,7 @@ def detect_apnea_events_from_dataframe(
             if (
                 detected_rule_label == "APNEA_CANDIDATE"
                 and night_amplitude_ratio > APNEA_MAX_NIGHT_REF_RATIO
+                and airflow_unreliable
             ):
                 if (
                     night_amplitude_ratio <= HYPOPNEA_MAX_NIGHT_REF_RATIO
@@ -2781,8 +2819,11 @@ def detect_apnea_events_from_dataframe(
                 ):
                     typed = "UNDETERMINED"
                 if effort_baseline is None or not effort_classifiable or typed == "UNDETERMINED":
-                    if UNTYPED_APNEA_LABEL == "OSA" or typed == "UNDETERMINED":
-                        typed = "OSA"
+                    # A belt that is too weak to read must not produce ANY type (it used to
+                    # let MSA through). The event stays an apnea; OSA is only the display
+                    # default and the event is marked so the report can say so.
+                    typed = "OSA"
+                    candidate_record["apnea_type_assumed"] = True
                     print(
                         f"Apnea at {float(time_sec[start_index]):.0f}s typed as {typed} by ASSUMPTION "
                         f"({UNTYPED_APNEA_LABEL}): effort belt could not decide it"

@@ -77,6 +77,7 @@ exe = EXE(
     upx=True,
     console=False,
     icon=str(icon_path) if icon_path.exists() else None,
+    version=str(project_root / "version_info.txt"),
 )
 
 coll = COLLECT(

@@ -195,12 +195,24 @@ def _find_valid_records(buffer: np.ndarray, *, verify_crc: bool = True) -> tuple
     Normal operation reads records at fixed 712-byte offsets. When a record
     fails the sync or CRC check, it is discarded and the reader scans forward
     byte-by-byte for the next sync marker whose record also passes the CRC.
+
+    The sync/CRC check of all records on the current 712-byte grid is done once
+    and reused after every corrupt record that leaves the grid unchanged (the
+    usual case), so a card with many bad records no longer re-checks the rest
+    of the file once per bad record.
     """
     total = int(buffer.size)
     stats = {"records_valid": 0, "records_corrupt": 0, "bytes_skipped": 0, "resyncs": 0}
-    offsets: list[int] = []
+    offsets: list[np.ndarray] = []
 
     sync = np.frombuffer(SYNC_MARKER, dtype=np.uint8)
+    raw_bytes = buffer.tobytes()
+
+    def find_sync(start: int) -> int | None:
+        if start >= total:
+            return None
+        index = raw_bytes.find(SYNC_MARKER, start)
+        return None if index < 0 else index
 
     def record_ok(offset: int) -> bool:
         if offset + RECORD_SIZE > total:
@@ -214,55 +226,64 @@ def _find_valid_records(buffer: np.ndarray, *, verify_crc: bool = True) -> tuple
         return crc16_ccitt(payload) == stored
 
     # Locate the first sync marker (tolerates an unexpected header / junk).
-    first = _find_sync(buffer, 0)
+    first = find_sync(0)
     if first is None:
         return np.array([], dtype=np.int64), stats
     stats["bytes_skipped"] += first
     position = first
 
-    # Fast path: assume records are contiguous, verify all CRCs at once.
-    # Any failure falls back to the per-record scan from the failing point.
     while position + RECORD_SIZE <= total:
-        n_contiguous = (total - position) // RECORD_SIZE
-        block = buffer[position:position + n_contiguous * RECORD_SIZE].reshape(n_contiguous, RECORD_SIZE)
-        sync_ok = np.all(block[:, :SYNC_SIZE] == sync, axis=1)
+        # Check every record on the 712-byte grid that starts at ``position``.
+        grid_start = position
+        n_grid = (total - grid_start) // RECORD_SIZE
+        block = buffer[grid_start:grid_start + n_grid * RECORD_SIZE].reshape(n_grid, RECORD_SIZE)
+        ok = np.all(block[:, :SYNC_SIZE] == sync, axis=1)
         if verify_crc:
             stored = block[:, SYNC_SIZE + PAYLOAD_SIZE].astype(np.uint16) | (
                 block[:, SYNC_SIZE + PAYLOAD_SIZE + 1].astype(np.uint16) << 8
             )
-            crc_ok = _crc16_bulk(block[:, SYNC_SIZE:SYNC_SIZE + PAYLOAD_SIZE]) == stored
-            ok = sync_ok & crc_ok
-        else:
-            ok = sync_ok
+            ok &= _crc16_bulk(block[:, SYNC_SIZE:SYNC_SIZE + PAYLOAD_SIZE]) == stored
         bad = np.flatnonzero(~ok)
-        good_count = int(bad[0]) if bad.size else n_contiguous
-        offsets.extend(position + np.arange(good_count) * RECORD_SIZE)
-        stats["records_valid"] += good_count
-        position += good_count * RECORD_SIZE
-        if not bad.size:
-            break
 
-        # Corrupt record: discard it and scan forward for the next sync+CRC.
-        stats["records_corrupt"] += 1
-        stats["resyncs"] += 1
-        scan_from = position + 1
-        found = None
-        while True:
-            candidate = _find_sync(buffer, scan_from)
-            if candidate is None:
+        index = 0
+        regrid = False
+        while not regrid:
+            next_bad = int(np.searchsorted(bad, index))
+            stop = int(bad[next_bad]) if next_bad < bad.size else n_grid
+            if stop > index:
+                offsets.append(grid_start + np.arange(index, stop, dtype=np.int64) * RECORD_SIZE)
+                stats["records_valid"] += stop - index
+            position = grid_start + stop * RECORD_SIZE
+            if stop >= n_grid:
                 break
-            if record_ok(candidate):
-                found = candidate
-                break
-            scan_from = candidate + 1
-        if found is None:
-            stats["bytes_skipped"] += total - position
-            position = total
-            break
-        stats["bytes_skipped"] += found - position
-        position = found
 
-    return np.asarray(offsets, dtype=np.int64), stats
+            # Corrupt record: discard it and scan forward for the next sync+CRC.
+            stats["records_corrupt"] += 1
+            stats["resyncs"] += 1
+            scan_from = position + 1
+            found = None
+            while True:
+                candidate = find_sync(scan_from)
+                if candidate is None:
+                    break
+                if record_ok(candidate):
+                    found = candidate
+                    break
+                scan_from = candidate + 1
+            if found is None:
+                stats["bytes_skipped"] += total - position
+                position = total
+                break
+            stats["bytes_skipped"] += found - position
+            position = found
+            if (found - grid_start) % RECORD_SIZE == 0:
+                index = (found - grid_start) // RECORD_SIZE      # same grid: reuse the checks
+            else:
+                regrid = True                                    # shifted data: check the new grid
+
+    if not offsets:
+        return np.array([], dtype=np.int64), stats
+    return np.concatenate(offsets).astype(np.int64), stats
 
 
 def parse_records(buffer: bytes | np.ndarray, *, verify_crc: bool = True) -> tuple[dict[str, np.ndarray], dict[str, int]]:

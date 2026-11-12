@@ -19,6 +19,7 @@ from datetime import datetime
 import os
 import uuid
 from ..utils.app_paths import get_resource_path as get_asset_path
+from ..utils.app_version import get_software_version
 from ..utils.runtime_config import get_configured_path
 
 ANALYSIS_JSON_DIR = get_configured_path("analysis_json_dir")
@@ -217,7 +218,7 @@ def _ahi_scale_drawing(value, width):
     return d
 
 
-def _make_numbered_canvas(footer_left, footer_mid):
+def _make_numbered_canvas(footer_left, footer_mid, software_version, firmware_version):
     """Footer on every page: 'Patient ... | Scoring ... | Page N of M'."""
     class _NumberedCanvas(_rl_canvas.Canvas):
         def __init__(self, *args, **kwargs):
@@ -233,6 +234,7 @@ def _make_numbered_canvas(footer_left, footer_mid):
             for state in self._saved_page_states:
                 self.__dict__.update(state)
                 self._draw_footer(total)
+                self._draw_page_metadata(total)
                 super().showPage()
             super().save()
 
@@ -247,6 +249,17 @@ def _make_numbered_canvas(footer_left, footer_mid):
             self.drawCentredString(w / 2, 12, footer_left)
             self.drawCentredString(w / 2, 12, footer_mid)
             self.drawRightString(w - 28, 12, f"Page {self._pageNumber} of {total}")
+            self.restoreState()
+
+        def _draw_page_metadata(self, total):
+            w, h = self._pagesize
+            self.saveState()
+            self.setFont("Helvetica", 7.5)
+            self.setFillColor(REPORT_MUTE)
+            self.drawRightString(w - 28, h - 14, f"Firmware version: {firmware_version}")
+            self.drawRightString(w - 28, h - 23, f"Page: {self._pageNumber}/{total}")
+            self.setFillColor(colors.HexColor("#5b6573"))
+            self.drawString(28, 12, f"Software version: {software_version}")
             self.restoreState()
     return _NumberedCanvas
 
@@ -366,28 +379,8 @@ def _build_dashboard_screenshot_section(image_paths, doc, styles):
     return elements
 
 
-class _PageMarker(Flowable):
-    """Invisible 1-pt flowable that records the (0-based) page it is drawn on."""
-
-    def __init__(self, sink):
-        super().__init__()
-        self.sink = sink
-        self.width = self.height = 1
-
-    def wrap(self, availWidth, availHeight):
-        return 1, 1
-
-    def draw(self):
-        self.sink.append(int(self.canv.getPageNumber()) - 1)
-
-
-def _overlay_vector_report_pages(report_path, vector_paths, start_page_index=2, page_indexes=None):
-    """Place vector-PDF attachments onto pre-created report pages.
-
-    ``page_indexes`` are the real placeholder pages recorded while the report was built. The old fixed
-    ``start_page_index`` assumed the report is always exactly 2 pages before the chart, so any extra page
-    drew the chart on top of the wrong page.
-    """
+def _overlay_vector_report_pages(report_path, vector_paths, start_page_index=2):
+    """Place vector-PDF attachments onto pre-created report pages."""
     vector_paths = [
         str(path) for path in (vector_paths or [])
         if path and os.path.exists(path)
@@ -403,15 +396,11 @@ def _overlay_vector_report_pages(report_path, vector_paths, start_page_index=2, 
     )
     target_document = pymupdf.open(str(target_path))
     try:
-        required_pages = (max(page_indexes) + 1) if page_indexes else int(start_page_index) + len(vector_paths)
+        required_pages = int(start_page_index) + len(vector_paths)
         if target_document.page_count < required_pages:
             raise ValueError(
                 "The report does not contain enough placeholder pages for the vector chart."
             )
-
-        real_pages = list(page_indexes or [])
-        if len(real_pages) < len(vector_paths):
-            real_pages = [int(start_page_index) + n for n in range(len(vector_paths))]
 
         for offset, vector_path in enumerate(vector_paths):
             source_document = pymupdf.open(os.path.abspath(vector_path))
@@ -419,7 +408,7 @@ def _overlay_vector_report_pages(report_path, vector_paths, start_page_index=2, 
                 if source_document.page_count <= 0:
                     raise ValueError(f"Vector chart has no pages: {vector_path}")
 
-                target_page = target_document.load_page(int(real_pages[offset]))
+                target_page = target_document.load_page(int(start_page_index) + offset)
                 source_page = source_document.load_page(0)
                 page_rect = target_page.rect
                 source_rect = source_page.rect
@@ -891,9 +880,22 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
     report_context = report_context or {}
     time_information = report_context.get("time_information", {}) or {}
     respiratory_summary = report_context.get("respiratory_summary", {}) or {}
+    software_version = get_software_version()
+    device_context = report_context.get("device", {}) or {}
+    firmware_version = _first(
+        report_context,
+        "firmware_version",
+        "device_firmware_version",
+        default=_first(
+            device_context,
+            "firmware_version",
+            "device_firmware_version",
+            default="Not available",
+        ),
+    )
     doc = SimpleDocTemplate(pdf_path, pagesize=A4,
                            leftMargin=28, rightMargin=28,
-                           topMargin=26, bottomMargin=24)
+                           topMargin=48, bottomMargin=24)
     styles = _build_report_styles(getSampleStyleSheet())
     content_width = doc.width
     page1_content_width = content_width - 10
@@ -1022,9 +1024,7 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
             i = c * rows_per_col + r
             if i < len(patient_rows):
                 k, v = patient_rows[i]
-                # Free-text fields can be any length; one very long value used to make the patient card
-                # taller than page 1 and push the bottom cards onto an extra page.
-                v_text = _truncate_text(str(v), 80 if k in ("History", "Comments") else 40)
+                v_text = str(v)
                 v_html = "—" if v_text in ("[not entered]", "", "-", "—") else f"<b>{v_text}</b>"
                 cells += [Paragraph(k, _ps("PatK", 8, REPORT_MUTE, leading=11)),
                           Paragraph(v_html, _ps("PatV", 8, REPORT_INK, leading=11)), ""]
@@ -1174,10 +1174,8 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
     ]))
     page1_elements.append(bottom_row)
 
-    # Page 1 must stay ONE page: if the content is ever taller than the page (long free-text fields),
-    # shrink it to fit instead of letting the last cards spill onto an extra page.
-    from reportlab.platypus import KeepInFrame
-    elements.append(KeepInFrame(doc.width - 12, doc.height - 12, page1_elements, mode="shrink"))
+    # Add all page 1 elements without KeepTogether (content is too large)
+    elements.extend(page1_elements)
     elements.append(PageBreak())
 
     # =========================================================================
@@ -1392,10 +1390,8 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
     # ReportLab cannot import an existing PDF page as a Flowable. Create one
     # numbered placeholder page per vector chart; after the report is built,
     # PyMuPDF places the original vector page over that placeholder.
-    placeholder_pages = []   # 0-based page index of each placeholder, filled while the PDF is built
     for _vector_path in vector_hypnogram_paths:
         elements.append(PageBreak())
-        elements.append(_PageMarker(placeholder_pages))
         elements.append(Spacer(1, 1))
 
     dashboard_section = _build_dashboard_screenshot_section(
@@ -1408,14 +1404,15 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
         elements.extend(dashboard_section)
 
     footer_left = f"Patient: {patient_name} | ID {_first(patient_data, 'patient_id', default='-')}"
-    numbered_canvas = _make_numbered_canvas(footer_left, "")
+    numbered_canvas = _make_numbered_canvas(
+        footer_left, "", software_version, str(firmware_version)
+    )
     try:
         doc.build(elements, canvasmaker=numbered_canvas)
         return _overlay_vector_report_pages(
             pdf_path,
             vector_hypnogram_paths,
             start_page_index=2,
-            page_indexes=placeholder_pages,
         )
     except PermissionError:
         fallback_path = _default_report_output_path("sleep_report_clean.pdf", unique=True)
@@ -1427,16 +1424,14 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
             pagesize=A4,
             leftMargin=30,
             rightMargin=30,
-            topMargin=30,
+            topMargin=48,
             bottomMargin=30,
         )
-        placeholder_pages.clear()
         fallback_doc.build(elements, canvasmaker=numbered_canvas)
         return _overlay_vector_report_pages(
             fallback_path,
             vector_hypnogram_paths,
             start_page_index=2,
-            page_indexes=placeholder_pages,
         )
 
 
@@ -1715,26 +1710,14 @@ class PDFViewerWidget(QDialog):
         self.allow_print = allow_print
         self._handling_fallback = False
         self._rendered_pdf_pages = []
-        self._embedded = bool(embedded)
         self.setWindowTitle("Report")
-        if self._embedded:
-            # A plain child widget of the main window (shown by the caller): no separate OS window.
-            from PyQt5.QtGui import QPalette, QColor
-            self.setWindowFlags(Qt.Widget)
-            self.setAttribute(Qt.WA_DeleteOnClose, True)
-            palette = self.palette()
-            palette.setColor(QPalette.Window, QColor("#e5e7eb"))
-            self.setPalette(palette)
-            self.setAutoFillBackground(True)  # a child widget is transparent by default
-        else:
-            self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-            # Open the report viewer at the available screen size. A fixed size
-            # forced the PDF container to appear in its small/default geometry.
-            self.setMinimumSize(1000, 700)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        # Open the report viewer at the available screen size. A fixed size
+        # forced the PDF container to appear in its small/default geometry.
+        self.setMinimumSize(1000, 700)
         self.generating = False
         self.init_ui()
-        if not self._embedded:
-            self.showMaximized()
+        self.showMaximized()
 
         if pdf_path and os.path.exists(pdf_path):
             QTimer.singleShot(500, lambda: self.load_pdf(pdf_path))

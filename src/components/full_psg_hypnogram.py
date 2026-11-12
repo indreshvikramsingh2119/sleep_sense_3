@@ -158,6 +158,11 @@ def _normalize_detected_events(
                 "label_key": raw_label,
                 "legend_label": style["label"],
                 "color": style["color"],
+                "is_manual": (
+                    str(event.get("source") or "").strip().lower() == "manual"
+                    or bool(event.get("is_manually_edited"))
+                    or bool(event.get("manual_label_override"))
+                ),
                 "start_sec": start_sec,
                 "end_sec": end_sec,
                 "duration_sec": end_sec - start_sec,
@@ -231,7 +236,7 @@ def _shade_sensor_off(ax, spans: list[tuple[float, float]]) -> None:
 
 def _plot_event_track(ax, events: list[dict[str, Any]]) -> None:
     """Bars whose HEIGHT is the event duration (0-30 s)."""
-    ax.set_ylim(0.0, EVENT_BAR_MAX_SEC)
+    ax.set_ylim(-5.0, EVENT_BAR_MAX_SEC)
     ax.set_yticks([0, EVENT_BAR_MAX_SEC])
     ax.set_yticklabels(["0s", "30s"], fontsize=6.5)
     if not events:
@@ -243,6 +248,13 @@ def _plot_event_track(ax, events: list[dict[str, Any]]) -> None:
         height = min(float(event["duration_sec"]), EVENT_BAR_MAX_SEC)
         ax.bar(event["start_hours"], height, width=width, align="edge",
                color=event["color"], edgecolor=event["color"], linewidth=0.3, zorder=2)
+        if event.get("is_manual"):
+            event_center = (event["start_hours"] + event["end_hours"]) / 2.0
+            ax.scatter(
+                [event_center], [-2.8], marker="o", s=14,
+                color="#e11d48", edgecolors="#b91c1c", linewidths=0.35,
+                zorder=5, clip_on=False,
+            )
 
 
 def _annotate_box(ax, x_hours: float, y: float, text: str, color: str, *, above: bool = True) -> None:

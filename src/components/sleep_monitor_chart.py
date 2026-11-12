@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QFrame, QComboBox, QMessageBox, QMenu, QAction, QScrollArea, QSizePolicy, QSlider, QFileDialog, QApplication, QDialog, QStyle, QShortcut, QOpenGLWidget
 )
 from PyQt5.QtCore import Qt, QTimer, QTime, QThread, pyqtSignal, QPoint, QRect, QMimeData, QPointF, QElapsedTimer, QEvent, QEventLoop, QRectF, QSize
-import sip
+from PyQt5 import sip
 from PyQt5.QtGui import QPixmap, QScreen, QKeySequence
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QDrag, QPainter, QPen, QColor, QRegion, QSurfaceFormat
 import pyqtgraph as pg
@@ -258,6 +258,14 @@ LABEL_STEP_SHOWS_REAL_VALUE = True
 #   "row"   = one straight row at a constant height at the top of the plot
 SPO2_LABEL_POSITION = "trace"
 PULSE_LABEL_POSITION = "trace"
+# SpO2 +/-: keep the top anchored at 100%, and move the floor in these steps.
+SPO2_ZOOM_FLOORS = (90, 80, 70, 60, 50, 40, 30, 20, 10, 0)
+# Keep this much room below the lowest visible SpO2 sample.
+SPO2_FLOOR_MARGIN = 3.0
+# None uses the height of a bold 12pt value label plus 2px.
+TOP_GAP_PX = None
+# Pulse: keep this much room below its lowest visible value.
+PULSE_FLOOR_MARGIN = 3.0
 # When enabled, a DE-SATURATION box is reduced to only its start and nadir values.
 # Disabled so averaged readings remain visible throughout the dip.
 DESAT_BOX_TWO_LABELS = False
@@ -284,13 +292,12 @@ PULSE_LABEL_COLOR = (154, 52, 18)
 # Display-only SpO2 artifact handling: short zero/missing runs are bridged;
 # longer zero runs remain visible as a drop to 0. Analysis data is unchanged.
 SPO2_DISPLAY_BRIDGE_MAX_SECONDS = 60.0
-# A run of SpO2 = 0 is only an ARTIFACT (pink box, excluded from the chart's event
-# and FL filters) when it is LONGER than this many seconds. Shorter runs are not
-# artifacts: the trace is bridged over them (SPO2_DISPLAY_BRIDGE_MAX_SECONDS) and no
-# box is drawn. Kept equal to the bridge length on purpose, so a run is either
-# bridged or shown as an artifact drawn down to 0, never both, never neither.
-# 0 = every zero run is an artifact (old behaviour).
-ARTIFACT_MIN_SECONDS = SPO2_DISPLAY_BRIDGE_MAX_SECONDS
+# Recreate the removed SpO2 smoothing in software for the displayed trace.
+SPO2_DISPLAY_MEDIAN_WINDOW_SEC = 20.0
+# A SpO2 zero run is labeled Sensor off only when it lasts longer than 60 s.
+# Runs up to 60 s are bridged in the display and receive no sensor-off label.
+SPO2_SENSOR_OFF_LABEL_MIN_SEC = 60.0
+ARTIFACT_MIN_SECONDS = SPO2_SENSOR_OFF_LABEL_MIN_SEC
 # Warm-up readings below this threshold are replaced once at the start of the
 # recording, never separately for each visible window.
 SPO2_DISPLAY_WARMUP_MIN = 50.0
@@ -864,27 +871,25 @@ except Exception as import_error:
 RECORDING_IMPORT_ERROR = None
 try:
     from ai_models.sleep_apnea.hybrid_pipeline_common import (
+        MIN_RECORDING_SECONDS,
         load_sleep_recording,
+        require_minimum_recording,
         trim_recording_edges,
     )
 except Exception as import_error:
+    MIN_RECORDING_SECONDS = 60.0 * 60.0
     load_sleep_recording = None
+    require_minimum_recording = None
     trim_recording_edges = None
     RECORDING_IMPORT_ERROR = str(import_error)
 
 # Sensor readings are unstable immediately after setup and just before removal.
 # These edges are excluded from charts, navigation, detection and all metrics.
 RECORDING_EDGE_TRIM_SECONDS = 5.0 * 60.0
-# Effort belt "not connected" check (display).  Measured: unplugged thorax swings ~1 count of ADC
-# noise around mid-scale; a working belt swings 10-40 counts.  Keep equal to
-# THORAX_MIN_VALID_SWING_COUNTS in detect_apnea_from_airflow.py.
+# Effort belt "not connected" check, kept aligned with the detector threshold.
 THORAX_MIN_VALID_SWING_COUNTS = 4.0
-
-# Airflow "cannula not connected" check (display).  Same limit as AIRFLOW_MIN_VALID_AMPLITUDE_COUNTS
-# in detect_apnea_from_airflow.py.  Unplugged airflow measured ~1 count on the enhanced series;
-# real breathing swings tens to hundreds of counts.
+# Airflow "cannula not connected" display threshold.
 AIRFLOW_MIN_VALID_SWING_COUNTS = 10.0
-MIN_UPLOAD_RECORDING_DURATION_SEC = 60.0 * 60.0
 
 # --- Loading spinner (round rotating circle) -------------------------------
 class LoadingSpinner(QWidget):
@@ -1598,7 +1603,7 @@ class SleepMonitorChart(QWidget):
                 float(segment["end_sec"]),
             )
             duration = segment["duration_sec"]
-            label = pg.TextItem(f"{duration:g} sec artifact", color="#b91c1c",
+            label = pg.TextItem(f"Sensor off | {duration:g} sec", color="#b91c1c",
                                 fill=pg.mkBrush(255, 241, 242, 240), anchor=(0.5, 0))
             label.setFont(QFont("Segoe UI", 8))
             label.setZValue(20)
@@ -1606,7 +1611,7 @@ class SleepMonitorChart(QWidget):
             label._playback_abs_x = (
                 float(segment["start_sec"]) + float(segment["end_sec"])
             ) / 2.0
-            tooltip = (f"SpO2 = 0 | {segment['start_sec']:g}-{segment['end_sec']:g} sec\n"
+            tooltip = (f"SpO2 sensor off | {segment['start_sec']:g}-{segment['end_sec']:g} sec\n"
                        "All channels excluded from analysis; raw data retained.")
             region.setToolTip(tooltip)
             label.setToolTip(tooltip)
@@ -4259,10 +4264,11 @@ class SleepMonitorChart(QWidget):
 
         controls_layout.addWidget(self._divider())
 
-        self.lbl_events_title = QLabel("EVENTS")
-        self.lbl_events_title.setStyleSheet(section_title_style)
-        controls_layout.addWidget(self.lbl_events_title)
-        controls_layout.addSpacing(10)
+        # Temporarily hidden: EVENTS section in the playback controls.
+        # self.lbl_events_title = QLabel("EVENTS")
+        # self.lbl_events_title.setStyleSheet(section_title_style)
+        # controls_layout.addWidget(self.lbl_events_title)
+        # controls_layout.addSpacing(10)
 
         self.detection_summary_label = QLabel("Events: --")
         self.detection_summary_label.setObjectName("detectionSummaryLabel")
@@ -4278,10 +4284,13 @@ class SleepMonitorChart(QWidget):
             }
         """)
         self.detection_status_spinner = LoadingSpinner(self, size=16, line_width=2)
-        controls_layout.addSpacing(6)
-        controls_layout.addWidget(self.detection_status_spinner)
-        controls_layout.addSpacing(4)
-        controls_layout.addWidget(self.detection_summary_label)
+        # Temporarily hide the event status badge and spinner with the EVENTS section.
+        self.detection_summary_label.hide()
+        self.detection_status_spinner.hide()
+        # controls_layout.addSpacing(6)
+        # controls_layout.addWidget(self.detection_status_spinner)
+        # controls_layout.addSpacing(4)
+        # controls_layout.addWidget(self.detection_summary_label)
         controls_layout.addStretch()
 
         layout.addWidget(controls_container, 1)
@@ -4400,10 +4409,21 @@ class SleepMonitorChart(QWidget):
         _t_load = time.perf_counter()
         recording = load_sleep_recording(recording_path, preserve_recorded_airflow=True)
         _t_parsed = time.perf_counter()
+        raw_time = np.asarray(recording.get("time", []), dtype=float)
+        finite_raw_time = raw_time[np.isfinite(raw_time)]
+        raw_duration_sec = (
+            float(finite_raw_time[-1] - finite_raw_time[0])
+            if finite_raw_time.size > 1
+            else 0.0
+        )
+        # Product rule: recordings shorter than one hour are rejected, and the
+        # first/last 5 minutes are always removed (never analysed untrimmed).
+        require_minimum_recording(recording)
+        edge_trim_seconds = RECORDING_EDGE_TRIM_SECONDS
         recording = trim_recording_edges(
             recording,
-            start_seconds=RECORDING_EDGE_TRIM_SECONDS,
-            end_seconds=RECORDING_EDGE_TRIM_SECONDS,
+            start_seconds=edge_trim_seconds,
+            end_seconds=edge_trim_seconds,
         )
         _t_trimmed = time.perf_counter()
         source_format = recording.get("source_format", "csv")
@@ -4436,6 +4456,14 @@ class SleepMonitorChart(QWidget):
             if signal_name not in raw_signals:
                 continue
             raw_signal = np.asarray(raw_signals[signal_name], dtype=float)
+            if signal_name == "spo2":
+                # Keep the existing validity handling, but cap occasional
+                # above-range readings at the physiological maximum.
+                raw_signal = np.where(
+                    np.isfinite(raw_signal) & (raw_signal > 100.0),
+                    100.0,
+                    raw_signal,
+                )
             rate = sample_rates.get(signal_name, EXTERNAL_ARRAY_SAMPLE_RATE_HZ)
             prepared_signal = self._prepare_external_array_signal(
                 raw_signal,
@@ -5178,6 +5206,9 @@ class SleepMonitorChart(QWidget):
         full_time, full_spo2 = self.spo2_full_data
         full_time = np.asarray(full_time, dtype=float).reshape(-1)
         full_spo2 = np.asarray(full_spo2, dtype=float).reshape(-1)
+        full_spo2 = np.where(
+            np.isfinite(full_spo2) & (full_spo2 > 100.0), 100.0, full_spo2
+        )
         sample_rate_hz = self.channel_rate("spo2")
         key = (
             id(self.spo2_full_data[0]), len(full_time),
@@ -5271,6 +5302,11 @@ class SleepMonitorChart(QWidget):
         prepared = prepare(full_values)
         cache[key] = (full_values, len(full_values), prepared)
         return prepared
+
+    @staticmethod
+    def _copy_slow_channel_for_display(signal_data):
+        """Preserve native slow-channel values without display smoothing."""
+        return np.asarray(signal_data, dtype=float).reshape(-1).copy()
 
     def _step_display_window(self, full_values, sample_rate_hz, time_window_seconds, time_offset):
         """Slow channel as exact sample-and-hold steps on the display grid."""
@@ -5717,7 +5753,7 @@ class SleepMonitorChart(QWidget):
             if name == "SpO2":
                 display_spo2 = self._spo2_display_full()
                 full = self._cached_slow_display(
-                    "spo2", display_spo2, self._smooth_slow_channel_for_display)
+                    "spo2", display_spo2, self._copy_slow_channel_for_display)
             elif name == "Pulse":
                 full = self._pulse_strip_axis_reference()
             else:
@@ -5751,16 +5787,29 @@ class SleepMonitorChart(QWidget):
                 )
             except (TypeError, ValueError):
                 pass
-        room = float(SPO2_LABEL_ROOM_FRACTION)
-        if 0.0 < room < 0.6:
-            fixed_high = fixed_high / (1.0 - room)
+        fixed_high = self._view_high_with_gap(plot_widget, fixed_low, fixed_high)
 
         plot_widget.stable_y_range = (fixed_low, fixed_high)
         plot_widget.stable_y_range_offset = float(
             getattr(self, "current_time_offset", 0.0) or 0.0
         )
         self._lock_auto_axis(plot_widget, fixed_low, fixed_high)
-        self._pin_spo2_ticks(plot_widget, fixed_low, fixed_high)
+        # A zero/no-signal sample needs the chart's normal range on first draw,
+        # but it must not erase a range the user has manually zoomed to. Pulse
+        # keeps its manual range in _apply_windowed_auto_axis_core; SpO2 reaches
+        # this special zero-marker path first, so restore the same saved view.
+        # A manual zoom must not hide the zero (no-signal) line below the chart.
+        self._keep_spo2_zoom_inside(plot_widget, y_values)
+        zoom_range = getattr(plot_widget, "zoom_y_range", None)
+        if zoom_range is not None:
+            zoom_low, zoom_high = (float(value) for value in zoom_range)
+            try:
+                plot_widget.setYRange(zoom_low, zoom_high, padding=0)
+            except TypeError:
+                plot_widget.setRange(yRange=[zoom_low, zoom_high], padding=0)
+            self._pin_spo2_ticks(plot_widget, zoom_low, zoom_high)
+        else:
+            self._pin_spo2_ticks(plot_widget, fixed_low, fixed_high)
         return True
 
     def _pin_axis_tick_spacing(self, plot_widget, y_min, y_max):
@@ -5772,6 +5821,166 @@ class SleepMonitorChart(QWidget):
         step = self._nice_axis_step(float(y_max) - float(y_min))
         try:
             axis.setTickSpacing(major=step, minor=step / 2.0)
+        except Exception:
+            pass
+
+    # ---- SpO2 / Pulse value axis: fixed top gap, floor-step zoom ----------
+    def _top_gap_px(self):
+        """Pixels kept free above SpO2's 100 / Pulse's top tick."""
+        if TOP_GAP_PX:
+            return float(TOP_GAP_PX)
+        from PyQt5.QtGui import QFont, QFontMetrics
+        font = QFont()
+        font.setPointSize(12)
+        font.setBold(True)
+        return float(QFontMetrics(font).height() + 2)
+
+    def _view_high_with_gap(self, plot_widget, low, top):
+        """Return a view top with a fixed pixel gap above the requested top tick."""
+        low = float(low)
+        top = float(top)
+        try:
+            height = float(plot_widget.getViewBox().sceneBoundingRect().height())
+        except Exception:
+            height = 0.0
+        gap = self._top_gap_px()
+        if top <= low:
+            return top + 1.0
+        if height <= gap * 1.5:
+            return top + (top - low) * 0.15
+        return top + (top - low) * gap / (height - gap)
+
+    def _spo2_view_high(self, plot_widget, low):
+        return self._view_high_with_gap(plot_widget, low, 100.0)
+
+    def _visible_curve_values(self, plot_widget):
+        """Y samples of the drawn curve inside the visible X window."""
+        curve = getattr(plot_widget, "plot_curve", None)
+        if curve is None:
+            return np.array([], dtype=float)
+        try:
+            x_data, y_data = curve.getData()
+        except Exception:
+            return np.array([], dtype=float)
+        if x_data is None or y_data is None:
+            return np.array([], dtype=float)
+        x_values = np.asarray(x_data, dtype=float).reshape(-1)
+        y_values = np.asarray(y_data, dtype=float).reshape(-1)
+        n = min(len(x_values), len(y_values))
+        x_values = x_values[:n]
+        y_values = y_values[:n]
+        try:
+            x_lo, x_hi = plot_widget.getViewBox().viewRange()[0]
+        except Exception:
+            return y_values[np.isfinite(y_values)]
+        mask = np.isfinite(x_values) & np.isfinite(y_values) & (x_values >= x_lo) & (x_values <= x_hi)
+        return y_values[mask]
+
+    def _spo2_max_floor(self, y_values):
+        """Highest floor that still keeps every visible SpO2 value inside the chart."""
+        values = np.asarray(y_values, dtype=float).reshape(-1)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            return float(SPO2_ZOOM_FLOORS[0])
+        lowest = float(values.min())
+        allowed = [floor for floor in SPO2_ZOOM_FLOORS if floor <= lowest - SPO2_FLOOR_MARGIN]
+        return float(max(allowed)) if allowed else 0.0
+
+    def _apply_spo2_zoom_view(self, plot_widget, low):
+        low = float(low)
+        high = self._spo2_view_high(plot_widget, low)
+        try:
+            plot_widget.setLimits(yMin=0.0, yMax=self._spo2_view_high(plot_widget, 0.0))
+        except TypeError:
+            pass
+        self._set_y_view(plot_widget, low, high)
+        plot_widget.zoom_y_range = (low, high)
+        self._pin_spo2_ticks(plot_widget, low, high)
+
+    def _keep_spo2_zoom_inside(self, plot_widget, y_values):
+        """Lower the manual SpO2 floor if a new low sample would leave the chart."""
+        zoom = getattr(plot_widget, "zoom_y_range", None)
+        if zoom is None:
+            return
+        cap = self._spo2_max_floor(y_values)
+        if float(zoom[0]) <= cap:
+            return
+        self._apply_spo2_zoom_view(plot_widget, cap)
+
+    def _zoom_spo2_step(self, plot_widget, zoom_in):
+        """Keep 100% fixed at the top and move the SpO2 floor one step."""
+        floors = SPO2_ZOOM_FLOORS
+        try:
+            view_low = float(plot_widget.getViewBox().viewRange()[1][0])
+        except Exception:
+            view_low = 50.0
+        index = min(range(len(floors)), key=lambda j: abs(floors[j] - view_low))
+        if zoom_in:
+            index = max(0, index - 1)
+            cap = self._spo2_max_floor(self._visible_curve_values(plot_widget))
+            while floors[index] > cap and index < len(floors) - 1:
+                index += 1
+        else:
+            index = min(len(floors) - 1, index + 1)
+        self._apply_spo2_zoom_view(plot_widget, floors[index])
+
+    def _apply_pulse_axis(self, plot_widget, y_values):
+        """Lay out Pulse like SpO2, with a fixed pixel gap above the top tick."""
+        step = 20.0
+        drawn = np.asarray(y_values, dtype=float).reshape(-1)
+        drawn = drawn[np.isfinite(drawn)]
+        if PULSE_FIXED_AXIS is not None:
+            low, top = float(PULSE_FIXED_AXIS[0]), float(PULSE_FIXED_AXIS[1])
+            if drawn.size:
+                lowest, highest = float(drawn.min()), float(drawn.max())
+                if lowest <= 0.0:
+                    low = 0.0
+                elif lowest - PULSE_FLOOR_MARGIN < low:
+                    low = math.floor((lowest - PULSE_FLOOR_MARGIN) / step) * step
+                if highest > top:
+                    top = math.ceil(highest / step) * step
+        elif drawn.size:
+            lowest, highest = float(drawn.min()), float(drawn.max())
+            low = 0.0 if lowest <= 0.0 else math.floor((lowest - PULSE_FLOOR_MARGIN) / step) * step
+            top = math.ceil(highest / step) * step
+        else:
+            low, top = (float(value) for value in SIGNAL_Y_RANGES.get("Pulse", (40.0, 140.0)))
+        low = max(0.0, float(low))
+        top = max(float(top), low + 2.0 * step)
+        high = self._view_high_with_gap(plot_widget, low, top)
+        plot_widget.stable_y_range = (low, high)
+        plot_widget.stable_y_range_offset = float(getattr(self, "current_time_offset", 0.0) or 0.0)
+        try:
+            view_low, view_high = plot_widget.getViewBox().viewRange()[1]
+            if abs(float(view_low) - low) < 1e-6 and abs(float(view_high) - high) < 1e-6:
+                return
+        except Exception:
+            pass
+        self._lock_auto_axis(plot_widget, low, high)
+        # Keep the final top-gap pixels free of tick labels.
+        self._pin_core_ticks(plot_widget, low, top, self._nice_axis_step(top - low))
+
+    def _refit_value_axis_after_resize(self, plot_widget):
+        """Re-fit SpO2 / Pulse value axes after their container is resized."""
+        if plot_widget is None:
+            return
+        name = str(getattr(plot_widget, "chart_name", "")).strip()
+        if name not in ("SpO2", "Pulse") or hasattr(plot_widget, "axis_properties"):
+            return
+        try:
+            zoom = getattr(plot_widget, "zoom_y_range", None)
+            if zoom is not None:
+                if name == "SpO2":
+                    self._apply_spo2_zoom_view(plot_widget, float(zoom[0]))
+                return
+            window = self.get_effective_time_window_seconds()
+            if name == "SpO2":
+                _x, values = self.get_spo2_data_for_window(window, self.current_time_offset)
+                if not self._apply_spo2_zero_axis_if_needed(plot_widget, values):
+                    self._apply_windowed_auto_axis(plot_widget, name, values)
+            else:
+                _x, values = self.get_signal_data_for_window(name, window, self.current_time_offset)
+                self._apply_windowed_auto_axis(plot_widget, name, values)
         except Exception:
             pass
 
@@ -6315,7 +6524,15 @@ class SleepMonitorChart(QWidget):
 
         zoom_y_range = getattr(plot_widget, "zoom_y_range", None)
         if zoom_y_range is not None:
+            if chart_name == "SpO2":
+                self._keep_spo2_zoom_inside(plot_widget, y_values)
             self._release_core_ticks(plot_widget)
+            return
+
+        # Use the fixed top gap and bottom anchored labels for Pulse before the
+        # generic auto-fit can center the signal with matching top and bottom room.
+        if chart_name == "Pulse":
+            self._apply_pulse_axis(plot_widget, y_values)
             return
 
         if chart_name == "Snoring" and SNORING_FIXED_AXIS_FROM_RECORDING:
@@ -6385,9 +6602,8 @@ class SleepMonitorChart(QWidget):
                 # Step the floor down in 10s (68 -> 60, 21 -> 20); a recorded 0 goes to 0.
                 fixed_low = max(float(SPO2_ARTIFACT_FLOOR), np.floor(lowest / 10.0) * 10.0) if lowest > 0 else float(SPO2_ARTIFACT_FLOOR)
                 fixed_low = min(fixed_low, float(SPO2_FIXED_AXIS[0]))
-            room = float(SPO2_LABEL_ROOM_FRACTION)
-            if 0.0 < room < 0.6:
-                fixed_high = (fixed_high - room * fixed_low) / (1.0 - room)
+            # Fixed pixel gap above 100 (room for the value numbers).
+            fixed_high = self._view_high_with_gap(plot_widget, fixed_low, fixed_high)
             plot_widget.stable_y_range = (fixed_low, fixed_high)
             plot_widget.stable_y_range_offset = float(getattr(self, "current_time_offset", 0.0) or 0.0)
             try:
@@ -6398,35 +6614,6 @@ class SleepMonitorChart(QWidget):
                 pass
             self._lock_auto_axis(plot_widget, fixed_low, fixed_high)
             self._pin_spo2_ticks(plot_widget, fixed_low, fixed_high)
-            return
-
-        if chart_name == "Pulse" and PULSE_FIXED_AXIS is not None:
-            fixed_low, fixed_high = float(PULSE_FIXED_AXIS[0]), float(PULSE_FIXED_AXIS[1])
-            drawn = np.asarray(y_values, dtype=float).reshape(-1)
-            drawn = drawn[np.isfinite(drawn)]
-            if drawn.size:
-                lowest, highest = float(drawn.min()), float(drawn.max())
-                if lowest < fixed_low:
-                    fixed_low = 0.0 if lowest <= 0 else min(fixed_low, np.floor(lowest / 10.0) * 10.0)
-                if highest > fixed_high:
-                    fixed_high = np.ceil(highest / 20.0) * 20.0
-                if PULSE_LABELS_ENABLED:
-                    # The numbers are drawn above the trace: keep the same free share
-                    # of the plot above the highest pulse as SpO2 does.
-                    room = float(SPO2_LABEL_ROOM_FRACTION)
-                    if 0.0 < room < 0.6 and highest > fixed_low:
-                        needed = fixed_low + (highest - fixed_low) / (1.0 - room)
-                        fixed_high = max(fixed_high, np.ceil(needed / 20.0) * 20.0)
-            plot_widget.stable_y_range = (fixed_low, fixed_high)
-            plot_widget.stable_y_range_offset = float(getattr(self, "current_time_offset", 0.0) or 0.0)
-            try:
-                view_low, view_high = plot_widget.getViewBox().viewRange()[1]
-                if abs(float(view_low) - fixed_low) < 1e-6 and abs(float(view_high) - fixed_high) < 1e-6:
-                    return
-            except Exception:
-                pass
-            self._lock_auto_axis(plot_widget, fixed_low, fixed_high)
-            self._pin_axis_tick_spacing(plot_widget, fixed_low, fixed_high)
             return
 
         hold_map = self._axis_hold_map()
@@ -6881,19 +7068,15 @@ class SleepMonitorChart(QWidget):
             # Let the existing loader report malformed/unreadable files.
             raw_duration_sec = 0.0
 
-        # Temporarily disabled: allow recordings shorter than one hour to load
-        # and plot. Restore this guard if the one-hour minimum is needed again.
-        # if 0.0 < raw_duration_sec < MIN_UPLOAD_RECORDING_DURATION_SEC:
-        #     self.last_load_rejected_for_short_duration = True
-        #     show_styled_warning(
-        #         self,
-        #         "Insufficient Data",
-        #         "The data was not loaded because the recording is shorter than 1 hour.\n\n"
-        #         "Minimum required time: 1 hour\n\n"
-        #         "Please select a recording containing at least 1 hour of data.",
-        #         button_text="OK",
-        #     )
-        #     return np.array([]), {}, False
+        self.last_load_rejection_message = ""
+        if raw_duration_sec > 0.0 and raw_duration_sec + 1e-6 < MIN_RECORDING_SECONDS:
+            # Too short: nothing is loaded or detected; whatever was open stays open.
+            self.last_load_rejected_for_short_duration = True
+            self.last_load_rejection_message = (
+                f"Recording is too short: {raw_duration_sec / 60.0:.1f} minutes. "
+                f"At least {MIN_RECORDING_SECONDS / 60.0:g} minutes of recording are required."
+            )
+            return np.array([]), {}, True
 
         self._pending_focus_first_event = float(padding_seconds) if focus_first_event else None
         self._pending_detection_result = None
@@ -7714,7 +7897,6 @@ class SleepMonitorChart(QWidget):
         self.refresh_charts()
         self._sync_auto_detected_selections_into_overlays()
         self.render_dynamic_selections()
-        self._last_events_signature = None
         self.emit_detected_events_panel()
         self.update_detection_summary_label()
 
@@ -7772,7 +7954,6 @@ class SleepMonitorChart(QWidget):
                 self.airflow_detected_events = self._compute_fallback_navigation_events()
             except Exception as fallback_error:
                 pass
-        self._last_events_signature = None
         self.emit_detected_events_panel()
         self.update_detection_summary_label()
 
@@ -8456,7 +8637,7 @@ class SleepMonitorChart(QWidget):
             if samples_per_second < self.DISPLAY_HOLD_BELOW_HZ:
                 # 1 Hz SD readings: exact flat steps (see _step_display_window).
                 step_source = self._cached_slow_display(
-                    "spo2", display_spo2, self._smooth_slow_channel_for_display)
+                    "spo2", display_spo2, self._copy_slow_channel_for_display)
                 window_time, window_spo2 = self._step_display_window(
                     step_source, samples_per_second, time_window_seconds, time_offset)
                 window_time, window_spo2 = self._prepare_plot_data_for_window(
@@ -8466,7 +8647,7 @@ class SleepMonitorChart(QWidget):
                 end_sample = min(len(display_spo2), start_sample + expected_samples + 2)
                 window_spo2 = display_spo2[start_sample:end_sample]
                 num_samples = len(window_spo2)
-                window_spo2 = self._smooth_slow_channel_for_display(window_spo2)
+                window_spo2 = np.asarray(window_spo2, dtype=float).copy()
                 window_time = (
                     (start_sample + np.arange(num_samples, dtype=float)) / samples_per_second
                     - float(time_offset)
@@ -8481,16 +8662,15 @@ class SleepMonitorChart(QWidget):
             if num_samples == 0:
                 return np.array([]), np.array([])
 
-            # The raw no-signal mask is restored below after every display-only
-            # smoothing/bridging operation has finished.
+            # The display-only no-signal mask is already applied by
+            # _spo2_display_full; report calculations separately exclude it.
 
         num_samples = len(window_spo2)
         if num_samples == 0:
             return np.array([]), np.array([])
 
-        # Do not restore raw zero samples here: zero is a no-signal sentinel.
-        # ``_spo2_display_full`` has already converted it to the preceding
-        # valid reading, so graph values and report calculations agree.
+        # Keep the display's short-gap hold behavior. Report calculations use
+        # the preserved analysis signal and exclude zero intervals separately.
         self.calculate_spo2_statistics(window_spo2)
 
         pass
@@ -8875,6 +9055,9 @@ class SleepMonitorChart(QWidget):
             return
 
         spo2_array = np.asarray(spo2_data, dtype=float).reshape(-1)
+        spo2_array = np.where(
+            np.isfinite(spo2_array) & (spo2_array > 100.0), 100.0, spo2_array
+        )
         spo2_array = np.where(spo2_array == 0.0, np.nan, spo2_array)
         finite_mask = np.isfinite(spo2_array)
         if not np.any(finite_mask):
@@ -9159,6 +9342,8 @@ class SleepMonitorChart(QWidget):
             if container.is_resizing:
                 container.is_resizing = False
                 resize_grip.update()
+                QTimer.singleShot(0, lambda: self._refit_value_axis_after_resize(
+                    getattr(container, "plot_widget", None)))
                 event.accept()
 
         def grip_double_click(event):
@@ -9171,6 +9356,8 @@ class SleepMonitorChart(QWidget):
             container.setMaximumHeight(target)
             container.updateGeometry()
             self.charts_widget.updateGeometry()
+            QTimer.singleShot(0, lambda: self._refit_value_axis_after_resize(
+                getattr(container, "plot_widget", None)))
             event.accept()
 
         def grip_enter(event):
@@ -9298,7 +9485,16 @@ class SleepMonitorChart(QWidget):
             plot_widget.zoom_y_min_limit = initial_y_min
             plot_widget.zoom_y_max_limit = initial_y_max
             base_y_span = max(float(initial_y_max) - float(initial_y_min), 1e-6)
-            plot_widget.zoom_y_min_span = max(base_y_span * 0.5, 1.0)
+            # Oximetry is measured in whole percentage points. A 50% minimum
+            # span (the generic fixed-axis default) makes SpO2 zoom feel as if
+            # it barely responds and can make nearby readings hard to inspect.
+            # Let the user zoom into a 5-point band while keeping the normal
+            # clinical bounds and the recorded samples unchanged.
+            plot_widget.zoom_y_min_span = (
+                min(base_y_span, 5.0)
+                if signal_name.strip() == "SpO2"
+                else max(base_y_span * 0.5, 1.0)
+            )
             plot_widget.zoom_y_max_span = base_y_span
             
         # Set X-axis to show time values based on current time window
@@ -9731,12 +9927,18 @@ class SleepMonitorChart(QWidget):
     
     def zoom_vertical(self, plot_widget, zoom_factor):
         """Zoom in/out vertically on the plot"""
+        chart_name = getattr(plot_widget, 'chart_name', '')
+        if chart_name.strip() == "SpO2" and not hasattr(plot_widget, "axis_properties"):
+            self._zoom_spo2_step(plot_widget, zoom_in=zoom_factor < 1.0)
+            return
+
         # Get current Y range
         current_range = plot_widget.getViewBox().viewRange()
         y_min, y_max = current_range[1]
         
         # Anchor zoom around the visible waveform strip instead of empty space.
         center = (y_min + y_max) / 2
+        visible_y = np.array([], dtype=float)
         if hasattr(plot_widget, 'plot_curve'):
             x_data, y_data = plot_widget.plot_curve.getData()
             if x_data is not None and y_data is not None:
@@ -9775,6 +9977,11 @@ class SleepMonitorChart(QWidget):
             y_min_limit,
             y_max_limit,
         )
+        # Zooming out must never push visible Pulse samples outside the plot.
+        if chart_name.strip() == "Pulse" and visible_y.size:
+            pad = 0.05 * (new_y_max - new_y_min)
+            new_y_min = min(new_y_min, float(visible_y.min()) - pad)
+            new_y_max = max(new_y_max, float(visible_y.max()) + pad)
             
         try:
             plot_widget.setYRange(new_y_min, new_y_max)
@@ -9788,10 +9995,14 @@ class SleepMonitorChart(QWidget):
             plot_widget.zoom_y_range = (new_y_min, new_y_max)
             pass
 
+        self._release_core_ticks(plot_widget)
         self._pin_axis_tick_spacing(plot_widget, new_y_min, new_y_max)
 
     def zoom_vertical_at_ratio(self, plot_widget, zoom_factor, anchor_ratio):
         """Zoom vertically while keeping the chosen relative Y position visually anchored."""
+        if str(getattr(plot_widget, 'chart_name', '')).strip() == "SpO2" and not hasattr(plot_widget, "axis_properties"):
+            self._zoom_spo2_step(plot_widget, zoom_in=zoom_factor < 1.0)
+            return
         current_range = plot_widget.getViewBox().viewRange()
         y_min, y_max = current_range[1]
         current_range_size = y_max - y_min
@@ -9813,6 +10024,12 @@ class SleepMonitorChart(QWidget):
             y_min_limit,
             y_max_limit,
         )
+        if chart_name.strip() == "Pulse":
+            visible_y = self._visible_curve_values(plot_widget)
+            if visible_y.size:
+                pad = 0.05 * (new_y_max - new_y_min)
+                new_y_min = min(new_y_min, float(visible_y.min()) - pad)
+                new_y_max = max(new_y_max, float(visible_y.max()) + pad)
 
         try:
             plot_widget.setYRange(new_y_min, new_y_max)
@@ -9820,6 +10037,7 @@ class SleepMonitorChart(QWidget):
             plot_widget.setRange(yRange=[new_y_min, new_y_max])
 
         plot_widget.zoom_y_range = (new_y_min, new_y_max)
+        self._release_core_ticks(plot_widget)
         self._pin_axis_tick_spacing(plot_widget, new_y_min, new_y_max)
         pass
 
@@ -9924,7 +10142,9 @@ class SleepMonitorChart(QWidget):
                     properties.get("high_value", default_max),
                 )
             elif clean_name == "Pulse":
-                self._apply_dropout_axis(plot_widget, clean_name, reset_y)
+                self._clear_axis_hold(clean_name)
+                plot_widget.stable_y_range = None
+                self._apply_windowed_auto_axis(plot_widget, clean_name, reset_y)
             else:
                 y_min, y_max = SIGNAL_Y_RANGES.get(clean_name, (0, 100))
                 self._set_y_view(plot_widget, y_min, y_max)
@@ -10435,7 +10655,12 @@ class SleepMonitorChart(QWidget):
 
         # Every number sits just above the trace and moves with it ("trace"), or all of
         # them share one constant-height row near the top of the plot ("row").
-        offset_above = 0.35
+        # Scale the label gap with the visible range so zooming keeps it readable.
+        try:
+            _view_low, _view_high = plot_widget.getViewBox().viewRange()[1]
+            offset_above = 0.02 * (float(_view_high) - float(_view_low))
+        except Exception:
+            offset_above = 0.35
         row_y = None
         if str(position).strip().lower() == "row":
             try:
