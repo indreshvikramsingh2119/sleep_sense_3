@@ -44,6 +44,8 @@ except ImportError:  # pragma: no cover - exercised only without SD support.
     sd_record_reader = None
 
 MASTER_CHANNEL = "airflow"
+# Product rule: a recording must be at least one hour long to be analysed.
+MIN_RECORDING_SECONDS = 60.0 * 60.0
 _RECORDING_CACHE: dict[str, Any] = {"key": None, "value": None, "value_recorded": None}
 _RECORDING_LOCK = threading.RLock()
 
@@ -211,6 +213,34 @@ def load_sleep_recording(path: str | Path, *, interpolate_signals: bool = True,
         f"Unsupported recording format: {path.name}. "
         "Only binary SD recordings with a valid sync marker/CRC are supported."
     )
+
+
+def recording_duration_seconds(recording: dict[str, Any]) -> float:
+    """Length of the untrimmed recording in seconds (first to last master sample, inclusive)."""
+    master = recording.get("master_channel", MASTER_CHANNEL)
+    master_time = np.asarray(
+        recording.get("time", recording.get("times", {}).get(master, [])), dtype=float
+    ).reshape(-1)
+    finite_time = master_time[np.isfinite(master_time)]
+    if finite_time.size < 2:
+        return 0.0
+    rate = float(recording.get("sample_rates", {}).get(master, 0.0) or 0.0)
+    sample_period = 1.0 / rate if rate > 0 else 0.0
+    return float(finite_time[-1] - finite_time[0]) + sample_period
+
+
+def require_minimum_recording(
+    recording: dict[str, Any],
+    minimum_seconds: float = MIN_RECORDING_SECONDS,
+) -> float:
+    """Raise ValueError when the recording is shorter than the minimum; return its duration."""
+    duration = recording_duration_seconds(recording)
+    if duration + 1e-6 < float(minimum_seconds):
+        raise ValueError(
+            f"Recording is too short: {duration / 60.0:.1f} minutes. "
+            f"At least {float(minimum_seconds) / 60.0:g} minutes of recording are required."
+        )
+    return duration
 
 
 def trim_recording_edges(
@@ -406,6 +436,9 @@ def load_sleep_recording_frame(recording_path: str | Path, *, interpolate_signal
         path, interpolate_signals=interpolate_signals,
         preserve_recorded_airflow=preserve_recorded_airflow,
     )
+    # Same rule as the dashboard loader: only recordings of at least one hour
+    # are analysed, and the requested edge trim is always applied.
+    require_minimum_recording(recording)
     recording = trim_recording_edges(
         recording,
         start_seconds=trim_start_seconds,

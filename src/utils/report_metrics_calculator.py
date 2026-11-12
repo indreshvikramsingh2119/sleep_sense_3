@@ -43,6 +43,7 @@ except Exception as import_error:  # pragma: no cover - defensive fallback
     DESAT_SCORER_IMPORT_ERROR = str(import_error)
 
 from .sample_rate import DEFAULT_SAMPLE_RATE_HZ
+from .recording_exclusions import exclusion_summary
 from .runtime_config import get_configured_path
 
 DEFAULT_SNORING_THRESHOLD = 5.0
@@ -65,6 +66,9 @@ HB_WINDOW_MIN_LEN_SEC = 20
 HB_WINDOW_MAX_LEN_SEC = 120
 HB_WINDOW_MIN_START_SEC = -30
 HB_FALLBACK_WINDOW_SEC = (-15, 45)
+HB_MAX_SPO2_HOLD_SEC = 30.0  # longer SpO2 dropouts are not held/filled for HB
+HB_ENSEMBLE_MIN_DIP_PCT = 1.0  # averaged curve must dip at least this much to define the window
+HB_PEAK_RIPPLE_TOLERANCE_PCT = 0.15  # ripples smaller than this do not end the peak search
 DESATURATION_EVENT_DROP_PCT = HYPOXIC_BURDEN_MIN_DROP_PCT
 DESATURATION_EVENT_THRESHOLD_SPO2 = HYPOXIC_BURDEN_RECOVERY_THRESHOLD
 MIN_VALID_SPO2_PCT = 70.0
@@ -286,7 +290,7 @@ def _filter_valid_spo2_samples(spo2_values: Any, step_seconds: float) -> tuple[n
 
     artifact_mask = np.isfinite(raw_spo2) & (raw_spo2 >= MIN_VALID_SPO2_PCT) & (raw_spo2 <= MAX_VALID_SPO2_PCT)
     valid_spo2 = raw_spo2[artifact_mask]
-    raw_sample_count = int(raw_spo2.size)
+    raw_sample_count = int(raw_spo2.size - np.count_nonzero(np.isfinite(raw_spo2) & (raw_spo2 == 0.0)))
     valid_sample_count = int(valid_spo2.size)
     valid_ratio = float(valid_sample_count / raw_sample_count) if raw_sample_count > 0 else 0.0
     valid_duration_sec = float(valid_sample_count * max(float(step_seconds), 0.0))
@@ -320,6 +324,55 @@ def _filter_valid_spo2_samples(spo2_values: Any, step_seconds: float) -> tuple[n
         )
         return valid_spo2, quality
     return valid_spo2, quality
+
+
+def _spo2_zero_exclusion(
+    spo2_values: Any,
+    step_seconds: float,
+    time_values: Any = None,
+) -> Dict[str, Any]:
+    """Describe zero-SpO2 intervals without filling them into adjacent readings."""
+    values = np.asarray(spo2_values if spo2_values is not None else [], dtype=float).reshape(-1)
+    times = np.asarray(time_values if time_values is not None else [], dtype=float).reshape(-1)
+    try:
+        step = float(step_seconds)
+    except (TypeError, ValueError):
+        step = 1.0
+    if not np.isfinite(step) or step <= 0:
+        step = 1.0
+    if times.size != values.size or not np.all(np.isfinite(times)) or np.any(np.diff(times) <= 0):
+        times = np.arange(values.size, dtype=float) * step
+    return exclusion_summary(times, values, sample_rate_hz=1.0 / step)
+
+
+def _mask_excluded_intervals(
+    values: Any,
+    step_seconds: float,
+    segments: Iterable[Dict[str, Any]],
+    time_values: Any = None,
+) -> np.ndarray:
+    """Set samples whose timestamps fall in excluded intervals to NaN."""
+    signal = np.asarray(values if values is not None else [], dtype=float).reshape(-1).copy()
+    if signal.size == 0:
+        return signal
+    times = np.asarray(time_values if time_values is not None else [], dtype=float).reshape(-1)
+    if times.size != signal.size or not np.all(np.isfinite(times)):
+        try:
+            step = float(step_seconds)
+        except (TypeError, ValueError):
+            step = 1.0
+        if not np.isfinite(step) or step <= 0:
+            step = 1.0
+        times = np.arange(signal.size, dtype=float) * step
+    for segment in segments:
+        try:
+            start = float(segment["start_sec"])
+            end = float(segment["end_sec"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end > start:
+            signal[(times >= start) & (times < end)] = np.nan
+    return signal
 
 
 def _bridge_zero_gaps(
@@ -450,7 +503,9 @@ def calculate_hypoxic_burden_metrics(
 
     # aligned.size, not valid_spo2.size: valid_spo2 has artifact samples removed,
     # and shrinking the denominator would inflate every per-hour index.
-    sleep_duration_hours = float((aligned.size * float(step_seconds)) / 3600.0) if step_seconds > 0 else 0.0
+    zero_sample_count = int(np.count_nonzero(np.isfinite(event_series) & (event_series == 0.0)))
+    analysed_sample_count = max(0, int(aligned.size) - zero_sample_count)
+    sleep_duration_hours = float((analysed_sample_count * float(step_seconds)) / 3600.0) if step_seconds > 0 else 0.0
     desaturation_index = float(total_count_event / sleep_duration_hours) if sleep_duration_hours > 0 else 0.0
     hb_index = float(hypoxic_burden / sleep_duration_hours) if sleep_duration_hours > 0 else 0.0
 
@@ -472,19 +527,99 @@ def calculate_hypoxic_burden_metrics(
     return quality
 
 
-def _published_hypoxic_burden(spo2: Any, detected_events: Any, hours: float, valid_mask: Any = None) -> Dict[str, Any]:
+def _hb_event_window(x: np.ndarray, center: int, pre: int, post: int) -> np.ndarray:
+    """Return x[center-pre : center+post+1] at a fixed length of pre+post+1.
+
+    Samples before the start or after the end of the recording are NaN, so
+    windows of events near a recording edge can be stacked with the others.
+    """
+    out = np.full(pre + post + 1, np.nan, dtype=float)
+    lo, hi = center - pre, center + post + 1
+    src_lo, src_hi = max(lo, 0), min(hi, x.size)
+    if src_hi > src_lo:
+        out[src_lo - lo:src_hi - lo] = x[src_lo:src_hi]
+    return out
+
+
+def _hb_time_axis(spo2_time: Any, size: int) -> Optional[np.ndarray]:
+    """Return the SpO2 time axis when it can be used for lookups, else None."""
+    if spo2_time is None:
+        return None
+    t = np.asarray(spo2_time, dtype=float).reshape(-1)
+    if t.size != size or size < 2 or not np.all(np.isfinite(t)) or np.any(np.diff(t) <= 0):
+        return None
+    return t
+
+
+def _hb_sample_index(second: int, t: Optional[np.ndarray], size: int) -> Optional[int]:
+    """Index of the SpO2 sample recorded at ``second``; None when outside the recording.
+
+    Without a time axis the second IS the index (1 Hz, no missing records).
+    With one, the nearest recorded sample is used, so a dropped SD record
+    does not shift every later event by one second.
+    """
+    if t is None:
+        return second if 0 <= second < size else None
+    if second < t[0] - 0.5 or second > t[-1] + 0.5:
+        return None
+    idx = int(np.searchsorted(t, second, side="left"))
+    if idx >= size or (idx > 0 and second - t[idx - 1] < t[idx] - second):
+        idx -= 1
+    return idx
+
+
+def _hb_search_window(avg: np.ndarray, pre: int) -> tuple[Optional[tuple[int, int]], str]:
+    """Search window from the event-end aligned ensemble average.
+
+    The nadir is searched in the expected oximeter lag (0..40 s after event
+    end). The window runs between the two peaks that surround that nadir
+    (walking outwards and ignoring small ripples). It is only used when the
+    averaged curve really dips; a flat curve has no event-linked pattern and
+    its "peaks" are noise, so the standard window is used instead.
+    Returns (window or None, status).
+    """
+    filled = np.nan_to_num(avg, nan=float(np.nanmean(avg)))
+    curve = np.convolve(np.pad(filled, 2, mode="edge"), np.ones(5) / 5, mode="valid")
+    nadir = pre + int(np.argmin(curve[pre:pre + 41]))
+
+    def peak(step: int, limit: int) -> int:
+        best = index = nadir
+        while (index + step - limit) * step <= 0 and 0 <= index + step < curve.size:
+            index += step
+            if curve[index] > curve[best]:
+                best = index
+            elif curve[best] - curve[index] > HB_PEAK_RIPPLE_TOLERANCE_PCT:
+                break
+        return best
+
+    left = peak(-1, pre + HB_WINDOW_MIN_START_SEC)
+    right = peak(+1, min(curve.size - 1, left + HB_WINDOW_MAX_LEN_SEC))
+    dip = float(min(curve[left], curve[right]) - curve[nadir])
+    candidate = (left - pre, right - pre)
+    if dip < HB_ENSEMBLE_MIN_DIP_PCT:
+        return None, f"standard window (no clear event-linked dip in the averaged curve: {dip:.1f}%)"
+    if candidate[1] - candidate[0] < HB_WINDOW_MIN_LEN_SEC:
+        return None, f"standard window (ensemble window {candidate[0]}..{candidate[1]} s too short)"
+    return candidate, "ensemble"
+
+
+def _published_hypoxic_burden(spo2: Any, detected_events: Any, hours: float, valid_mask: Any = None,
+                              spo2_time: Any = None) -> Dict[str, Any]:
     """Azarbarzin-style event-linked HB with guarded window and union overlap."""
     x = np.asarray(spo2 if spo2 is not None else [], dtype=float).reshape(-1)
     mask = None if valid_mask is None else np.asarray(valid_mask, dtype=bool).reshape(-1)
+    t = _hb_time_axis(spo2_time, x.size)
     events = []
     for event in detected_events or []:
         label = str(event.get("final_label") or event.get("rule_label") or "").upper().replace(" ", "_")
         if label in PUBLISHED_HB_EVENT_TYPES:
             try:
-                end = int(round(float(event.get("end_sec"))))
-            except (TypeError, ValueError):
+                end = _hb_sample_index(int(round(float(event.get("end_sec")))), t, x.size)
+            except (TypeError, ValueError, OverflowError):
                 continue
-            if 100 <= end < x.size and (mask is None or end >= mask.size or mask[end]):
+            # Events in the first 100 s are kept; the baseline rule below
+            # (at least 50 valid pre-event samples) decides if they count.
+            if end is not None and (mask is None or end >= mask.size or mask[end]):
                 events.append(end)
     events = sorted(set(events))
     if not events:
@@ -499,32 +634,30 @@ def _published_hypoxic_burden(spo2: Any, detected_events: Any, hours: float, val
             "event_count": 0,
         }
 
-    # Event-end aligned ensemble average. The nadir is constrained to the
-    # expected oximeter lag (0..40 s); the surrounding maxima define the window.
+    # Event-end aligned ensemble average; _hb_search_window turns it into the
+    # search window (or keeps the standard window when there is no clear dip).
     pre, post = 100, 100
-    usable = [x[e - pre:e + post + 1] for e in events
-              if np.isfinite(x[e - pre:e + post + 1]).mean() >= 0.7]
+    windows = [_hb_event_window(x, e, pre, post) for e in events]
+    # Edge events remain eligible for their per-event burden below, but a
+    # truncated pre/post window must not influence the ensemble template.
+    usable = [
+        w for e, w in zip(events, windows)
+        if e - pre >= 0
+        and e + post < x.size
+        and np.isfinite(w).mean() >= 0.7
+    ]
     window = HB_FALLBACK_WINDOW_SEC
-    window_status = "fallback (fewer than 5 usable events)"
+    window_status = "standard window (fewer than 5 usable events)"
     if len(usable) >= 5:
-        avg = np.nanmean(np.vstack(usable), axis=0)
-        avg = np.convolve(np.nan_to_num(avg, nan=np.nanmean(avg)), np.ones(3) / 3, mode="same")
-        lo, hi = pre, pre + 40
-        nadir = lo + int(np.nanargmin(avg[lo:hi + 1]))
-        left = int(np.nanargmax(avg[:nadir + 1]))
-        right = nadir + int(np.nanargmax(avg[nadir:]))
-        candidate = (left - pre, right - pre)
-        length = candidate[1] - candidate[0]
-        if HB_WINDOW_MIN_LEN_SEC <= length <= HB_WINDOW_MAX_LEN_SEC and candidate[0] >= HB_WINDOW_MIN_START_SEC:
-            window, window_status = candidate, "ensemble"
-        else:
-            window_status = f"fallback (ensemble window {candidate[0]}..{candidate[1]} s rejected)"
+        found, window_status = _hb_search_window(np.nanmean(np.vstack(usable), axis=0), pre)
+        if found is not None:
+            window = found
 
     union = np.zeros(x.size, dtype=float)
     total_sum = 0.0
     used = 0
     for end in events:
-        baseline_values = x[end - 100:end + 1]
+        baseline_values = _hb_event_window(x, end, 100, 0)
         if np.isfinite(baseline_values).sum() < 50:
             continue
         baseline = float(np.nanmax(baseline_values))
@@ -878,9 +1011,53 @@ def calculate_sleep_metrics(
     actual_sample_rate_hz = _sample_rate_hz(time_array, sample_rate_hz)
     step_seconds = 1.0 / actual_sample_rate_hz if actual_sample_rate_hz > 0 else _time_step_seconds(time_array, sample_rate_hz)
 
-    spo2 = _first_signal(signals, ("spo2", "SpO2"))
-    pulse = _first_signal(signals, ("pulse", "Pulse", "hr", "heart_rate"))
-    snoring = _first_signal(signals, ("snoring", "Snoring"))
+    spo2_name = next((name for name in ("spo2", "SpO2") if name in signals and signals[name] is not None), None)
+    pulse_name = next((name for name in ("pulse", "Pulse", "hr", "heart_rate") if name in signals and signals[name] is not None), None)
+    snoring_name = next((name for name in ("snoring", "Snoring") if name in signals and signals[name] is not None), None)
+    spo2 = np.asarray(signals.get(spo2_name, []) if spo2_name else [], dtype=float).reshape(-1)
+    # Treat occasional above-range device readings as 100%; all other existing
+    # validity and no-signal handling stays unchanged.
+    spo2 = np.where(
+        np.isfinite(spo2) & (spo2 > MAX_VALID_SPO2_PCT),
+        MAX_VALID_SPO2_PCT,
+        spo2,
+    )
+    pulse = np.asarray(signals.get(pulse_name, []) if pulse_name else [], dtype=float).reshape(-1)
+    snoring = np.asarray(signals.get(snoring_name, []) if snoring_name else [], dtype=float).reshape(-1)
+
+    def _channel_step(name: str) -> float:
+        if sample_rates and name in sample_rates:
+            try:
+                rate = float(sample_rates[name])
+                if rate > 0:
+                    return 1.0 / rate
+            except (TypeError, ValueError):
+                pass
+        if channel_times and name in channel_times:
+            step = _time_step_seconds(channel_times[name], 0.0)
+            if step > 0:
+                return step
+        return step_seconds
+
+    spo2_step_seconds = _channel_step("spo2")
+    snoring_step_seconds = _channel_step("snoring")
+    spo2_zero_exclusion = _spo2_zero_exclusion(
+        spo2,
+        spo2_step_seconds,
+        (channel_times or {}).get("spo2"),
+    )
+    spo2_zero_segments = list(spo2_zero_exclusion.get("excluded_segments", []))
+    spo2_zero_duration_sec = float(spo2_zero_exclusion.get("excluded_duration_sec", 0.0))
+    # Keep SpO2 zero readings invalid in every metric; do not bridge them using
+    # a neighbouring saturation. Exclude those same intervals from other
+    # report calculations as well.
+    pulse = _bridge_zero_gaps(pulse, _channel_step("pulse"), max_gap_seconds=60.0)
+    pulse = _mask_excluded_intervals(
+        pulse, _channel_step("pulse"), spo2_zero_segments, (channel_times or {}).get("pulse")
+    )
+    snoring = _mask_excluded_intervals(
+        snoring, snoring_step_seconds, spo2_zero_segments, (channel_times or {}).get("snoring")
+    )
 
     def _channel_step(name: str) -> float:
         if sample_rates and name in sample_rates:
@@ -900,7 +1077,7 @@ def calculate_sleep_metrics(
     snoring_step_seconds = _channel_step("snoring")
     # Zero is an invalid SpO2 sentinel. Hold the preceding valid saturation
     # through every subsequent zero run, exactly as the dashboard does.
-    spo2 = _bridge_zero_gaps(spo2, spo2_step_seconds)
+    spo2 = _bridge_zero_gaps(spo2, spo2_step_seconds, max_gap_seconds=HB_MAX_SPO2_HOLD_SEC)
     pulse = _bridge_zero_gaps(pulse, _channel_step("pulse"), max_gap_seconds=60.0)
 
     sleep_duration_sec = float(len(time_array) * step_seconds) if time_array.size else float(max(len(spo2), len(pulse), len(snoring)) * step_seconds)
@@ -943,9 +1120,10 @@ def calculate_sleep_metrics(
         duration_below_85_sec = float(np.sum(below_85)) * spo2_step_seconds
         duration_below_80_sec = float(np.sum(below_80)) * spo2_step_seconds
         valid_spo2_ratio_pct = float(hypoxic_metrics["valid_ratio"] * 100.0)
-        duration_below_90_pct = (duration_below_90_sec / sleep_duration_sec) * 100.0 if sleep_duration_sec > 0 else 0.0
-        duration_below_85_pct = (duration_below_85_sec / sleep_duration_sec) * 100.0 if sleep_duration_sec > 0 else 0.0
-        duration_below_80_pct = (duration_below_80_sec / sleep_duration_sec) * 100.0 if sleep_duration_sec > 0 else 0.0
+        spo2_analysis_sec = max(0.0, float(spo2.size * spo2_step_seconds) - spo2_zero_duration_sec)
+        duration_below_90_pct = (duration_below_90_sec / spo2_analysis_sec) * 100.0 if spo2_analysis_sec > 0 else 0.0
+        duration_below_85_pct = (duration_below_85_sec / spo2_analysis_sec) * 100.0 if spo2_analysis_sec > 0 else 0.0
+        duration_below_80_pct = (duration_below_80_sec / spo2_analysis_sec) * 100.0 if spo2_analysis_sec > 0 else 0.0
 
         oximetry = {
             "mean_spo2": float(np.mean(valid_spo2)),
@@ -977,6 +1155,8 @@ def calculate_sleep_metrics(
             "valid_spo2_ratio_display": f"{valid_spo2_ratio_pct:.0f}%",
             "valid_spo2_duration_sec": hypoxic_metrics["valid_duration_sec"],
             "valid_spo2_duration_display": _duration_text(hypoxic_metrics["valid_duration_sec"]),
+            "spo2_sensor_off_duration_sec": spo2_zero_duration_sec,
+            "spo2_sensor_off_duration_display": _duration_text(spo2_zero_duration_sec),
             "desat_max_sec": desat_max_sec,
             "desat_max_sec_display": _duration_text(desat_max_sec),
             "longest_duration_sec": hypoxic_metrics["longest_duration_sec"],
@@ -1042,6 +1222,8 @@ def calculate_sleep_metrics(
             "valid_spo2_ratio_display": f"{hypoxic_metrics['valid_ratio'] * 100.0:.0f}%",
             "valid_spo2_duration_sec": hypoxic_metrics["valid_duration_sec"],
             "valid_spo2_duration_display": _duration_text(hypoxic_metrics["valid_duration_sec"]),
+            "spo2_sensor_off_duration_sec": spo2_zero_duration_sec,
+            "spo2_sensor_off_duration_display": _duration_text(spo2_zero_duration_sec),
             "desat_max_sec": 0.0,
             "desat_max_sec_display": "0.0 sec",
             "longest_duration_sec": 0.0,
@@ -1176,6 +1358,9 @@ def calculate_sleep_metrics(
             "sleep_duration_display": _duration_text(sleep_duration_sec),
             "sample_count": int(max(len(time_array), len(spo2), len(pulse), len(snoring))),
             "time_step_sec": step_seconds,
+            "spo2_step_sec": spo2_step_seconds,
+            "spo2_zero_segments": spo2_zero_segments,
+            "spo2_zero_duration_sec": spo2_zero_duration_sec,
         },
         "oximetry": oximetry,
         "heart_rate": heart_rate,
@@ -1211,6 +1396,18 @@ def calculate_report_context(
     if sleep_duration_sec <= 0 and sample_count > 0 and sample_rate_hz > 0:
         sleep_duration_sec = float(sample_count / sample_rate_hz)
         sleep_hours = sleep_duration_sec / 3600.0 if sleep_duration_sec > 0 else 0.0
+
+    spo2_exclusion_values = signals.get("spo2")
+    if spo2_exclusion_values is None:
+        spo2_exclusion_values = signals.get("SpO2", [])
+    spo2_values_for_exclusion = np.asarray(spo2_exclusion_values, dtype=float).reshape(-1)
+    spo2_step_seconds = float(metadata.get("spo2_step_sec") or 0.0)
+    if spo2_step_seconds <= 0 and spo2_values_for_exclusion.size and sleep_duration_sec > 0:
+        spo2_step_seconds = sleep_duration_sec / float(spo2_values_for_exclusion.size)
+    if spo2_step_seconds <= 0:
+        spo2_step_seconds = 1.0 / max(sample_rate_hz, 1e-9)
+    spo2_zero_summary = _spo2_zero_exclusion(spo2_values_for_exclusion, spo2_step_seconds)
+    spo2_zero_segments = list(metadata.get("spo2_zero_segments") or spo2_zero_summary.get("excluded_segments", []))
 
     timestamp_raw = np.asarray(signals.get("timestamp_raw", []), dtype=float).reshape(-1)
     lights_off = _clock_time_text(timestamp_raw[0]) if timestamp_raw.size else "-"
@@ -1291,6 +1488,13 @@ def calculate_report_context(
         label = str(event.get("final_label") or event.get("rule_label") or "").upper()
         target_group = event_label_map.get(label)
         if not target_group:
+            continue
+        try:
+            event_start = float(event.get("start_sec", 0.0))
+            event_end = float(event.get("end_sec", event_start))
+        except (TypeError, ValueError):
+            continue
+        if any(event_start < off_end and event_end > off_start for off_start, off_end in off_intervals):
             continue
         grouped_events[target_group].append(event)
         if body_position.size and body_position_rate_hz > 0:
@@ -1405,7 +1609,7 @@ def calculate_report_context(
 
     group_counts = {
         row["name"]: int(row.get("count_display", 0) or 0)
-        for row in respiratory_rows
+        for row in respiratory_rows[:4]
     }
     dominant_group = max(group_counts, key=group_counts.get) if group_counts else "Obstructive Apneas"
     if total_index < 5.0:
@@ -1426,6 +1630,22 @@ def calculate_report_context(
     else:
         diagnosis = f"{_severity_from_ahi(total_index)} hypopnea-dominant sleep-disordered breathing detected."
 
+    # Apneas whose type the effort belt could not decide are listed as obstructive
+    # only by assumption (the detector marks them). When that is most of the apneas,
+    # the report must not claim an obstructive / central / mixed pattern.
+    def _apnea_type_assumed(event: Dict[str, Any]) -> bool:
+        if event.get("apnea_type_assumed"):
+            return True
+        notes = list(event.get("flags") or []) + list(event.get("evidence") or [])
+        return any("apnea type assumed" in str(note).lower() for note in notes)
+
+    apnea_events = [
+        event
+        for name in ("Obstructive Apneas", "Central Apneas", "Mixed Apneas")
+        for event in grouped_events[name]
+    ]
+    assumed_apnea_count = sum(1 for event in apnea_events if _apnea_type_assumed(event))
+    apnea_type_undetermined = bool(apnea_events) and assumed_apnea_count * 2 >= len(apnea_events)
     oximetry = dict(analysis_results.get("oximetry", {}) or {})
     # Reports use the event-linked published HB definition. Keep the other
     # oximetry metrics unchanged; only HB total/index are replaced here.
@@ -1435,23 +1655,46 @@ def calculate_report_context(
         signals.get("spo2", signals.get("SpO2", [])) if isinstance(signals, dict) else [],
         dtype=float,
     ).reshape(-1)
-    if report_spo2.size and detected_events and sleep_hours > 0:
-        report_spo2 = _bridge_zero_gaps(report_spo2, 1.0)
-        hb_valid = np.ones(report_spo2.size, dtype=bool)
-        for off_start, off_end in off_intervals:
-            hb_valid[max(0, int(off_start)):max(0, int(off_end))] = False
-        published_hb = _published_hypoxic_burden(
-            report_spo2, detected_events, index_hours, valid_mask=hb_valid)
-        oximetry["hypoxic_burden"] = published_hb["hypoxic_burden"]
-        oximetry["hypoxic_burden_display"] = f"{published_hb['hypoxic_burden']:.2f} %-min"
-        oximetry["hb_index"] = published_hb["hb_index"]
-        oximetry["hb_index_display"] = f"{published_hb['hb_index']:.1f} %min/h"
-        oximetry["hb_severity"] = _severity_from_hb_index(published_hb["hb_index"])
-        oximetry["hb_method"] = "Azarbarzin-style event-linked HB (overlap-corrected)"
-        oximetry["hb_search_window_sec"] = published_hb.get("window")
-        oximetry["hb_window_status"] = published_hb.get("window_status", "no usable events")
-        oximetry["hb_event_count"] = published_hb.get("event_count", 0)
-        oximetry["hb_total_sum_mode"] = published_hb.get("hb_total_sum_mode", 0.0)
+    if report_spo2.size and sleep_hours > 0:
+        try:
+            # SpO2's own time axis (when the caller supplies it) maps event
+            # seconds to samples; without it, second == sample index as before.
+            channel_times = psg_data.get("times") if isinstance(psg_data, dict) else None
+            spo2_time = _hb_time_axis(
+                channel_times.get("spo2") if isinstance(channel_times, dict) else None,
+                report_spo2.size,
+            )
+            report_spo2 = _bridge_zero_gaps(report_spo2, 1.0, max_gap_seconds=HB_MAX_SPO2_HOLD_SEC)
+            hb_valid = np.ones(report_spo2.size, dtype=bool)
+            for off_start, off_end in off_intervals:
+                if spo2_time is None:
+                    hb_valid[max(0, int(off_start)):max(0, int(off_end))] = False
+                else:
+                    hb_valid[int(np.searchsorted(spo2_time, int(off_start))):
+                             int(np.searchsorted(spo2_time, int(off_end)))] = False
+            published_hb = _published_hypoxic_burden(
+                report_spo2, detected_events, index_hours, valid_mask=hb_valid, spo2_time=spo2_time)
+            oximetry["hypoxic_burden"] = published_hb["hypoxic_burden"]
+            oximetry["hypoxic_burden_display"] = f"{published_hb['hypoxic_burden']:.2f} %-min"
+            oximetry["hb_index"] = published_hb["hb_index"]
+            oximetry["hb_index_display"] = f"{published_hb['hb_index']:.1f} %min/h"
+            oximetry["hb_severity"] = _severity_from_hb_index(published_hb["hb_index"])
+            oximetry["hb_method"] = "Azarbarzin-style event-linked HB (overlap-corrected)"
+            oximetry["hb_search_window_sec"] = published_hb.get("window")
+            oximetry["hb_window_status"] = published_hb.get("window_status", "no usable events")
+            oximetry["hb_event_count"] = published_hb.get("event_count", 0)
+            oximetry["hb_total_sum_mode"] = published_hb.get("hb_total_sum_mode", 0.0)
+        except Exception as hb_error:  # HB must never stop the whole report.
+            oximetry["hypoxic_burden"] = 0.0
+            oximetry["hypoxic_burden_display"] = "Not available"
+            oximetry["hb_index"] = 0.0
+            oximetry["hb_index_display"] = "Not available"
+            oximetry["hb_severity"] = "Not available"
+            oximetry["hb_method"] = "Azarbarzin-style event-linked HB (overlap-corrected)"
+            oximetry["hb_search_window_sec"] = None
+            oximetry["hb_window_status"] = f"failed: {type(hb_error).__name__}: {hb_error}"
+            oximetry["hb_event_count"] = 0
+            oximetry["hb_total_sum_mode"] = 0.0
     snoring = analysis_results.get("snoring", {}) or {}
     findings: list[str] = [
         f"Respiratory event index is {total_index:.1f} events/hour ({_severity_from_ahi(total_index)} severity)."
@@ -1459,6 +1702,11 @@ def calculate_report_context(
     if total_events > 0:
         findings.append(
             f"{total_events} respiratory events were detected; dominant class: {dominant_group}."
+        )
+    if assumed_apnea_count > 0:
+        findings.append(
+            f"{assumed_apnea_count} of {len(apnea_events)} apneas could not be typed from the effort belt; "
+            "they are listed as obstructive by assumption."
         )
     if oximetry.get("lowest_spo2") is not None:
         findings.append(

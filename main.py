@@ -39,16 +39,26 @@ def set_windows_app_id():
 
 set_windows_app_id()
 
-from PyQt5.QtWidgets import QApplication, QSplashScreen, QMessageBox
+from PyQt5.QtWidgets import QApplication, QSplashScreen, QMessageBox, QPushButton, QProxyStyle, QStyle
 from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QPen, QIcon, QLinearGradient, QPainterPath, QFontMetrics
 from PyQt5.QtCore import Qt, QTimer, QRectF
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 from src.utils.app_paths import get_resource_path
+from src.utils.app_version import APP_VERSION as APP_VERSION_STRING
 from src.utils.db_utils import init_db
 
 
 SINGLE_INSTANCE_SERVER = "SleepSenseApp"
 SINGLE_INSTANCE_MUTEX = r"Local\SleepSenseApp.SingleInstance.v3"
+
+
+class _ButtonFocusStyle(QProxyStyle):
+    """Keep Qt's dotted focus frame off buttons while preserving other focus cues."""
+
+    def drawPrimitive(self, element, option, painter, widget=None):
+        if element == QStyle.PE_FrameFocusRect and isinstance(widget, QPushButton):
+            return
+        super().drawPrimitive(element, option, painter, widget)
 
 
 def get_asset_path(relative_path):
@@ -61,7 +71,7 @@ class AnimatedSplash(QSplashScreen):
     3-step checklist + progress bar on the white bottom half.
     Steps: 1 = Initializing database, 2 = Loading dashboard, 3 = Ready
     """
-    APP_VERSION = "3.0"
+    APP_VERSION = APP_VERSION_STRING
     STEPS = ("Initializing database", "Loading dashboard", "Ready")
 
     NAVY = QColor("#1d3a6b")
@@ -72,7 +82,7 @@ class AnimatedSplash(QSplashScreen):
     LINE = QColor("#e5e7eb")
     FONT = "Segoe UI" if sys.platform.startswith("win") else "Helvetica Neue"
     WIDTH, HEIGHT = 760, 460
-    TOP_H = 250
+    TOP_H = 250 
 
     def __init__(self):
         super().__init__(QPixmap(), Qt.WindowStaysOnTopHint)
@@ -329,6 +339,7 @@ def main():
     configure_opengl_for_playback()
     app = QApplication(sys.argv)
     app.setApplicationName("Sleep Sense")
+    app.setStyle(_ButtonFocusStyle(app.style()))
 
     # --- Atomic single-instance ownership ---
     server = acquire_single_instance_server()

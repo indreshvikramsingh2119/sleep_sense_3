@@ -24,6 +24,7 @@ from PyQt5.QtCore import Qt, QUrl, QRegExp
 from PyQt5.QtGui import QTextDocument, QPixmap, QPainter, QColor, QPen, QRegExpValidator
 from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
 from .app_paths import get_resource_path as get_asset_path
+from .app_version import get_software_version
 
 _APP_ROOT = Path(__file__).resolve().parents[2]
 if str(_APP_ROOT) not in sys.path:
@@ -257,9 +258,7 @@ class ButtonFunctions:
         elif menu_type == 'help':
             menu.addAction('Clinical Guide', self.help_clinical_guide)
             menu.addAction('Patient instructions', self.help_patient_instructions)
-            menu.addAction('Program info', self.help_program_info)
-            menu.addAction('Recording info', self.help_recording_info)
-            menu.addAction('Device info', self.help_device_info)
+            menu.addAction('Info', self.help_program_info)
         
         # Show menu below the button with correct positioning
         button_rect = button.rect()
@@ -948,8 +947,11 @@ class ButtonFunctions:
         QMessageBox.information(self.parent, "Patient Instructions", "Patient instructions will be added here.")
     
     def help_program_info(self):
-        pass
-        QMessageBox.information(self.parent, "Program Info", "Program information will be added here.")
+        QMessageBox.information(
+            self.parent,
+            "Info",
+            f"Sleep Sense\nSoftware version: {get_software_version()}",
+        )
     
     def help_recording_info(self):
         pass
@@ -964,8 +966,11 @@ class ButtonFunctions:
         QMessageBox.information(self.parent, "Documentation", "Documentation will be added here.")
     
     def help_about(self):
-        pass
-        QMessageBox.information(self.parent, "About", "Sleep Sense application information will be added here.")
+        QMessageBox.information(
+            self.parent,
+            "About Sleep Sense",
+            f"Sleep Sense\nSoftware version: {get_software_version()}",
+        )
     
     def file_load_data(self):
         """Load PSG data from a binary recording using the file dialog."""
@@ -2318,9 +2323,9 @@ class AnalysisParametersDialog(QDialog):
                 defaults = {}
 
         hypopnea_percent = defaults.get("AASM_HYPOPNEA_DROP_PERCENT", 30.0)
-        # Keep 90 as the pending/displayed standard value.  The detector's
-        # currently applied value (75 by default) is intentionally untouched
-        # until the user accepts the parent dialog with OK.
+        # Keep 90 as the pending/displayed standard value. The detector's
+        # currently applied value is intentionally untouched until the user
+        # accepts the parent dialog with OK.
         apnea_percent = 90.0
         obstructive_effort_percent = float(defaults.get("OBSTRUCTIVE_APNEA_EFFORT_THRESHOLD", 0.20)) * 100.0
         central_effort_percent = float(defaults.get("CENTRAL_APNEA_EFFORT_THRESHOLD", 0.60)) * 100.0

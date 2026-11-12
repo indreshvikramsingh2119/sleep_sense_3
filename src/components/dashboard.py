@@ -81,7 +81,6 @@ INTERPRETATION_DATA = {
 MILD_APNEA_TEXT = "Findings are consistent with MILD SLEEP APNEA (REI 5-14.9)"
 MILD_FOLLOWUP_TEXT = "Schedule an in-lab study or repeat the home sleep apnea test if clinically indicated."
 CHECKMARK_ICON_PATH = get_asset_path("icons/iconmonstr-check-mark-1.svg").replace("\\", "/")
-MIN_REPORT_ANALYSIS_DURATION_SEC = 60.0 * 60.0
 
 
 def _create_screenshot_camera_icon():
@@ -1507,7 +1506,7 @@ class SleepSenseDashboard(QMainWindow):
             return
         self._set_patient_panel_collapsed(False)
         self.main_splitter.setSizes([
-            int(self._patient_panel_open_width or PATIENT_PANEL_OPEN_WIDTH),
+            PATIENT_PANEL_OPEN_WIDTH,
             1000,
         ])
 
@@ -2770,20 +2769,6 @@ class SleepSenseDashboard(QMainWindow):
             dialog.exec_()
             return
 
-        valid_duration_sec = self._report_valid_analysis_duration_sec()
-        # Temporarily disabled: allow reports for recordings with less than
-        # one hour of valid analysed data. Restore this guard if needed again.
-        # if valid_duration_sec < MIN_REPORT_ANALYSIS_DURATION_SEC:
-        #     show_styled_warning(
-        #         self,
-        #         "Insufficient Data",
-        #         "The uploaded data is too short to open the report.\n\n"
-        #         "Minimum required time: 1 hour\n\n"
-        #         "Please upload a recording containing at least 1 hour of valid analysed data.",
-        #         button_text="OK",
-        #     )
-        #     return
-        
         pass
         # Import the report generation function and PDF viewer
         from .medical_report_form import generate_sleep_report, PDFViewerWidget

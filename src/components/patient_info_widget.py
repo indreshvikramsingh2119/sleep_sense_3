@@ -25,15 +25,9 @@ except ImportError:
 
 
 def install_overlay_scrollbar(area, width=6, margin=3):
-    """Show the vertical scrollbar ON TOP of the right edge of ``area`` instead of beside it.
-
-    A normal "as needed" scrollbar takes its width from the viewport, so everything inside becomes narrower
-    (and its right border is cut off) the moment the content gets taller than the area, e.g. after loading a
-    recording with many events.  Here the viewport width never changes: the bar just floats over the right
-    gutter, and only while there is something to scroll.  Wheel / trackpad scrolling still works.
-    """
+    """Overlay a vertical scrollbar without shrinking the scroll area's viewport."""
     area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    inner = area.verticalScrollBar()          # keeps the real range/value even while it is hidden
+    inner = area.verticalScrollBar()
     bar = QScrollBar(Qt.Vertical, area)
     bar.setObjectName("overlayScrollBar")
     bar.setStyleSheet("""
@@ -87,6 +81,9 @@ class _DetectedEventDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         style_option = QStyleOptionViewItem(option)
         style_option.text = ""
+        # The default item-view focus state draws a dotted rectangle around
+        # the clicked row. Keep click-to-jump behavior without that outline.
+        style_option.state &= ~QStyle.State_HasFocus
         if option.widget is not None:
             option.widget.style().drawControl(
                 QStyle.CE_ItemViewItem, style_option, painter, option.widget
@@ -997,8 +994,12 @@ class PatientInfoWidget(QWidget):
                 if str(event.get("final_label") or event.get("rule_label") or "").upper() == selected_label
             ]
 
-        self.detected_count_label.setText(str(len(filtered_events)))
-        self.detected_count_label.setVisible(len(filtered_events) > 0)
+        scored_event_count = sum(
+            str(event.get("final_label") or event.get("rule_label") or "").upper() != "SENSOR_OFF"
+            for event in filtered_events
+        )
+        self.detected_count_label.setText(str(scored_event_count))
+        self.detected_count_label.setVisible(scored_event_count > 0)
         self.detected_events_list.setVisible(len(filtered_events) > 0)
         self.detected_events_list.clear()
 

@@ -1,5 +1,5 @@
 #define MyAppName "Sleep Sense"
-#define MyAppVersion "3.0.0"
+#define MyAppVersion "3.1.1"
 #define MyAppPublisher "Deckmount Electronics Pvt. Ltd."
 #define MyAppExeName "SleepSense.exe"
 
